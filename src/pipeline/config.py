@@ -14,11 +14,10 @@ class PipelineConfig:
     # Trickle server URLs
     subscribe_url: str = "http://0.0.0.0:3389/sample" ## localhost for testing
     publish_url: str = "http://127.0.0.1:3389/publish" ## localhost for testing
-
+    text_url: Optional[str] = "http://127.0.0.1:3389/subtitles"
     # For Docker, use the host's IP address
     # subscribe_url: str = "http://172.17.0.1:3389/sample"
     # publish_url: str = "http://172.17.0.1:3389/publish"
-    data_url: Optional[str] = None  # Optional for subtitle file posting
     
     # Transcription settings
     whisper_model: str = "medium"  # base, small, medium, large
@@ -36,7 +35,7 @@ class PipelineConfig:
     
     # Processing options
     hard_code_subtitles: str | bool = False  # True for hard, False for soft
-    enable_data_url: str | bool = False  # Toggle for subtitle file posting
+    enable_text_url: str | bool = True  # Toggle for subtitle file posting
     
     # Performance settings
     max_concurrent_segments: int = 3
@@ -48,7 +47,7 @@ class PipelineConfig:
         return cls(
             subscribe_url=os.getenv("SUBSCRIBE_URL", cls.subscribe_url),
             publish_url=os.getenv("PUBLISH_URL", cls.publish_url),
-            data_url=os.getenv("DATA_URL", cls.data_url),
+            text_url=os.getenv("TEXT_URL", cls.text_url),
             whisper_model=os.getenv("WHISPER_MODEL", cls.whisper_model),
             whisper_language=os.getenv("WHISPER_LANGUAGE", cls.whisper_language),
             whisper_device=os.getenv("WHISPER_DEVICE", cls.whisper_device),
@@ -60,7 +59,7 @@ class PipelineConfig:
             subtitle_background=os.getenv("SUBTITLE_BACKGROUND", cls.subtitle_background),
             subtitle_position=os.getenv("SUBTITLE_POSITION", cls.subtitle_position),
             hard_code_subtitles=os.getenv("HARD_CODE_SUBTITLES", (cls.hard_code_subtitles)),
-            enable_data_url=os.getenv("ENABLE_DATA_URL", str(cls.enable_data_url)),
+            enable_text_url=os.getenv("ENABLE_TEXT_URL", str(cls.enable_text_url)),
             max_concurrent_segments=int(os.getenv("MAX_CONCURRENT_SEGMENTS", cls.max_concurrent_segments)),
             audio_sample_rate=int(os.getenv("AUDIO_SAMPLE_RATE", cls.audio_sample_rate)),
         )

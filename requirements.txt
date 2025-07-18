@@ -10,6 +10,7 @@ coloredlogs==15.0.1
 ctranslate2==4.6.0
 dataclasses-json==0.6.7
 faster-whisper==1.1.1
+fastapi==0.116.1
 ffmpeg-python==0.2.0
 filelock==3.13.1
 flatbuffers==23.5.26
@@ -51,11 +52,10 @@ PyYAML==6.0.1
 requests==2.31.0
 sympy==1.12
 tokenizers==0.14.1
-torch==2.4.1
-torchaudio==2.4.1
 tqdm==4.66.1
-triton==3.0.0
 typing-inspect==0.9.0
 typing_extensions==4.8.0
 urllib3==2.0.7
+uvicorn==0.35.0
 yarl==1.20.1
+git+https://github.com/livepeer/pytrickle.git@feat/error-handling-refactor

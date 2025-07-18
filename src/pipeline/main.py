@@ -7,8 +7,7 @@ import logging
 import os
 import sys
 from pathlib import Path
-from typing import Optional
-import aiohttp
+from typing import Optional, Tuple
 
 # Add src to path for imports
 src_path = Path(__file__).parent.parent
@@ -19,8 +18,8 @@ from video.ffmpeg_decoder import FFmpegDecoder
 from transcription.whisper_client import WhisperClient
 from transcription.srt_generator import SRTGenerator
 from subtitles.subtitle_integrator import SubtitleIntegrator
-from trickle.trickle_subscriber import TrickleSubscriber
-from trickle.trickle_publisher import TricklePublisher
+from pytrickle.subscriber import TrickleSubscriber
+from pytrickle.publisher import TricklePublisher
 
 logger = logging.getLogger(__name__)
 
@@ -56,7 +55,9 @@ class VideoPipeline:
         self.input_segment_queue = asyncio.Queue(maxsize=10)  # Buffer input segments
         self.output_segment_queue = asyncio.Queue(maxsize=10)  # Buffer output segments
         
-        # Concurrency control
+        # Text publisher (created lazily if text_url provided)
+        self.text_publisher: Optional[TricklePublisher] = None
+
         self.semaphore = asyncio.Semaphore(config.max_concurrent_segments)
         self.running = False
         
@@ -77,6 +78,11 @@ class VideoPipeline:
             
             # Initialize whisper client
             await self.whisper_client.initialize()
+
+            # Initialize text publisher if configured
+            if self.config.text_url:
+                self.text_publisher = TricklePublisher(self.config.text_url, mime_type="text/plain")
+                await self.text_publisher.start()
             
             logger.info("Pipeline initialization complete")
             
@@ -118,23 +124,23 @@ class VideoPipeline:
             logger.info("Starting async trickle subscriber with enhanced buffering")
             async with TrickleSubscriber(self.config.subscribe_url) as subscriber:
                 segment_count = 0
-                consecutive_empty = 0
-                max_consecutive_empty = 50  # Allow more retries
-                # TODO: Make this wait for streams insetad of crashing on empty
-                
+                consecutive_empty = 0  # Tracks consecutive empty polls for backoff
+                max_empty_retries = 10  # Max retries before giving up
+
                 while self.running:
                     try:
                         # Fetch segment with backoff on empty
                         current_segment = await subscriber.next()
                         if current_segment is None:
+                            # No segment available yet – wait and retry with progressive backoff
                             consecutive_empty += 1
-                            if consecutive_empty >= max_consecutive_empty:
+                            if consecutive_empty >= max_empty_retries:
                                 logger.info("No more segments available, ending subscriber")
                                 break
                             # Progressive backoff for empty segments
                             sleep_time = min(0.1 * consecutive_empty, 2.0)
                             await asyncio.sleep(sleep_time)
-                            continue
+                            continue    
                         
                         consecutive_empty = 0  # Reset counter on successful fetch
                         segment_count += 1
@@ -219,10 +225,15 @@ class VideoPipeline:
                     
                     # Process segment concurrently
                     async with self.semaphore:
-                        processed_data = await self._process_single_segment(segment_idx, segment_data)
-                        if processed_data:
-                            # Add to output queue
-                            await self.output_segment_queue.put((segment_idx, processed_data))
+                        result = await self._process_single_segment(segment_idx, segment_data)
+                        if result:
+                            if isinstance(result, tuple):
+                                processed_data, srt_content = result
+                                # Add to output queue with SRT content
+                                await self.output_segment_queue.put((segment_idx, processed_data, srt_content))
+                            else:
+                                # Backward compatibility - just processed data
+                                await self.output_segment_queue.put((segment_idx, result))
                             processed_count += 1
                             self.flow_metrics['processed_segments'] = processed_count
                             self.flow_metrics['output_queue_depth'] = self.output_segment_queue.qsize()
@@ -266,10 +277,18 @@ class VideoPipeline:
                             logger.info("Received end signal for publisher")
                             break
                         
-                        segment_idx, segment_data = segment_item
+                        if len(segment_item) == 3:
+                            segment_idx, segment_data, srt_content = segment_item
+                        else:
+                            segment_idx, segment_data = segment_item
+                            srt_content = None
                         
                         # Publish segment
                         await self._publish_segment_data(publisher, segment_data, segment_idx)
+                        
+                        # Send subtitle after video segment is published
+                        if srt_content:
+                            await self._send_subtitle_to_text_url(srt_content, segment_idx)
                         published_count += 1
                         self.flow_metrics['published_segments'] = published_count
                         
@@ -288,8 +307,8 @@ class VideoPipeline:
         
         except Exception as e:
             logger.error(f"Trickle publisher task error: {e}")
-    
-    async def _process_single_segment(self, segment_idx: int, segment_data: bytes) -> Optional[bytes]:
+
+    async def _process_single_segment(self, segment_idx: int, segment_data: bytes) -> Optional[Tuple[bytes, Optional[str]]]:
         """
         Process a single video segment.
         
@@ -310,7 +329,7 @@ class VideoPipeline:
             if not video_file or not audio_file:
                 logger.error(f"Failed to decode segment {segment_idx}")
                 # Return original segment data as fallback
-                return segment_data
+                return segment_data, None
             temp_files.extend([video_file, audio_file])
             
             # Step 2: Transcribe audio
@@ -318,7 +337,7 @@ class VideoPipeline:
             if not transcription:
                 logger.debug(f"No transcription found for segment {segment_idx}")
                 # Return original segment data without subtitles
-                return segment_data
+                return segment_data, None
             
             # Step 3: Generate SRT content
             srt_content = self.srt_generator.generate_srt(
@@ -336,25 +355,22 @@ class VideoPipeline:
 
             if not final_video:
                 logger.error(f"Failed to add subtitles for segment {segment_idx}")
-                return segment_data
+                # Use original video data but still send SRT content to maintain sync
+                processed_data = segment_data
             else:
                 temp_files.append(final_video)
-            
-            # Step 5: Read processed video data
-            with open(final_video, 'rb') as f:
-                processed_data = f.read()
-            
-            # Step 6: Optionally send subtitle file to data_url
-            if self.config.enable_data_url and self.config.data_url and srt_content:
-                await self._send_subtitle_to_data_url(srt_content, segment_idx)
+                # Step 5: Read processed video data
+                with open(final_video, 'rb') as f:
+                    processed_data = f.read()
             
             logger.debug(f"Successfully processed segment {segment_idx}")
-            return processed_data
+            return (processed_data, srt_content if (self.config.enable_text_url and self.config.text_url and srt_content) else None)
             
         except Exception as e:
             logger.error(f"Error processing segment {segment_idx}: {e}")
             self.flow_metrics['errors'] += 1
-            return segment_data  # Return original as fallback
+            # Return original data with None for SRT to maintain tuple structure
+            return segment_data, None
         finally:
             # Cleanup temporary files
             for temp_file in temp_files:
@@ -394,7 +410,7 @@ class VideoPipeline:
             logger.error(f"Failed to publish segment {segment_idx}: {e}")
             self.flow_metrics['errors'] += 1
     
-    async def _send_subtitle_to_data_url(self, srt_content: str, segment_idx: int):
+    async def _send_subtitle_to_text_url(self, srt_content: str, segment_idx: int):
         """
         Send subtitle content to data URL.
         
@@ -402,27 +418,17 @@ class VideoPipeline:
             srt_content: SRT subtitle content
             segment_idx: Segment index
         """
-        if not self.config.data_url:
-            return
-        
-        try:
-            async with aiohttp.ClientSession() as session:
-                async with session.post(
-                    self.config.data_url,
-                    data=srt_content.encode('utf-8'),
-                    headers={
-                        'Content-Type': 'text/plain; charset=utf-8',
-                        'X-Segment-Id': str(segment_idx)
-                    }
-                ) as response:
-                    if response.status == 200:
-                        logger.debug(f"Successfully sent subtitle for segment {segment_idx} to data URL")
-                    else:
-                        logger.warning(f"Failed to send subtitle for segment {segment_idx}: HTTP {response.status}")
-                        
-        except Exception as e:
-            logger.error(f"Error sending subtitle for segment {segment_idx} to data URL: {e}")
-    
+        # Use Trickle text publisher if available
+        if self.text_publisher:
+            try:
+                writer = await self.text_publisher.next()
+                await writer.write(srt_content.encode("utf-8"))
+                await writer.close()
+                logger.debug(f"Sent subtitle for segment {segment_idx} via Trickle text channel")
+                return
+            except Exception as e:
+                logger.error(f"Error sending subtitle for segment {segment_idx} to data URL: {e}")
+
     async def stop(self):
         """Stop the pipeline."""
         self.running = False
@@ -431,6 +437,10 @@ class VideoPipeline:
     async def cleanup(self):
         """Cleanup pipeline resources."""
         try:
+            # Close text publisher if open
+            if self.text_publisher:
+                await self.text_publisher.close()
+
             logger.info(f"Pipeline cleanup complete. Final metrics: {self.flow_metrics}")
         except Exception as e:
             logger.error(f"Error during pipeline cleanup: {e}")

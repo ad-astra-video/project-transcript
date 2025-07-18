@@ -1,4 +1,4 @@
-FROM nvidia/cuda:12.3.2-cudnn9-runtime-ubuntu22.04
+FROM nvidia/cuda:12.8.1-cudnn-runtime-ubuntu22.04
 
 # Set environment variables
 ENV DEBIAN_FRONTEND=noninteractive
@@ -77,7 +77,7 @@ COPY requirements.txt .
 
 # Install Python dependencies
 RUN pip3 install --no-cache-dir --upgrade pip && \
-    pip3 install --no-cache-dir torch==2.4.1 torchaudio==2.4.1 --index-url https://download.pytorch.org/whl/cu124 && \
+    pip3 install torch==2.7.0+cu128 torchaudio==2.7.0+cu128 --index-url https://download.pytorch.org/whl/cu128 && \
     pip3 install --no-cache-dir -r requirements.txt --ignore-installed torch torchaudio
 
 # Verify CUDA installation
@@ -90,7 +90,7 @@ COPY . .
 RUN mkdir -p /tmp/transcription
 
 # Set default command
-CMD ["python3", "-m", "src.pipeline.main"]
+CMD ["uvicorn", "src.server.app:app", "--host", "0.0.0.0", "--port", "8000"]
 
 # Default environment variables
 ENV WHISPER_MODEL=large

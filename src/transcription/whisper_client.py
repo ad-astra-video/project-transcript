@@ -4,6 +4,7 @@ Faster-whisper client for audio transcription.
 
 import asyncio
 import logging
+import os
 from typing import Optional, List, Dict, Any
 from dataclasses import dataclass
 from pathlib import Path
@@ -44,6 +45,7 @@ class WhisperClient:
         self.device = device
         self.model = None
         self.language = language
+        self.download_root = os.path.join(os.path.expanduser("~"), "models")
         self._lock = asyncio.Lock()
         
     async def initialize(self):
@@ -85,8 +87,7 @@ class WhisperClient:
                     audio_file_path,
                     language=self.language,
                     word_timestamps=True,
-                    vad_filter=False, 
-                    vad_parameters=dict(min_silence_duration_ms=1500)
+                    vad_filter=False
                 )
             )
             

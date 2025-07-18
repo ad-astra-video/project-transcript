@@ -186,7 +186,7 @@ class SubtitleIntegrator:
             logger.error(f"Error adding MKV subtitles to segment {segment_idx}: {e}")
             return None
             
-    async def prepare_subtitles(self, video_file_path: str, srt_content: str, segment_idx: int, hard: bool = False) -> Tuple[Optional[str], str]:
+    async def prepare_subtitles(self, video_file_path: str, srt_content: str, segment_idx: int, hard: bool) -> Tuple[Optional[str], str]:
         """Prepare subtitles using the appropriate container format based on hard/soft setting.
         
         Args:

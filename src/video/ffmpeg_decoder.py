@@ -45,15 +45,7 @@ class FFmpegDecoder:
             if not audio_success:
                 logger.error(f"Failed to extract audio for segment {segment_idx}")
                 self._cleanup_files([input_file, audio_file])
-                return None, None
-                
-            # Find the actual audio file created (could be .ac3, .flac, or .wav)
-            actual_audio_file = None
-            for ext in ['.ac3', '.flac', '.wav']:
-                potential_file = audio_file.replace('.flac', ext)
-                if os.path.exists(potential_file):
-                    actual_audio_file = potential_file
-                    break    
+                return None, None 
 
             logger.debug(f"Successfully decoded segment {segment_idx}")
             return video_file, audio_file
@@ -104,13 +96,13 @@ class FFmpegDecoder:
                 stderr=asyncio.subprocess.PIPE
             )
             
-            stdout1, stderr1 = await process1.communicate()
+            _, stderr1 = await process1.communicate()
             
             if process1.returncode != 0 or not os.path.exists(temp_audio):
                 logger.debug(f"Audio copy failed: {stderr1.decode()}")
                 return False
             
-            # Step 2: Convert to required format using external tools if available
+            # Step 2: Convert to required format
             cmd2 = [
                 'ffmpeg', '-y',
                 '-i', temp_audio,
@@ -126,7 +118,7 @@ class FFmpegDecoder:
                 stderr=asyncio.subprocess.PIPE
             )
             
-            stdout2, stderr2 = await process2.communicate()
+            _, stderr2 = await process2.communicate()
             
             # Cleanup temp file
             if os.path.exists(temp_audio):
