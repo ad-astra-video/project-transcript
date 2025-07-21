@@ -39,19 +39,19 @@ class SubtitleIntegrator:
     # ------------------------------------------------------------------
     # Methods for subtitle integration (TS and MKV containers)
     # ------------------------------------------------------------------
-    async def add_subtitles_ts(self, video_file_path: str, srt_content: str, segment_idx: int) -> Optional[str]:
+    async def add_subtitles_ts(self, video_file_path: str, srt_content: str, segment_idx: int) -> Tuple[Optional[str], Optional[str]]:
         """Add hard-coded (burned-in) subtitles to an MPEG-TS segment.
 
         Args:
             video_file_path: input video file path
             srt_content: SRT text
             segment_idx: index for logging and temp naming
-        Returns: path to new ts file with burned-in subtitles or None on error
+        Returns: Tuple of (output_file_path, error_message) or (None, error_message) on error
         """
         try:
             if not srt_content.strip():
                 logger.debug(f"No subtitle text for segment {segment_idx}")
-                return video_file_path
+                return video_file_path, None
 
             # prepare temp files
             temp_dir = tempfile.mkdtemp(prefix=f"ts_subs_{segment_idx}_")
@@ -118,31 +118,31 @@ class SubtitleIntegrator:
             )
             _, stderr = await process.communicate()
             if process.returncode != 0:
-                logger.error(
-                    f"FFmpeg TS subtitle integration failed for segment {segment_idx}: {stderr.decode()}"
-                )
-                return None
+                error_msg = f"FFmpeg TS subtitle integration failed for segment {segment_idx}: {stderr.decode()}"
+                logger.error(error_msg)
+                return video_file_path, error_msg
             if not os.path.exists(output_file):
-                logger.error(f"Output TS not created for segment {segment_idx}")
-                return None
-            return output_file
+                error_msg = f"Output TS not created for segment {segment_idx}"
+                logger.error(error_msg)
+                return video_file_path, error_msg
+            return output_file, None
         except Exception as e:
             logger.error(f"Error adding TS subtitles to segment {segment_idx}: {e}")
-            return None
+            return video_file_path, str(e)
             
-    async def add_subtitles_mkv(self, video_file_path: str, srt_content: str, segment_idx: int) -> Optional[str]:
+    async def add_subtitles_mkv(self, video_file_path: str, srt_content: str, segment_idx: int) -> Tuple[Optional[str], Optional[str]]:
         """Add soft subtitles to a video segment using Matroska container.
 
         Args:
             video_file_path: input video file path
             srt_content: SRT text
             segment_idx: index for logging and temp naming
-        Returns: path to new mkv file or None on error
+        Returns: Tuple of (output_file_path, error_message) or (None, error_message) on error
         """
         try:
             if not srt_content.strip():
                 logger.debug(f"No subtitle text for segment {segment_idx}")
-                return video_file_path
+                return video_file_path, None
 
             # prepare temp files
             temp_dir = tempfile.mkdtemp(prefix=f"mkv_subs_{segment_idx}_")
@@ -174,34 +174,42 @@ class SubtitleIntegrator:
             )
             _, stderr = await process.communicate()
             if process.returncode != 0:
-                logger.error(
-                    f"FFmpeg MKV subtitle integration failed for segment {segment_idx}: {stderr.decode()}"
-                )
-                return None
+                error_msg = f"FFmpeg MKV subtitle integration failed for segment {segment_idx}: {stderr.decode()}"
+                logger.error(error_msg)
+                return video_file_path, error_msg
             if not os.path.exists(output_file):
-                logger.error(f"Output MKV not created for segment {segment_idx}")
-                return None
-            return output_file
+                error_msg = f"Output MKV not created for segment {segment_idx}"
+                logger.error(error_msg)
+                return video_file_path, error_msg
+            return output_file, None
         except Exception as e:
             logger.error(f"Error adding MKV subtitles to segment {segment_idx}: {e}")
-            return None
-            
-    async def prepare_subtitles(self, video_file_path: str, srt_content: str, segment_idx: int, hard: bool) -> Tuple[Optional[str], str]:
-        """Prepare subtitles using the appropriate container format based on hard/soft setting.
+            return video_file_path, str(e)
+
+    async def integrate_subtitles(self, segment_idx: int, video_file_path: str, srt_content: str, hard: bool) -> Tuple[Optional[bytes], Optional[str]]:
+        """Integrate subtitles into the video segment.
         
         Args:
-            video_file_path: input video file path
-            srt_content: SRT text
-            segment_idx: index for logging and temp naming
-            hard: True → burn subtitles (TS); False → embed as separate stream (MKV)
+            segment_idx: The index of the segment.
+            video_file_path: The path to the video file.
+            srt_file_path: The path to the SRT subtitle file.
+            hard: Whether to hard-code subtitles into the video.
         Returns: 
-            Tuple of (output_file_path, mime_type) or (None, default_mime_type) on error
+            A tuple containing the processed video data as bytes and an optional error message string.
         """
         if hard:
-            # Hard subtitles - use TS container
-            output_file = await self.add_subtitles_ts(video_file_path, srt_content, segment_idx)
-            return output_file, "video/mp2t"
+            output_file, error = await self.add_subtitles_ts(video_file_path, srt_content, segment_idx)
         else:
-            # Soft subtitles - use MKV container
-            output_file = await self.add_subtitles_mkv(video_file_path, srt_content, segment_idx)
-            return output_file, "video/x-matroska"
+            output_file, error = await self.add_subtitles_mkv(video_file_path, srt_content, segment_idx)
+
+        if not output_file:
+            logger.error(f"Subtitle integration failed for segment {segment_idx}: {error}")
+            logger.debug(f"Returning original video file path: {video_file_path}")
+            file_to_read = video_file_path
+        else:
+            file_to_read = output_file
+
+        with open(file_to_read, "rb") as f:
+            processed_data = f.read()
+        
+        return processed_data, error if not output_file else None

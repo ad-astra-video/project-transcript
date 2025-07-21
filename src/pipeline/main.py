@@ -6,6 +6,10 @@ import asyncio
 import logging
 import os
 import sys
+import json
+import asyncio
+from dataclasses import dataclass, asdict
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional, Tuple
 
@@ -22,6 +26,18 @@ from pytrickle.subscriber import TrickleSubscriber
 from pytrickle.publisher import TricklePublisher
 
 logger = logging.getLogger(__name__)
+
+@dataclass
+class StreamStats:
+    pipeline_uuid: Optional[str]
+    segment_idx: int
+    segments_processed_total: int
+    timestamp_utc: str
+    status: str
+    error_msg: Optional[str] = None
+    processing_ms: Optional[float] = None
+    ingest_to_process_ms: Optional[float] = None
+
 
 
 class VideoPipeline:
@@ -57,19 +73,19 @@ class VideoPipeline:
         
         # Text publisher (created lazily if text_url provided)
         self.text_publisher: Optional[TricklePublisher] = None
+        self.events_publisher: Optional[TricklePublisher] = None
+        self.stats_queue: asyncio.Queue[StreamStats] = asyncio.Queue()
 
-        self.semaphore = asyncio.Semaphore(config.max_concurrent_segments)
         self.running = False
         
         # Flow metrics for monitoring
         self.flow_metrics = {
-            'input_segments': 0,
-            'processed_segments': 0,
-            'published_segments': 0,
-            'input_queue_depth': 0,
-            'output_queue_depth': 0,
-            'errors': 0
+            "segments_received": 0,
+            "segments_processed": 0,
+            "segments_dropped": 0,
+            "errors": 0,
         }
+        self.segments_processed_count = 0
         
     async def initialize(self):
         """Initialize the pipeline components."""
@@ -80,9 +96,13 @@ class VideoPipeline:
             await self.whisper_client.initialize()
 
             # Initialize text publisher if configured
-            if self.config.text_url:
+            if self.config.enable_text_url and self.config.text_url:
                 self.text_publisher = TricklePublisher(self.config.text_url, mime_type="text/plain")
                 await self.text_publisher.start()
+
+            if self.config.enable_events_url and self.config.events_url:
+                self.events_publisher = TricklePublisher(self.config.events_url, mime_type="application/json")
+                await self.events_publisher.start()
             
             logger.info("Pipeline initialization complete")
             
@@ -101,6 +121,7 @@ class VideoPipeline:
                 self._trickle_subscriber_task(),
                 self._segment_processor_task(),
                 self._trickle_publisher_task(),
+                self._send_events_from_stats_queue(),
                 return_exceptions=True
             )
             
@@ -150,11 +171,12 @@ class VideoPipeline:
                         if segment_data:
                             # Queue segment with priority handling
                             try:
+                                received_time = asyncio.get_event_loop().time()
                                 await asyncio.wait_for(
-                                    self.input_segment_queue.put((segment_count, segment_data)), 
+                                    self.input_segment_queue.put((segment_count, segment_data, received_time)),
                                     timeout=0.5  # Longer timeout for buffering
                                 )
-                                self.flow_metrics['input_segments'] += 1
+                                self.flow_metrics['segments_received'] += 1
                                 self.flow_metrics['input_queue_depth'] = self.input_segment_queue.qsize()
                                 
                                 if segment_count % 10 == 0:
@@ -204,53 +226,63 @@ class VideoPipeline:
             logger.error(f"Error reading segment data: {e}")
             return None
     
+    async def _segment_worker(self, segment_idx: int, segment_data: bytes, received_time: float):
+        """Process a single segment and publish result to output queue."""
+        try:
+            result = await self._process_single_segment(segment_idx, segment_data, received_time)
+        except Exception as e:
+            logger.error(f"Error in segment worker for segment {segment_idx}: {e}")
+            self.flow_metrics['errors'] += 1
+            result = None
+        finally:
+            # Mark the input queue task as done regardless of outcome
+            self.input_segment_queue.task_done()
+
+        if result:
+            if isinstance(result, tuple):
+                processed_data, srt_content = result
+                await self.output_segment_queue.put((segment_idx, processed_data, srt_content))
+            else:
+                await self.output_segment_queue.put((segment_idx, result))
+            self.flow_metrics['segments_processed'] += 1
+            self.flow_metrics['output_queue_depth'] = self.output_segment_queue.qsize()
+
     async def _segment_processor_task(self):
-        """Process segments from input queue and add to output queue."""
-        processed_count = 0
-        
+        """Spawn worker tasks for each incoming segment and wait for their completion."""
+        pending_tasks = set()
         try:
             while self.running:
                 try:
-                    # Get segment from input queue
                     segment_item = await asyncio.wait_for(
-                        self.input_segment_queue.get(), 
+                        self.input_segment_queue.get(),
                         timeout=1.0
                     )
-                    
+
                     if segment_item is None:  # End signal
                         logger.info("Received end signal for segment processor")
+                        self.running = False
                         break
-                    
-                    segment_idx, segment_data = segment_item
-                    
-                    # Process segment concurrently
-                    async with self.semaphore:
-                        result = await self._process_single_segment(segment_idx, segment_data)
-                        if result:
-                            if isinstance(result, tuple):
-                                processed_data, srt_content = result
-                                # Add to output queue with SRT content
-                                await self.output_segment_queue.put((segment_idx, processed_data, srt_content))
-                            else:
-                                # Backward compatibility - just processed data
-                                await self.output_segment_queue.put((segment_idx, result))
-                            processed_count += 1
-                            self.flow_metrics['processed_segments'] = processed_count
-                            self.flow_metrics['output_queue_depth'] = self.output_segment_queue.qsize()
-                    
-                    # Mark task done
-                    self.input_segment_queue.task_done()
-                    
+
+                    segment_idx, segment_data, received_time = segment_item
+
+                    # Spawn a worker task
+                    task = asyncio.create_task(self._segment_worker(segment_idx, segment_data, received_time))
+                    pending_tasks.add(task)
+                    task.add_done_callback(pending_tasks.discard)
+
+                    # Update queue depth metric
+                    self.flow_metrics['input_queue_depth'] = self.input_segment_queue.qsize()
+
                 except asyncio.TimeoutError:
                     continue  # Check if still running
                 except Exception as e:
-                    logger.error(f"Error in segment processor: {e}")
+                    logger.error(f"Error spawning segment worker: {e}")
                     self.flow_metrics['errors'] += 1
                     await asyncio.sleep(0.1)
-        
-        except Exception as e:
-            logger.error(f"Segment processor task error: {e}")
         finally:
+            # Wait for any remaining workers to finish
+            if pending_tasks:
+                await asyncio.gather(*pending_tasks, return_exceptions=True)
             # Signal end of processing
             await self.output_segment_queue.put(None)
     
@@ -275,6 +307,7 @@ class VideoPipeline:
                         
                         if segment_item is None:  # End signal
                             logger.info("Received end signal for publisher")
+                            self.running = False
                             break
                         
                         if len(segment_item) == 3:
@@ -308,13 +341,16 @@ class VideoPipeline:
         except Exception as e:
             logger.error(f"Trickle publisher task error: {e}")
 
-    async def _process_single_segment(self, segment_idx: int, segment_data: bytes) -> Optional[Tuple[bytes, Optional[str]]]:
+    async def _process_single_segment(
+        self, segment_idx: int, segment_data: bytes, received_time: float
+    ) -> Tuple[Optional[bytes], Optional[str]]:
         """
         Process a single video segment.
         
         Args:
             segment_idx: Segment index
             segment_data: Raw segment data
+            received_time: Time the segment was received
             
         Returns:
             Processed segment data or None on error
@@ -346,24 +382,39 @@ class VideoPipeline:
             
             # Step 4: Integrate subtitles using appropriate container format
             hard_flag = bool(self.config.hard_code_subtitles) and str(self.config.hard_code_subtitles).lower() != "false"
-            final_video, _ = await self.subtitle_integrator.prepare_subtitles(
-                video_file,
-                srt_content,
-                segment_idx,
-                hard=hard_flag,
-            )
+            processing_start_time = asyncio.get_event_loop().time()
+            processing_ms = (asyncio.get_event_loop().time() - processing_start_time) * 1000
+            ingest_to_process_ms = (processing_start_time - received_time) * 1000
 
-            if not final_video:
-                logger.error(f"Failed to add subtitles for segment {segment_idx}")
-                # Use original video data but still send SRT content to maintain sync
-                processed_data = segment_data
+            processed_data, error_msg = await self.subtitle_integrator.integrate_subtitles(
+                segment_idx, video_file, srt_content, hard=hard_flag
+            )
+            self.segments_processed_count += 1
+
+            if not processed_data:
+                logger.error(f"Error processing segment {segment_idx}, skipping: {error_msg}")
+                self.flow_metrics["segments_dropped"] += 1
+                status = "error"
+
             else:
-                temp_files.append(final_video)
-                # Step 5: Read processed video data
-                with open(final_video, 'rb') as f:
-                    processed_data = f.read()
-            
-            logger.debug(f"Successfully processed segment {segment_idx}")
+                status = "ok"
+
+            stats = StreamStats(
+                pipeline_uuid=self.config.pipeline_uuid,
+                segment_idx=segment_idx,
+                segments_processed_total=self.segments_processed_count,
+                timestamp_utc=datetime.now(timezone.utc).isoformat(),
+                status=status,
+                error_msg=error_msg,
+                processing_ms=processing_ms,
+                ingest_to_process_ms=ingest_to_process_ms,
+            )
+            if self.config.enable_events_url:
+                await self.stats_queue.put(stats)
+
+            if not processed_data:
+                return (None, None)
+
             return (processed_data, srt_content if (self.config.enable_text_url and self.config.text_url and srt_content) else None)
             
         except Exception as e:
@@ -419,7 +470,7 @@ class VideoPipeline:
             segment_idx: Segment index
         """
         # Use Trickle text publisher if available
-        if self.text_publisher:
+        if self.running and self.text_publisher:
             try:
                 writer = await self.text_publisher.next()
                 await writer.write(srt_content.encode("utf-8"))
@@ -429,17 +480,42 @@ class VideoPipeline:
             except Exception as e:
                 logger.error(f"Error sending subtitle for segment {segment_idx} to data URL: {e}")
 
+    async def _send_events_from_stats_queue(self):
+        """
+        Continuously send events from the stats_queue to the events URL.
+        """
+        if not self.events_publisher:
+            logger.warning("Events publisher is not configured.")
+            return
+
+        while self.running:
+            try:
+                stats: StreamStats = await asyncio.wait_for(self.stats_queue.get(), timeout=10.0)
+                writer = await self.events_publisher.next()
+                if stats:
+                    await writer.write(json.dumps(asdict(stats)).encode("utf-8"))
+                    await writer.close()
+                logger.debug(f"Sent event for segment {stats.segment_idx} via Trickle events channel")
+                self.stats_queue.task_done()
+            except Exception as e:
+                logger.error(f"Error sending event to events URL: {e}")
+                await asyncio.sleep(0.1) 
+                break 
+                 
+                
     async def stop(self):
         """Stop the pipeline."""
         self.running = False
         logger.info("Pipeline stop requested")
-    
+
     async def cleanup(self):
         """Cleanup pipeline resources."""
         try:
             # Close text publisher if open
             if self.text_publisher:
                 await self.text_publisher.close()
+            if self.events_publisher:
+                await self.events_publisher.close()
 
             logger.info(f"Pipeline cleanup complete. Final metrics: {self.flow_metrics}")
         except Exception as e:

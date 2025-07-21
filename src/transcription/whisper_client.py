@@ -45,7 +45,8 @@ class WhisperClient:
         self.device = device
         self.model = None
         self.language = language
-        self.download_root = os.path.join(os.path.expanduser("~"), "models")
+        self.download_root = Path(os.environ.get("MODEL_DIR", "/models"))
+        Path(self.download_root).mkdir(parents=True, exist_ok=True)
         self._lock = asyncio.Lock()
         
     async def initialize(self):
@@ -58,7 +59,12 @@ class WhisperClient:
                 loop = asyncio.get_event_loop()
                 self.model = await loop.run_in_executor(
                     None, 
-                    lambda: WhisperModel(self.model_size, device=self.device)  # type: ignore
+                    lambda: WhisperModel(
+                        self.model_size,
+                        device=self.device,
+                        compute_type=self.compute_type, 
+                        download_root=str(self.download_root)  # type: ignore
+                ),
                 )
                 logger.info("Whisper model loaded successfully")
     

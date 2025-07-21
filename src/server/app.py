@@ -12,6 +12,7 @@ Content-Type: application/json
     "control_url": "http://192.168.10.206:3389/sample",
     "publish_url": "http://172.17.0.1:3389/sample-output",
     "text_url": "http://172.17.0.1:3389/subtitles",
+    "events_url": "http://172.17.0.1:3389/events",
     # optional
     # "params": {optional overrides
     #     "whisper_model": "medium",
@@ -62,11 +63,12 @@ class AudioToTextRequest(BaseModel):
     text_url: Optional[str] = Field(
         None, description="Optional URL for posting generated subtitle files"
     )
+    events_url: Optional[str] = Field(..., description="Optional URL for posting pipeline events")
     params: Optional[PipelineParamsDict] = Field(
         None, description="Overrides for PipelineConfig (mirrors PipelineConfig fields)"
     )
 
-    @field_validator("subscribe_url", "publish_url", "text_url", check_fields=True)
+    @field_validator("subscribe_url", "publish_url", "text_url","events_url", check_fields=True)
     def _strip(cls, v):  # noqa: D401
         if isinstance(v, str):
             return v.strip()
@@ -116,15 +118,17 @@ async def audio_to_text(request: AudioToTextRequest):
     if unknown_params:
         raise HTTPException(status_code=400, detail=f"Unknown param fields: {unknown_params}")
 
+    task_id = uuid.uuid4().hex
     cfg_kwargs = {
         **params_dict,
         "subscribe_url": request.subscribe_url,
         "publish_url": request.publish_url,
         "text_url": request.text_url,
+        "events_url": request.events_url,
+        "pipeline_uuid": task_id,
     }
     cfg = PipelineConfig(**cfg_kwargs)  # type: ignore[arg-type]
 
-    task_id = uuid.uuid4().hex
     task = asyncio.create_task(_run_pipeline(cfg))
     _tasks[task_id] = task
 

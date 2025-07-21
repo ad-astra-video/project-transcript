@@ -6,6 +6,14 @@ ENV PYTHONUNBUFFERED=1
 ENV PATH="/usr/local/cuda/bin:${PATH}"
 ENV LD_LIBRARY_PATH="/usr/local/cuda/lib64:/usr/local/cuda/extras/CUPTI/lib64:/home/user/.local/lib/python3.10/site-packages/nvidia/cudnn/lib/:${LD_LIBRARY_PATH}"
 
+# Default environment variables
+ENV WHISPER_MODEL=large
+ENV WHISPER_DEVICE=cuda
+ENV SUBSCRIBE_URL=http://172.17.0.1:3389/sample
+ENV PUBLISH_URL=http://172.17.0.1:3389/publish
+ENV SEGMENT_DURATION=3.0
+ENV MODEL_DIR=/models
+
 # Install system dependencies
 RUN apt-get update && apt-get install -y --no-install-recommends \
     python3.10 \
@@ -86,16 +94,8 @@ RUN python3 -c "import torch; print('CUDA available:', torch.cuda.is_available()
 # Copy application code
 COPY . .
 
-# Create necessary directories
-RUN mkdir -p /tmp/transcription
+# create it so permissions are correct
+RUN mkdir -p ${MODEL_DIR}
 
 # Set default command
 CMD ["uvicorn", "src.server.app:app", "--host", "0.0.0.0", "--port", "8000"]
-
-# Default environment variables
-ENV WHISPER_MODEL=large
-ENV WHISPER_DEVICE=cuda
-ENV SUBSCRIBE_URL=http://172.17.0.1:3389/sample
-ENV PUBLISH_URL=http://172.17.0.1:3389/publish
-ENV SEGMENT_DURATION=3.0
-ENV MAX_CONCURRENT_SEGMENTS=3

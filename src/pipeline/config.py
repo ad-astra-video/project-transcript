@@ -15,12 +15,13 @@ class PipelineConfig:
     subscribe_url: str = "http://0.0.0.0:3389/sample" ## localhost for testing
     publish_url: str = "http://127.0.0.1:3389/publish" ## localhost for testing
     text_url: Optional[str] = "http://127.0.0.1:3389/subtitles"
+    events_url: Optional[str] = "http://127.0.0.1:3389/events"
     # For Docker, use the host's IP address
     # subscribe_url: str = "http://172.17.0.1:3389/sample"
     # publish_url: str = "http://172.17.0.1:3389/publish"
     
     # Transcription settings
-    whisper_model: str = "medium"  # base, small, medium, large
+    whisper_model: str = "large"  # base, small, medium, large
     whisper_language: Optional[str] = None  # Auto-detect if None
     whisper_device: str = "cuda"  # cpu, cuda
     compute_type: str = "float16"  # float16, float32, int8, etc. (depends on whisper model support)
@@ -34,11 +35,13 @@ class PipelineConfig:
     subtitle_position: str = "bottom"  # bottom, top, center
     
     # Processing options
-    hard_code_subtitles: str | bool = False  # True for hard, False for soft
+    hard_code_subtitles: str | bool = True  # True for hard, False for soft
+
     enable_text_url: str | bool = True  # Toggle for subtitle file posting
+    enable_events_url: str | bool = True
+    pipeline_uuid: Optional[str] = None
     
     # Performance settings
-    max_concurrent_segments: int = 3
     audio_sample_rate: int = 16000  # Hz, required for whisper
     
     @classmethod
@@ -60,6 +63,8 @@ class PipelineConfig:
             subtitle_position=os.getenv("SUBTITLE_POSITION", cls.subtitle_position),
             hard_code_subtitles=os.getenv("HARD_CODE_SUBTITLES", (cls.hard_code_subtitles)),
             enable_text_url=os.getenv("ENABLE_TEXT_URL", str(cls.enable_text_url)),
-            max_concurrent_segments=int(os.getenv("MAX_CONCURRENT_SEGMENTS", cls.max_concurrent_segments)),
+            events_url=os.getenv("EVENTS_URL", cls.events_url),
+            enable_events_url=os.getenv("ENABLE_EVENTS_URL", str(cls.enable_events_url)),
+            pipeline_uuid=os.getenv("PIPELINE_UUID", cls.pipeline_uuid),
             audio_sample_rate=int(os.getenv("AUDIO_SAMPLE_RATE", cls.audio_sample_rate)),
         )
