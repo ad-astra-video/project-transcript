@@ -97,17 +97,11 @@ async def _run_pipeline(cfg: PipelineConfig) -> None:
         logger.error("Pipeline task failed: %s", exc)
     finally:
         logger.info("Pipeline task finished")
-        # Gracefully shut down the FastAPI/uvicorn server once the pipeline ends
-        try:
-            import os, signal
-            os.kill(os.getpid(), signal.SIGINT)  # uvicorn handles SIGINT gracefully
-        except Exception as e:  # pragma: no cover
-            logger.warning("Failed to trigger server shutdown: %s", e)
-
 
 # ---------------------------------------------------------------------------
 # Routes
 # ---------------------------------------------------------------------------
+@app.post("/live-video-to-video", response_model=AudioToTextResponse, status_code=202)
 @app.post("/audio-to-text", response_model=AudioToTextResponse, status_code=202)
 async def audio_to_text(request: AudioToTextRequest):
     # Build PipelineConfig instance
@@ -141,3 +135,9 @@ async def audio_to_text(request: AudioToTextRequest):
     logger.info("Started pipeline task %s", task_id)
 
     return AudioToTextResponse(task_id=task_id)
+
+# Health check endpoint -----------------------------------------------------
+@app.get("/health", status_code=200)
+async def health():
+    """Simple health check endpoint returning HTTP 200."""
+    return {"status": "ok"}
