@@ -39,7 +39,7 @@ class SRTGenerator:
         subtitle_counter = 1
         
         for segment in transcription_segments:
-            if not segment.text.strip():
+            if not segment.text.strip() and not segment.text=="":
                 continue
                 
             # Format timing (segment-relative)
