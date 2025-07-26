@@ -58,4 +58,4 @@ typing_extensions==4.8.0
 urllib3==2.0.7
 uvicorn==0.35.0
 yarl==1.20.1
-git+https://github.com/livepeer/pytrickle.git@feat/error-handling-refactor
+git+https://github.com/livepeer/pytrickle.git@137e7355e518ea5c5b634c247c86dc8284e8a953
