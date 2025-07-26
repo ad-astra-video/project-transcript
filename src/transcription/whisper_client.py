@@ -28,7 +28,7 @@ class TranscriptionSegment:
 class WhisperClient:
     """Client for faster-whisper transcription."""
     
-    def __init__(self, model_size: str = "base", device: str = "cuda", compute_type: str ="float16", language: Optional[str] = None):
+    def __init__(self, model_size: str = "base", device: str = "cuda", compute_type: str ="float16", language: str | None = None, language_confidence_threshold: float = 0.5):
         """
         Initialize the whisper client.
         
@@ -36,6 +36,7 @@ class WhisperClient:
             model: Whisper model size (tiny, base, small, medium, large)
             device: Device to run on (cpu, cuda)
             language: Language code for transcription (None for auto-detect)
+            language_confidence_threshold: Minimum confidence for language detection (0.5 = 50%)
         """
         if WhisperModel is None:
             raise ImportError("faster-whisper not installed. Install with: pip install faster-whisper")
@@ -45,6 +46,7 @@ class WhisperClient:
         self.device = device
         self.model = None
         self.language = language
+        self.language_confidence_threshold = language_confidence_threshold
         self.download_root = Path(os.environ.get("MODEL_DIR", "/models"))
         Path(self.download_root).mkdir(parents=True, exist_ok=True)
         self._lock = asyncio.Lock()
@@ -87,26 +89,39 @@ class WhisperClient:
             
             # Run transcription in thread pool
             loop = asyncio.get_event_loop()
-            segments, _ = await loop.run_in_executor(
+            segments, info = await loop.run_in_executor(
                 None,
                 lambda: self.model.transcribe( # type: ignore
                     audio_file_path,
                     language=self.language,
                     word_timestamps=True,
-                    vad_filter=False
+                    vad_filter=False,
+                    language_detection_threshold=self.language_confidence_threshold
                 )
             )
+            
+            # Check language confidence
+            language_confidence = getattr(info, 'language_probability', 1.0)
+            logger.debug(f"Language detection confidence: {language_confidence:.3f}")
             
             # Convert to our format
             transcription_segments = []
             for segment in segments:
-                transcription_segments.append(TranscriptionSegment(
-                    start=segment.start,
-                    end=segment.end,
-                    text=segment.text.strip()
-                ))
+                # If language confidence is below threshold, return empty transcript
+                if language_confidence < self.language_confidence_threshold:
+                    transcription_segments.append(TranscriptionSegment(
+                        start=segment.start,
+                        end=segment.end,
+                        text=""  # Empty text for low confidence
+                    ))
+                else:
+                    transcription_segments.append(TranscriptionSegment(
+                        start=segment.start,
+                        end=segment.end,
+                        text=segment.text.strip()
+                    ))
             
-            logger.debug(f"Transcribed {len(transcription_segments)} segments for segment {segment_idx}")
+            logger.debug(f"Transcribed {len(transcription_segments)} segments for segment {segment_idx} (confidence: {language_confidence:.3f})")
             return transcription_segments
             
         except Exception as e:
@@ -116,11 +131,17 @@ class WhisperClient:
     def get_model_info(self) -> Dict[str, Any]:
         """Get information about the loaded model."""
         if self.model is None:
-            return {"model": self.model_size, "device": self.device, "loaded": False}
+            return {
+                "model": self.model_size, 
+                "device": self.device, 
+                "loaded": False,
+                "language_confidence_threshold": self.language_confidence_threshold
+            }
         
         return {
             "model": self.model_size,
             "device": self.device,
             "loaded": True,
-            "language": self.language
+            "language": self.language,
+            "language_confidence_threshold": self.language_confidence_threshold
         }

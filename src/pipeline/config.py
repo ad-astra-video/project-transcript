@@ -14,7 +14,7 @@ class PipelineConfig:
     # Trickle server URLs
     subscribe_url: str = "http://0.0.0.0:3389/sample" ## localhost for testing
     publish_url: str = "http://127.0.0.1:3389/publish" ## localhost for testing
-    text_url: Optional[str] = "http://127.0.0.1:3389/subtitles"
+    data_url: Optional[str] = "http://127.0.0.1:3389/subtitles"
     events_url: Optional[str] = "http://127.0.0.1:3389/events"
     # For Docker, use the host's IP address
     # subscribe_url: str = "http://172.17.0.1:3389/sample"
@@ -37,7 +37,7 @@ class PipelineConfig:
     # Processing options
     hard_code_subtitles: str | bool = True  # True for hard, False for soft
 
-    enable_text_url: str | bool = True  # Toggle for subtitle file posting
+    enable_data_url: str | bool = True  # Toggle for subtitle file posting
     enable_events_url: str | bool = True
     pipeline_uuid: Optional[str] = None
     
@@ -50,7 +50,7 @@ class PipelineConfig:
         return cls(
             subscribe_url=os.getenv("SUBSCRIBE_URL", cls.subscribe_url),
             publish_url=os.getenv("PUBLISH_URL", cls.publish_url),
-            text_url=os.getenv("TEXT_URL", cls.text_url),
+            data_url=os.getenv("DATA_URL", cls.data_url),
             whisper_model=os.getenv("WHISPER_MODEL", cls.whisper_model),
             whisper_language=os.getenv("WHISPER_LANGUAGE", cls.whisper_language),
             whisper_device=os.getenv("WHISPER_DEVICE", cls.whisper_device),
@@ -62,7 +62,7 @@ class PipelineConfig:
             subtitle_background=os.getenv("SUBTITLE_BACKGROUND", cls.subtitle_background),
             subtitle_position=os.getenv("SUBTITLE_POSITION", cls.subtitle_position),
             hard_code_subtitles=os.getenv("HARD_CODE_SUBTITLES", (cls.hard_code_subtitles)),
-            enable_text_url=os.getenv("ENABLE_TEXT_URL", str(cls.enable_text_url)),
+            enable_data_url=os.getenv("ENABLE_DATA_URL", str(cls.enable_data_url)),
             events_url=os.getenv("EVENTS_URL", cls.events_url),
             enable_events_url=os.getenv("ENABLE_EVENTS_URL", str(cls.enable_events_url)),
             pipeline_uuid=os.getenv("PIPELINE_UUID", cls.pipeline_uuid),

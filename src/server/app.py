@@ -11,7 +11,7 @@ Content-Type: application/json
     "subscribe_url": "http://172.17.0.1:3389/sample",
     "control_url": "http://192.168.10.206:3389/sample",
     "publish_url": "http://172.17.0.1:3389/sample-output",
-    "text_url": "http://172.17.0.1:3389/subtitles",
+    "data_url": "http://172.17.0.1:3389/subtitles",
     "events_url": "http://172.17.0.1:3389/events",
     # optional
     # "params": {optional overrides
@@ -37,7 +37,7 @@ src_path = Path(__file__).parent.parent
 sys.path.insert(0, str(src_path))
 
 from typing import Any, Dict, Optional
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
 from pydantic import BaseModel, Field, field_validator
 from pipeline.config import PipelineConfig
 from pipeline.main import VideoPipeline
@@ -46,6 +46,7 @@ logger = logging.getLogger("__name__")
 
 logging.basicConfig(level=logging.INFO)
 app = FastAPI(title="Audio-to-Text Pipeline API")
+
 # ---------------------------------------------------------------------------
 ## Pydantic models
 # ---------------------------------------------------------------------------
@@ -60,7 +61,7 @@ class AudioToTextRequest(BaseModel):
         None, description="Control channel URL (reserved for future use)"
     )
     publish_url: str = Field(..., description="Trickle publish URL")
-    text_url: Optional[str] = Field(
+    data_url: Optional[str] = Field(
         None, description="Optional URL for posting generated subtitle files"
     )
     events_url: Optional[str] = Field(..., description="Optional URL for posting pipeline events")
@@ -68,7 +69,7 @@ class AudioToTextRequest(BaseModel):
         None, description="Overrides for PipelineConfig (mirrors PipelineConfig fields)"
     )
 
-    @field_validator("subscribe_url", "publish_url", "text_url","events_url", check_fields=True)
+    @field_validator("subscribe_url", "publish_url", "data_url","events_url", check_fields=True)
     def _strip(cls, v):  # noqa: D401
         if isinstance(v, str):
             return v.strip()
@@ -101,23 +102,30 @@ async def _run_pipeline(cfg: PipelineConfig) -> None:
 # ---------------------------------------------------------------------------
 # Routes
 # ---------------------------------------------------------------------------
-@app.post("/live-video-to-video", response_model=AudioToTextResponse, status_code=202)
-@app.post("/audio-to-text", response_model=AudioToTextResponse, status_code=202)
+@app.post("/live-video-to-video", response_model=AudioToTextResponse, status_code=200)
+@app.post("/audio-to-text", response_model=AudioToTextResponse, status_code=200)
 async def audio_to_text(request: AudioToTextRequest):
     # Build PipelineConfig instance
     params_dict: Dict[str, Any] = request.params or {}
 
-    # Validate param names against PipelineConfig
-    unknown_params = set(params_dict) - set(PipelineConfig.__annotations__)
-    if unknown_params:
-        raise HTTPException(status_code=400, detail=f"Unknown param fields: {unknown_params}")
+    # Filter out any param keys not defined in PipelineConfig
+    allowed_keys = set(PipelineConfig.__annotations__)
+    filtered_params = {k: v for k, v in params_dict.items() if k in allowed_keys}
+    ignored_keys = set(params_dict) - allowed_keys
+    if ignored_keys:
+        logger.warning("Ignoring unknown param fields: %s", ignored_keys)
+
+    # Reject if another pipeline is currently running
+    active_tasks = [t for t in _tasks.values() if not t.done()]
+    if active_tasks:
+        raise HTTPException(status_code=409, detail="A pipeline is already running. Only one concurrent job is allowed.")
 
     task_id = uuid.uuid4().hex
     cfg_kwargs = {
-        **params_dict,
+        **filtered_params,
         "subscribe_url": request.subscribe_url,
         "publish_url": request.publish_url,
-        "text_url": request.text_url,
+        "data_url": request.data_url,
         "events_url": request.events_url,
         "pipeline_uuid": task_id,
     }

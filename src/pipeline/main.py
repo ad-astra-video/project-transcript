@@ -71,7 +71,7 @@ class VideoPipeline:
         self.input_segment_queue = asyncio.Queue(maxsize=10)  # Buffer input segments
         self.output_segment_queue = asyncio.Queue(maxsize=10)  # Buffer output segments
         
-        # Text publisher (created lazily if text_url provided)
+        # Text publisher (created lazily if data_url provided)
         self.text_publisher: Optional[TricklePublisher] = None
         self.events_publisher: Optional[TricklePublisher] = None
         self.stats_queue: asyncio.Queue[StreamStats] = asyncio.Queue()
@@ -96,8 +96,8 @@ class VideoPipeline:
             await self.whisper_client.initialize()
 
             # Initialize text publisher if configured
-            if self.config.enable_text_url and self.config.text_url:
-                self.text_publisher = TricklePublisher(self.config.text_url, mime_type="text/plain")
+            if self.config.enable_data_url and self.config.data_url:
+                self.text_publisher = TricklePublisher(self.config.data_url, mime_type="application/json")
                 await self.text_publisher.start()
 
             if self.config.enable_events_url and self.config.events_url:
@@ -321,7 +321,7 @@ class VideoPipeline:
                         
                         # Send subtitle after video segment is published
                         if srt_content:
-                            await self._send_subtitle_to_text_url(srt_content, segment_idx)
+                            await self._send_subtitle_to_data_url(srt_content, segment_idx)
                         published_count += 1
                         self.flow_metrics['published_segments'] = published_count
                         
@@ -415,7 +415,7 @@ class VideoPipeline:
             if not processed_data:
                 return (None, None)
 
-            return (processed_data, srt_content if (self.config.enable_text_url and self.config.text_url and srt_content) else None)
+            return (processed_data, srt_content if (self.config.enable_data_url and self.config.data_url and srt_content) else None)
             
         except Exception as e:
             logger.error(f"Error processing segment {segment_idx}: {e}")
@@ -461,7 +461,7 @@ class VideoPipeline:
             logger.error(f"Failed to publish segment {segment_idx}: {e}")
             self.flow_metrics['errors'] += 1
     
-    async def _send_subtitle_to_text_url(self, srt_content: str, segment_idx: int):
+    async def _send_subtitle_to_data_url(self, srt_content: str, segment_idx: int):
         """
         Send subtitle content to data URL.
         
@@ -473,7 +473,13 @@ class VideoPipeline:
         if self.running and self.text_publisher:
             try:
                 writer = await self.text_publisher.next()
-                await writer.write(srt_content.encode("utf-8"))
+                # Create JSON structure for subtitle data
+                subtitle_data = {
+                    "segment_idx": segment_idx,
+                    "srt_content": srt_content,
+                    "timestamp_utc": datetime.now(timezone.utc).isoformat()
+                }
+                await writer.write(json.dumps(subtitle_data).encode("utf-8"))
                 await writer.close()
                 logger.debug(f"Sent subtitle for segment {segment_idx} via Trickle text channel")
                 return

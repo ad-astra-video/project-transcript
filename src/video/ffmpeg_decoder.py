@@ -57,94 +57,30 @@ class FFmpegDecoder:
     async def _extract_audio(self, input_file: str, output_file: str) -> bool:
         """Extract audio stream from segment with fallback strategies."""
         try:
-            # Strategy 2: Try copying audio stream as-is (no conversion)
-            if await self._extract_audio_copy(input_file, output_file):
+            # Strategy 1: Try direct conversion with increased analysis
+            if await self._extract_audio_direct(input_file, output_file):
                 return True
                 
-            # Strategy 3: Try WAV conversion (more basic format)
-            wav_file = output_file.replace('.flac', '.wav')
-            if await self._extract_audio_wav(input_file, wav_file):
-                # Rename WAV to expected FLAC name for compatibility
-                os.rename(wav_file, output_file)
-                return True
-                
-            logger.error(f"All audio extraction strategies failed for {input_file}")
+            logger.error(f"Audio extraction strategy failed for {input_file}")
             return False
             
         except Exception as e:
             logger.error(f"Error in audio extraction: {e}")
             return False
     
-    async def _extract_audio_copy(self, input_file: str, output_file: str) -> bool:
-        """Extract audio by copying stream (no conversion)."""
-        try:
-            # Copy audio stream as-is, then convert to FLAC in a second step
-            temp_audio = output_file.replace('.flac', '_temp.ac3')
-            
-            # Step 1: Copy audio stream
-            cmd1 = [
-                'ffmpeg', '-y',
-                '-i', input_file,
-                '-vn',  # No video
-                '-c:a', 'copy',  # Copy audio without re-encoding
-                temp_audio
-            ]
-            
-            process1 = await asyncio.create_subprocess_exec(
-                *cmd1,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE
-            )
-            
-            _, stderr1 = await process1.communicate()
-            
-            if process1.returncode != 0 or not os.path.exists(temp_audio):
-                logger.debug(f"Audio copy failed: {stderr1.decode()}")
-                return False
-            
-            # Step 2: Convert to required format
-            cmd2 = [
-                'ffmpeg', '-y',
-                '-i', temp_audio,
-                '-ar', str(self.audio_sample_rate),
-                '-ac', '1',
-                '-f', 'flac',  # Force FLAC format
-                output_file
-            ]
-            
-            process2 = await asyncio.create_subprocess_exec(
-                *cmd2,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE
-            )
-            
-            _, stderr2 = await process2.communicate()
-            
-            # Cleanup temp file
-            if os.path.exists(temp_audio):
-                os.remove(temp_audio)
-            
-            if process2.returncode != 0:
-                logger.debug(f"Audio conversion failed: {stderr2.decode()}")
-                return False
-                
-            return os.path.exists(output_file)
-            
-        except Exception as e:
-            logger.debug(f"Error in audio copy strategy: {e}")
-            return False
-    
-    async def _extract_audio_wav(self, input_file: str, output_file: str) -> bool:
-        """Extract audio as WAV (most basic format)."""
+    async def _extract_audio_direct(self, input_file: str, output_file: str) -> bool:
+        """Direct audio extraction with enhanced analysis parameters."""
         try:
             cmd = [
                 'ffmpeg', '-y',
+                '-analyzeduration', '10M',  # Increase analysis duration
+                '-probesize', '10M',        # Increase probe size
                 '-i', input_file,
                 '-vn',  # No video
                 '-ar', str(self.audio_sample_rate),
                 '-ac', '1',  # Mono audio
-                '-c:a', 'pcm_s16le',  # PCM 16-bit little-endian (basic format)
-                '-f', 'wav',
+                '-c:a', 'flac',  # FLAC encoder
+                '-map', '0:a?',  # Map audio stream if available, ignore if missing
                 output_file
             ]
             
@@ -157,13 +93,13 @@ class FFmpegDecoder:
             stdout, stderr = await process.communicate()
             
             if process.returncode != 0:
-                logger.debug(f"WAV extraction failed: {stderr.decode()}")
+                logger.debug(f"Direct audio extraction failed: {stderr.decode()}")
                 return False
                 
-            return os.path.exists(output_file)
+            return os.path.exists(output_file) and os.path.getsize(output_file) > 0
             
         except Exception as e:
-            logger.debug(f"Error in WAV extraction: {e}")
+            logger.debug(f"Error in direct audio extraction: {e}")
             return False
     
     def _cleanup_files(self, file_paths: list):

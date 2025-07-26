@@ -31,6 +31,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libvdpau-dev \
     libvorbis-dev \
     libxcb1-dev \
+    libx264-dev \
     libxcb-shm0-dev \
     libxcb-xfixes0-dev \
     texinfo \
@@ -46,10 +47,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 WORKDIR /tmp/ffmpeg_sources
 
 # Download and extract FFmpeg source
-RUN wget -O ffmpeg.tar.bz2 https://ffmpeg.org/releases/ffmpeg-6.0.tar.bz2 && \
-    tar xjf ffmpeg.tar.bz2 && \
-    rm ffmpeg.tar.bz2 && \
-    cd ffmpeg-6.0 && \
+RUN wget -O ffmpeg.tar.xz https://ffmpeg.org/releases/ffmpeg-7.1.1.tar.xz && \
+    tar -xJf ffmpeg.tar.xz && \
+    rm ffmpeg.tar.xz && \
+    cd ffmpeg-7.1.1 && \
     ./configure \
       --prefix=/usr/local \
       --pkg-config-flags="--static" \
@@ -57,6 +58,7 @@ RUN wget -O ffmpeg.tar.bz2 https://ffmpeg.org/releases/ffmpeg-6.0.tar.bz2 && \
       --enable-nonfree \
       --enable-libass \
       --enable-libfreetype \
+      --enable-libx264 \
       --enable-libvorbis \
       --enable-postproc \
       --enable-avfilter \
@@ -75,7 +77,7 @@ RUN wget -O ffmpeg.tar.bz2 https://ffmpeg.org/releases/ffmpeg-6.0.tar.bz2 && \
     make install && \
     ldconfig && \
     cd .. && \
-    rm -rf ffmpeg-6.0
+    rm -rf ffmpeg-7.1.1
 
 # Create app directory
 WORKDIR /app

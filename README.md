@@ -83,13 +83,12 @@ The pipeline is configured via environment variables:
 |----------|---------|-------------|
 | `SUBSCRIBE_URL` | `http://localhost:8080/subscribe` | Trickle subscriber URL for input video |
 | `PUBLISH_URL` | `http://localhost:8080/publish` | Trickle publisher URL for output video |
-| `TEXT_URL` | None | Optional URL for sending subtitle files |
+| `DATA_URL` | None | Optional URL for sending subtitle files |
 | `SEGMENT_DURATION` | `3.0` | Video segment duration in seconds |
 | `WHISPER_MODEL` | `base` | Whisper model size (`tiny`, `base`, `small`, `medium`, `large`) |
-| `WHISPER_LANGUAGE` | Auto-detect | Language code for transcription (e.g., `en`, `es`, `fr`) |
 | `WHISPER_DEVICE` | `cpu` | Device for transcription (`cpu`, `cuda`) |
 | `HARD_CODE_SUBTITLES` | `true` | Whether to hard-code subtitles (true) or soft-code (false) |
-| `ENABLE_TEXT_URL` | `false` | Whether to send subtitles to data URL |
+| `ENABLE_DATA_URL` | `false` | Whether to send subtitles to data URL |
 
 ## Usage
 
