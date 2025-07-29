@@ -68,7 +68,7 @@ class VideoPipeline:
         )
         
         # Processing queues for robust async flow
-        self.input_segment_queue = asyncio.Queue(maxsize=10)  # Buffer input segments
+        self.input_segment_queue = asyncio.Queue(maxsize=30)  # Buffer input segments
         self.output_segment_queue = asyncio.Queue(maxsize=10)  # Buffer output segments
         
         # Text publisher (created lazily if data_url provided)
