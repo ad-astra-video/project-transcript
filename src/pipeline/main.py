@@ -1,5 +1,8 @@
 """
-Main pipeline orchestration for video transcription and subtitle integration.
+StreamProcessor-based pipeline for transcription and subtitle overlay.
+
+This module implements model lifecycle and per-frame processing, while
+pytrickle's StreamProcessor manages I/O and HTTP endpoints.
 """
 
 import asyncio
@@ -7,558 +10,254 @@ import logging
 import os
 import sys
 import json
-import asyncio
-from dataclasses import dataclass, asdict
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Optional, Tuple
+from typing import Optional
 
 # Add src to path for imports
 src_path = Path(__file__).parent.parent
 sys.path.insert(0, str(src_path))
 
-from pipeline.config import PipelineConfig
-from video.ffmpeg_decoder import FFmpegDecoder
-from transcription.whisper_client import WhisperClient
+from transcription.whisper_client import WhisperClient, TranscriptionSegment
 from transcription.srt_generator import SRTGenerator
-from subtitles.subtitle_integrator import SubtitleIntegrator
-from pytrickle.subscriber import TrickleSubscriber
-from pytrickle.publisher import TricklePublisher
+from pytrickle import StreamProcessor
+from pytrickle import AudioFrame
+import numpy as np
+import tempfile
+import wave
 
 logger = logging.getLogger(__name__)
 
-@dataclass
-class StreamStats:
-    pipeline_uuid: Optional[str]
-    segment_idx: int
-    segments_processed_total: int
-    timestamp_utc: str
-    status: str
-    error_msg: Optional[str] = None
-    processing_ms: Optional[float] = None
-    ingest_to_process_ms: Optional[float] = None
+class TranscriberState:
+    """Holds model, buffers, and runtime params for transcription and overlay."""
+
+    def __init__(self):
+        # Model and generators
+        self.whisper_client: Optional[WhisperClient] = None
+        self.srt_generator: SRTGenerator = SRTGenerator()
+
+        # Whisper config
+        self.whisper_model: str = "large"
+        self.whisper_language: Optional[str] = None
+        self.whisper_device: str = "cuda"
+        self.compute_type: str = "float16"
+
+        # Audio processing
+        self.audio_sample_rate: int = 16000
+        self.window_seconds: float = 3.0
+        self.overlap_seconds: float = 1.0
+        self.audio_buffer: np.ndarray = np.zeros((0,), dtype=np.float32)  # mono float32 [-1,1]
+        self.buffer_start_ts: Optional[float] = None  # seconds
+        self.buffer_rate: Optional[int] = None
+
+        # Transcript state
+        self.current_segments: list[TranscriptionSegment] = []
+        self.current_srt: str = ""
+        self.last_sent_data_time: float = 0.0
 
 
+# Global state and processor reference
+STATE: Optional[TranscriberState] = None
+PROCESSOR: Optional[StreamProcessor] = None
 
-class VideoPipeline:
-    """Main pipeline for video transcription and subtitle integration."""
-    
-    def __init__(self, config: PipelineConfig):
-        """
-        Initialize the video pipeline.
-        
-        Args:
-            config: Pipeline configuration
-        """
-        self.config = config
-        self.decoder = FFmpegDecoder()
-        self.whisper_client = WhisperClient(
-            model_size=config.whisper_model,
-            device=config.whisper_device,
-            compute_type=config.compute_type, 
-            language=config.whisper_language
-        )
-        self.srt_generator = SRTGenerator()
-        self.subtitle_integrator = SubtitleIntegrator(
-            subtitle_font=config.subtitle_font,
-            subtitle_font_size=config.subtitle_font_size,
-            subtitle_color=config.subtitle_color,
-            subtitle_background=config.subtitle_background,
-            subtitle_position=config.subtitle_position,
-        )
-        
-        # Processing queues for robust async flow
-        self.input_segment_queue = asyncio.Queue(maxsize=30)  # Buffer input segments
-        self.output_segment_queue = asyncio.Queue(maxsize=10)  # Buffer output segments
-        
-        # Text publisher (created lazily if data_url provided)
-        self.text_publisher: Optional[TricklePublisher] = None
-        self.events_publisher: Optional[TricklePublisher] = None
-        self.stats_queue: asyncio.Queue[StreamStats] = asyncio.Queue()
 
-        self.running = False
-        
-        # Flow metrics for monitoring
-        self.flow_metrics = {
-            "segments_received": 0,
-            "segments_processed": 0,
-            "segments_dropped": 0,
-            "errors": 0,
-        }
-        self.segments_processed_count = 0
-        
-    async def initialize(self):
-        """Initialize the pipeline components."""
+def _normalize_bool(v) -> bool:
+    if isinstance(v, bool):
+        return v
+    if v is None:
+        return False
+    if isinstance(v, (int, float)):
+        return bool(v)
+    s = str(v).strip().lower()
+    return s in {"1", "true", "yes", "y", "on"}
+
+
+def _frame_time_seconds(timestamp: int, time_base) -> float:
+    try:
+        return float(timestamp) * float(time_base)
+    except Exception:
+        return float(timestamp)
+
+
+async def load_model(**kwargs):
+    """Initialize Whisper, SRT generator, fonts, and buffers from params."""
+    global STATE
+    STATE = TranscriberState()
+
+    params = dict(kwargs or {})
+
+    # Whisper params
+    STATE.whisper_model = str(params.get("whisper_model", STATE.whisper_model))
+    STATE.whisper_language = params.get("whisper_language", STATE.whisper_language)
+    STATE.whisper_device = str(params.get("whisper_device", STATE.whisper_device))
+    STATE.compute_type = str(params.get("compute_type", STATE.compute_type))
+
+    # Audio params
+    STATE.audio_sample_rate = int(params.get("audio_sample_rate", STATE.audio_sample_rate))
+    STATE.window_seconds = float(params.get("chunk_window", STATE.window_seconds))
+    STATE.overlap_seconds = float(params.get("chunk_overlap", STATE.overlap_seconds))
+
+    # Init model
+    STATE.whisper_client = WhisperClient(
+        model_size=STATE.whisper_model,
+        device=STATE.whisper_device,
+        compute_type=STATE.compute_type,
+        language=STATE.whisper_language,
+    )
+    await STATE.whisper_client.initialize()
+
+
+def _append_audio(frame: AudioFrame):
+    """Append audio samples from frame into state's rolling mono buffer."""
+    assert STATE is not None
+    samples = frame.samples
+    if samples.ndim == 2:
+        # [channels, samples] or [samples, channels]
+        mono = samples.mean(axis=0) if samples.shape[0] < samples.shape[1] else samples.mean(axis=1)
+    else:
+        mono = samples
+    if mono.dtype == np.int16:
+        mono = mono.astype(np.float32) / 32768.0
+    elif mono.dtype == np.int32:
+        mono = mono.astype(np.float32) / 2147483648.0
+    else:
+        mono = mono.astype(np.float32)
+
+    start_ts = _frame_time_seconds(frame.timestamp, frame.time_base)
+    if STATE.buffer_start_ts is None:
+        STATE.buffer_start_ts = start_ts
+        STATE.buffer_rate = frame.rate
+    STATE.audio_buffer = np.concatenate([STATE.audio_buffer, mono])
+
+
+def _buffer_duration_seconds() -> float:
+    assert STATE is not None
+    if STATE.buffer_rate is None or STATE.buffer_start_ts is None:
+        return 0.0
+    return len(STATE.audio_buffer) / float(STATE.buffer_rate)
+
+
+def _write_wav(samples: np.ndarray, sample_rate: int) -> str:
+    path = tempfile.mktemp(suffix=".wav")
+    pcm16 = np.clip(samples, -1.0, 1.0)
+    pcm16 = (pcm16 * 32767.0).astype(np.int16)
+    with wave.open(path, "wb") as wf:
+        wf.setnchannels(1)
+        wf.setsampwidth(2)
+        wf.setframerate(sample_rate)
+        wf.writeframes(pcm16.tobytes())
+    return path
+
+
+async def _transcribe_current_window(now_ts: float):
+    assert STATE is not None and STATE.whisper_client is not None
+    if STATE.buffer_rate is None or STATE.buffer_start_ts is None:
+        return
+
+    sr = STATE.buffer_rate
+    total_len = len(STATE.audio_buffer)
+    win_len = int(max(1, STATE.window_seconds * sr))
+    if total_len < win_len:
+        return
+
+    start_idx = total_len - win_len
+    window_samples = STATE.audio_buffer[start_idx:]
+    window_start_ts = STATE.buffer_start_ts + (start_idx / float(sr))
+
+    temp_path = _write_wav(window_samples, sr)
+    try:
+        segments = await STATE.whisper_client.transcribe_audio(temp_path, int(window_start_ts * 1000))
+    finally:
         try:
-            logger.info("Initializing video processing pipeline...")
-            
-            # Initialize whisper client
-            await self.whisper_client.initialize()
+            os.remove(temp_path)
+        except Exception:
+            pass
 
-            # Initialize text publisher if configured
-            if self.config.enable_data_url and self.config.data_url:
-                self.text_publisher = TricklePublisher(self.config.data_url, mime_type="application/json")
-                await self.text_publisher.start()
+    STATE.current_segments = segments
+    # Use absolute/global timestamps in SRT by offsetting with window_start_ts
+    STATE.current_srt = STATE.srt_generator.generate_srt(
+        segments,
+        segment_idx=0,
+        base_offset_seconds=window_start_ts,
+    )
 
-            if self.config.enable_events_url and self.config.events_url:
-                self.events_publisher = TricklePublisher(self.config.events_url, mime_type="application/json")
-                await self.events_publisher.start()
-            
-            logger.info("Pipeline initialization complete")
-            
+    keep_len = int(max(0, STATE.overlap_seconds * sr))
+    STATE.audio_buffer = STATE.audio_buffer[-keep_len:] if keep_len > 0 else np.zeros((0,), dtype=np.float32)
+    end_ts = window_start_ts + (win_len / float(sr))
+    STATE.buffer_start_ts = end_ts - (keep_len / float(sr))
+
+    if PROCESSOR is not None:
+        try:
+            payload = {
+                "type": "subtitle_update",
+                "timestamp_utc": datetime.now(timezone.utc).isoformat(),
+                "window": {"start": window_start_ts, "end": end_ts},
+                "srt_content": STATE.current_srt,
+            }
+            await PROCESSOR.send_data(json.dumps(payload))
+            logger.info(f"Sent subtitle update: {STATE.current_srt}")
         except Exception as e:
-            logger.error(f"Failed to initialize pipeline: {e}")
-            raise
-    
-    async def run(self):
-        """Run the main pipeline processing loop."""
-        self.running = True
-        logger.info("Starting video processing pipeline...")
-        
+            logger.warning(f"Failed to send data payload: {e}")
+
+
+async def process_audio_async(frame: AudioFrame):
+    if STATE is None:
+        return None
+    _append_audio(frame)
+    if _buffer_duration_seconds() >= STATE.window_seconds:
+        now_ts = _frame_time_seconds(frame.timestamp, frame.time_base)
+        await _transcribe_current_window(now_ts)
+    return None
+
+
+async def update_params(params: dict):
+    if STATE is None:
+        return
+    if "chunk_window" in params:
+        STATE.window_seconds = float(params.get("chunk_window", STATE.window_seconds))
+    if "chunk_overlap" in params:
+        STATE.overlap_seconds = float(params.get("chunk_overlap", STATE.overlap_seconds))
+
+
+async def on_stream_stop():
+    global STATE
+    if STATE is None:
+        return
+    # Optionally send final subtitle packet
+    if PROCESSOR is not None and STATE.current_srt:
         try:
-            # Start concurrent tasks
-            tasks = await asyncio.gather(
-                self._trickle_subscriber_task(),
-                self._segment_processor_task(),
-                self._trickle_publisher_task(),
-                self._send_events_from_stats_queue(),
-                return_exceptions=True
-            )
-            
-            # Log any task errors
-            for i, result in enumerate(tasks):
-                if isinstance(result, Exception):
-                    logger.error(f"Task {i} failed: {result}")
-            
-        except KeyboardInterrupt:
-            logger.info("Pipeline interrupted by user")
-        except Exception as e:
-            logger.error(f"Pipeline error: {e}")
-            raise
-        finally:
-            self.running = False
-            await self.cleanup()
-    
-    async def _trickle_subscriber_task(self):
-        """Continuously fetch and buffer trickle segments for smooth flow."""
-        try:
-            logger.info("Starting async trickle subscriber with enhanced buffering")
-            async with TrickleSubscriber(self.config.subscribe_url) as subscriber:
-                segment_count = 0
-                consecutive_empty = 0  # Tracks consecutive empty polls for backoff
-                max_empty_retries = 10  # Max retries before giving up
-
-                while self.running:
-                    try:
-                        # Fetch segment with backoff on empty
-                        current_segment = await subscriber.next()
-                        if current_segment is None:
-                            # No segment available yet – wait and retry with progressive backoff
-                            consecutive_empty += 1
-                            if consecutive_empty >= max_empty_retries:
-                                logger.info("No more segments available, ending subscriber")
-                                break
-                            # Progressive backoff for empty segments
-                            sleep_time = min(0.1 * consecutive_empty, 2.0)
-                            await asyncio.sleep(sleep_time)
-                            continue    
-                        
-                        consecutive_empty = 0  # Reset counter on successful fetch
-                        segment_count += 1
-                        
-                        # Read segment data
-                        segment_data = await self._read_complete_segment(current_segment)
-                        if segment_data:
-                            # Queue segment with priority handling
-                            try:
-                                received_time = asyncio.get_event_loop().time()
-                                await asyncio.wait_for(
-                                    self.input_segment_queue.put((segment_count, segment_data, received_time)),
-                                    timeout=0.5  # Longer timeout for buffering
-                                )
-                                self.flow_metrics['segments_received'] += 1
-                                self.flow_metrics['input_queue_depth'] = self.input_segment_queue.qsize()
-                                
-                                if segment_count % 10 == 0:
-                                    logger.debug(f"Buffered segment {segment_count} (queue depth: {self.flow_metrics['input_queue_depth']})")
-                                    
-                            except asyncio.TimeoutError:
-                                # If queue is full, wait longer rather than dropping
-                                logger.warning(f"Input queue full, waiting for space...")
-                                await self.input_segment_queue.put((segment_count, segment_data))
-                        
-                        # Close segment
-                        if hasattr(current_segment, 'close'):
-                            try:
-                                await current_segment.close()
-                            except:
-                                pass
-                                
-                    except Exception as e:
-                        logger.error(f"Error in subscriber: {e}")
-                        self.flow_metrics['errors'] += 1
-                        await asyncio.sleep(0.2)
-                        
-            logger.info(f"Trickle subscriber finished: {segment_count} segments buffered")
-                        
-        except Exception as e:
-            logger.error(f"Trickle subscriber task error: {e}")
-            self.flow_metrics['errors'] += 1
-        finally:
-            # Signal end of input
-            await self.input_segment_queue.put(None)
-    
-    async def _read_complete_segment(self, segment_reader) -> Optional[bytes]:
-        """Read complete segment data from segment reader."""
-        try:
-            data_chunks = []
-            while True:
-                chunk = await segment_reader.read(8192)
-                if not chunk:
-                    break
-                data_chunks.append(chunk)
-            
-            if data_chunks:
-                return b''.join(data_chunks)
-            return None
-            
-        except Exception as e:
-            logger.error(f"Error reading segment data: {e}")
-            return None
-    
-    async def _segment_worker(self, segment_idx: int, segment_data: bytes, received_time: float):
-        """Process a single segment and publish result to output queue."""
-        try:
-            result = await self._process_single_segment(segment_idx, segment_data, received_time)
-        except Exception as e:
-            logger.error(f"Error in segment worker for segment {segment_idx}: {e}")
-            self.flow_metrics['errors'] += 1
-            result = None
-        finally:
-            # Mark the input queue task as done regardless of outcome
-            self.input_segment_queue.task_done()
-
-        if result:
-            if isinstance(result, tuple):
-                processed_data, srt_content = result
-                await self.output_segment_queue.put((segment_idx, processed_data, srt_content))
-            else:
-                await self.output_segment_queue.put((segment_idx, result))
-            self.flow_metrics['segments_processed'] += 1
-            self.flow_metrics['output_queue_depth'] = self.output_segment_queue.qsize()
-
-    async def _segment_processor_task(self):
-        """Spawn worker tasks for each incoming segment and wait for their completion."""
-        pending_tasks = set()
-        try:
-            while self.running:
-                try:
-                    segment_item = await asyncio.wait_for(
-                        self.input_segment_queue.get(),
-                        timeout=1.0
-                    )
-
-                    if segment_item is None:  # End signal
-                        logger.info("Received end signal for segment processor")
-                        self.running = False
-                        break
-
-                    segment_idx, segment_data, received_time = segment_item
-
-                    # Spawn a worker task
-                    task = asyncio.create_task(self._segment_worker(segment_idx, segment_data, received_time))
-                    pending_tasks.add(task)
-                    task.add_done_callback(pending_tasks.discard)
-
-                    # Update queue depth metric
-                    self.flow_metrics['input_queue_depth'] = self.input_segment_queue.qsize()
-
-                except asyncio.TimeoutError:
-                    continue  # Check if still running
-                except Exception as e:
-                    logger.error(f"Error spawning segment worker: {e}")
-                    self.flow_metrics['errors'] += 1
-                    await asyncio.sleep(0.1)
-        finally:
-            # Wait for any remaining workers to finish
-            if pending_tasks:
-                await asyncio.gather(*pending_tasks, return_exceptions=True)
-            # Signal end of processing
-            await self.output_segment_queue.put(None)
-    
-    async def _trickle_publisher_task(self):
-        """Publish processed segments via trickle publisher."""
-        published_count = 0
-        
-        # Determine container type based on subtitle mode
-        hard_flag = bool(self.config.hard_code_subtitles) and str(self.config.hard_code_subtitles).lower() != "false"
-        mime_type = "video/mp2t" if hard_flag else "video/x-matroska"
-        logger.info(f"Using container format: {mime_type} ({'hard' if hard_flag else 'soft'} subtitles)")
-        
-        try:
-            async with TricklePublisher(self.config.publish_url, mime_type=mime_type) as publisher:
-                while self.running:
-                    try:
-                        # Get processed segment from output queue
-                        segment_item = await asyncio.wait_for(
-                            self.output_segment_queue.get(),
-                            timeout=1.0
-                        )
-                        
-                        if segment_item is None:  # End signal
-                            logger.info("Received end signal for publisher")
-                            self.running = False
-                            break
-                        
-                        if len(segment_item) == 3:
-                            segment_idx, segment_data, srt_content = segment_item
-                        else:
-                            segment_idx, segment_data = segment_item
-                            srt_content = None
-                        
-                        # Publish segment
-                        await self._publish_segment_data(publisher, segment_data, segment_idx)
-                        
-                        # Send subtitle after video segment is published
-                        if srt_content:
-                            await self._send_subtitle_to_data_url(srt_content, segment_idx)
-                        published_count += 1
-                        self.flow_metrics['published_segments'] = published_count
-                        
-                        # Mark task done
-                        self.output_segment_queue.task_done()
-                        
-                        if published_count % 10 == 0:
-                            logger.info(f"Published {published_count} segments")
-                    
-                    except asyncio.TimeoutError:
-                        continue  # Check if still running
-                    except Exception as e:
-                        logger.error(f"Error in publisher: {e}")
-                        self.flow_metrics['errors'] += 1
-                        await asyncio.sleep(0.1)
-        
-        except Exception as e:
-            logger.error(f"Trickle publisher task error: {e}")
-
-    async def _process_single_segment(
-        self, segment_idx: int, segment_data: bytes, received_time: float
-    ) -> Tuple[Optional[bytes], Optional[str]]:
-        """
-        Process a single video segment.
-        
-        Args:
-            segment_idx: Segment index
-            segment_data: Raw segment data
-            received_time: Time the segment was received
-            
-        Returns:
-            Processed segment data or None on error
-        """
-        temp_files = []
-        
-        try:
-            logger.debug(f"Processing segment {segment_idx}")
-            
-            # Step 1: extract audio from segment data
-            video_file, audio_file = await self.decoder.decode_segment(segment_data, segment_idx)
-            if not video_file or not audio_file:
-                logger.error(f"Failed to decode segment {segment_idx}")
-                # Return original segment data as fallback
-                return segment_data, None
-            temp_files.extend([video_file, audio_file])
-            
-            # Step 2: Transcribe audio
-            transcription = await self.whisper_client.transcribe_audio(audio_file, segment_idx)
-            if not transcription:
-                logger.debug(f"No transcription found for segment {segment_idx}")
-                # Return original segment data without subtitles
-                return segment_data, None
-            
-            # Step 3: Generate SRT content
-            srt_content = self.srt_generator.generate_srt(
-                transcription, segment_idx
-            )
-            
-            # Step 4: Integrate subtitles using appropriate container format
-            hard_flag = bool(self.config.hard_code_subtitles) and str(self.config.hard_code_subtitles).lower() != "false"
-            processing_start_time = asyncio.get_event_loop().time()
-            processing_ms = (asyncio.get_event_loop().time() - processing_start_time) * 1000
-            ingest_to_process_ms = (processing_start_time - received_time) * 1000
-
-            processed_data, error_msg = await self.subtitle_integrator.integrate_subtitles(
-                segment_idx, video_file, srt_content, hard=hard_flag
-            )
-            self.segments_processed_count += 1
-
-            if not processed_data:
-                logger.error(f"Error processing segment {segment_idx}, skipping: {error_msg}")
-                self.flow_metrics["segments_dropped"] += 1
-                status = "error"
-
-            else:
-                status = "ok"
-
-            stats = StreamStats(
-                pipeline_uuid=self.config.pipeline_uuid,
-                segment_idx=segment_idx,
-                segments_processed_total=self.segments_processed_count,
-                timestamp_utc=datetime.now(timezone.utc).isoformat(),
-                status=status,
-                error_msg=error_msg,
-                processing_ms=processing_ms,
-                ingest_to_process_ms=ingest_to_process_ms,
-            )
-            if self.config.enable_events_url:
-                await self.stats_queue.put(stats)
-
-            if not processed_data:
-                return (None, None)
-
-            return (processed_data, srt_content if (self.config.enable_data_url and self.config.data_url and srt_content) else None)
-            
-        except Exception as e:
-            logger.error(f"Error processing segment {segment_idx}: {e}")
-            self.flow_metrics['errors'] += 1
-            # Return original data with None for SRT to maintain tuple structure
-            return segment_data, None
-        finally:
-            # Cleanup temporary files
-            for temp_file in temp_files:
-                try:
-                    if os.path.exists(temp_file):
-                        os.remove(temp_file)
-                        # Try to remove parent directory if empty
-                        parent_dir = os.path.dirname(temp_file)
-                        if os.path.exists(parent_dir) and not os.listdir(parent_dir):
-                            os.rmdir(parent_dir)
-                except Exception as e:
-                    logger.warning(f"Failed to cleanup temp file {temp_file}: {e}")
-    
-    async def _publish_segment_data(self, publisher, segment_data: bytes, segment_idx: int):
-        """
-        Publish processed video segment data via trickle publisher.
-        
-        Args:
-            publisher: TricklePublisher instance
-            segment_data: Processed video data
-            segment_idx: Segment index
-        """
-        try:
-            # Get segment writer from publisher
-            segment_writer = await publisher.next()
-            if not segment_writer:
-                logger.error(f"Failed to get segment writer for segment {segment_idx}")
-                return
-            
-            # Write video data
-            await segment_writer.write(segment_data)
-            await segment_writer.close()
-            
-            logger.debug(f"Published segment {segment_idx} ({len(segment_data)} bytes)")
-            
-        except Exception as e:
-            logger.error(f"Failed to publish segment {segment_idx}: {e}")
-            self.flow_metrics['errors'] += 1
-    
-    async def _send_subtitle_to_data_url(self, srt_content: str, segment_idx: int):
-        """
-        Send subtitle content to data URL.
-        
-        Args:
-            srt_content: SRT subtitle content
-            segment_idx: Segment index
-        """
-        # Use Trickle text publisher if available
-        if self.running and self.text_publisher:
-            try:
-                writer = await self.text_publisher.next()
-                # Create JSON structure for subtitle data
-                subtitle_data = {
-                    "segment_idx": segment_idx,
-                    "srt_content": srt_content,
-                    "timestamp_utc": datetime.now(timezone.utc).isoformat()
-                }
-                await writer.write(json.dumps(subtitle_data).encode("utf-8"))
-                await writer.close()
-                logger.debug(f"Sent subtitle for segment {segment_idx} via Trickle text channel")
-                return
-            except Exception as e:
-                logger.error(f"Error sending subtitle for segment {segment_idx} to data URL: {e}")
-
-    async def _send_events_from_stats_queue(self):
-        """
-        Continuously send events from the stats_queue to the events URL.
-        """
-        if not self.events_publisher:
-            logger.warning("Events publisher is not configured.")
-            return
-
-        while self.running:
-            try:
-                stats: StreamStats = await asyncio.wait_for(self.stats_queue.get(), timeout=10.0)
-                writer = await self.events_publisher.next()
-                if stats:
-                    await writer.write(json.dumps(asdict(stats)).encode("utf-8"))
-                    await writer.close()
-                logger.debug(f"Sent event for segment {stats.segment_idx} via Trickle events channel")
-                self.stats_queue.task_done()
-            except Exception as e:
-                logger.error(f"Error sending event to events URL: {e}")
-                await asyncio.sleep(0.1) 
-                break 
-                 
-                
-    async def stop(self):
-        """Stop the pipeline."""
-        self.running = False
-        logger.info("Pipeline stop requested")
-
-    async def cleanup(self):
-        """Cleanup pipeline resources."""
-        try:
-            # Close text publisher if open
-            if self.text_publisher:
-                await self.text_publisher.close()
-            if self.events_publisher:
-                await self.events_publisher.close()
-
-            logger.info(f"Pipeline cleanup complete. Final metrics: {self.flow_metrics}")
-        except Exception as e:
-            logger.error(f"Error during pipeline cleanup: {e}")
+            payload = {
+                "type": "subtitle_final",
+                "timestamp_utc": datetime.now(timezone.utc).isoformat(),
+                "srt_content": STATE.current_srt,
+            }
+            await PROCESSOR.send_data(json.dumps(payload))
+        except Exception:
+            pass
+    # Reset buffers
+    STATE.audio_buffer = np.zeros((0,), dtype=np.float32)
+    STATE.buffer_start_ts = None
+    STATE.buffer_rate = None
 
 
-async def main():
-    """Main entry point for the video processing pipeline."""
-    # Setup logging
+
+if __name__ == "__main__":
     logging.basicConfig(
         level=logging.INFO,
         format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
     )
-    
-    try:
-        # Load configuration
-        config = PipelineConfig.from_env()
-        logger.info(f"Starting pipeline with config:")
-        logger.info(f"  Subscribe URL: {config.subscribe_url}")
-        logger.info(f"  Publish URL: {config.publish_url}")
-        logger.info(f"  Whisper Model: {config.whisper_model}")
-        logger.info(f"  Hard Code Subtitles: {config.hard_code_subtitles}")
-        
-        # Create and run pipeline
-        pipeline = VideoPipeline(config)
-        await pipeline.initialize()
-        await pipeline.run()
-        
-    except KeyboardInterrupt:
-        logger.info("Pipeline interrupted by user")
-    except Exception as e:
-        logger.error(f"Pipeline failed: {e}")
-        return 1
-    
-    return 0
+    loop = asyncio.get_event_loop()
+    loop.run_until_complete(load_model())
 
-
-if __name__ == "__main__":
-    exit_code = asyncio.run(main())
-    sys.exit(exit_code)
+    port = int(os.getenv("PORT", "8000"))
+    logger.info("Starting StreamProcessor on port %d", port)
+    # Instantiate global processor so helper funcs can send data
+    PROCESSOR = StreamProcessor(
+        video_processor=None,
+        audio_processor=process_audio_async,
+        param_updater=update_params,
+        on_stream_stop=on_stream_stop,
+        name="transcriber",
+        port=port,
+    )
+    PROCESSOR.run()

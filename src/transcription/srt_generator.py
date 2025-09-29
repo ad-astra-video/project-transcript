@@ -18,15 +18,19 @@ class SRTGenerator:
     
     def generate_srt(self, 
                     transcription_segments: List[TranscriptionSegment], 
-                    segment_idx: int) -> str:
+                    segment_idx: int,
+                    base_offset_seconds: float = 0.0) -> str:
         """
         Generate SRT subtitle content from transcription segments.
         
-        Uses segment-relative timing (Option A) - each segment starts from 00:00:00.
+        By default uses segment-relative timing (each segment list starts at 00:00:00).
+        If base_offset_seconds > 0, the times are emitted in absolute/global time
+        by adding the offset to each segment's start/end.
         
         Args:
             transcription_segments: List of transcription segments with timing
             segment_idx: Current segment index for logging
+            base_offset_seconds: Global offset (in seconds) to add to each cue
             
         Returns:
             SRT formatted subtitle string
@@ -42,9 +46,9 @@ class SRTGenerator:
             if not segment.text.strip() and not segment.text=="":
                 continue
                 
-            # Format timing (segment-relative)
-            start_time = self._seconds_to_srt_time(segment.start)
-            end_time = self._seconds_to_srt_time(segment.end)
+            # Format timing (apply global offset if provided)
+            start_time = self._seconds_to_srt_time(base_offset_seconds + segment.start)
+            end_time = self._seconds_to_srt_time(base_offset_seconds + segment.end)
             
             # Create SRT entry (standard format: number, timecode, text, blank line)
             srt_lines.append(str(subtitle_counter))

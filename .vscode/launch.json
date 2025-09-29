@@ -1,18 +1,18 @@
 {
     "version": "0.2.0",
     "configurations": [
-        {
-            "name": "Python: Main",
-            "request": "launch",
-            "type": "debugpy",
-            "program": "src/pipeline/main.py",
-            "console": "integratedTerminal",
-            "justMyCode": false,
-            "python": "${workspaceFolder}/.venv/bin/python3",
-            "env": {
-                "LD_LIBRARY_PATH": "/usr/local/cuda/lib64:/usr/local/cuda/extras/CUPTI/lib64:/home/user/.local/lib/python3.10/site-packages/nvidia/cudnn/lib/:${LD_LIBRARY_PATH}",
-                "PATH": "/usr/local/cuda/bin:${PATH}"
-            }
+      {
+        "name": "Python: Main",
+        "type": "debugpy",
+        "request": "launch",
+        "program": "src/pipeline/main.py",
+        "console": "integratedTerminal",
+        "justMyCode": false,
+        "python": "${workspaceFolder}/.venv/bin/python3",
+        "env": {
+          "LD_LIBRARY_PATH": "/usr/local/cuda/lib64:/usr/local/cuda/extras/CUPTI/lib64:/home/user/.local/lib/python3.10/site-packages/nvidia/cudnn/lib/:${LD_LIBRARY_PATH}",
+          "PATH": "/usr/local/cuda/bin:${PATH}"
         }
+      }
     ]
-}
+  }

@@ -9,9 +9,6 @@ ENV LD_LIBRARY_PATH="/usr/local/cuda/lib64:/usr/local/cuda/extras/CUPTI/lib64:/h
 # Default environment variables
 ENV WHISPER_MODEL=large
 ENV WHISPER_DEVICE=cuda
-ENV SUBSCRIBE_URL=http://172.17.0.1:3389/sample
-ENV PUBLISH_URL=http://172.17.0.1:3389/publish
-ENV SEGMENT_DURATION=3.0
 ENV MODEL_DIR=/models
 
 # Install system dependencies
@@ -43,42 +40,6 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libdav1d-dev \
     && rm -rf /var/lib/apt/lists/*
 
-# Compile FFmpeg from source with subtitle filters
-WORKDIR /tmp/ffmpeg_sources
-
-# Download and extract FFmpeg source
-RUN wget -O ffmpeg.tar.xz https://ffmpeg.org/releases/ffmpeg-7.1.1.tar.xz && \
-    tar -xJf ffmpeg.tar.xz && \
-    rm ffmpeg.tar.xz && \
-    cd ffmpeg-7.1.1 && \
-    ./configure \
-      --prefix=/usr/local \
-      --pkg-config-flags="--static" \
-      --enable-gpl \
-      --enable-nonfree \
-      --enable-libass \
-      --enable-libfreetype \
-      --enable-libx264 \
-      --enable-libvorbis \
-      --enable-postproc \
-      --enable-avfilter \
-      --enable-libxcb \
-      --enable-version3 \
-      --disable-debug \
-      --enable-shared \
-      --disable-doc \
-      --disable-htmlpages \
-      --disable-manpages \
-      --disable-podpages \
-      --disable-txtpages \
-      --enable-filter=subtitles \
-      --enable-filter=drawtext && \
-    make -j$(nproc) && \
-    make install && \
-    ldconfig && \
-    cd .. && \
-    rm -rf ffmpeg-7.1.1
-
 # Create app directory
 WORKDIR /app
 
@@ -86,18 +47,16 @@ WORKDIR /app
 COPY requirements.txt .
 
 # Install Python dependencies
-RUN pip3 install --no-cache-dir --upgrade pip && \
-    pip3 install torch==2.7.0+cu128 torchaudio==2.7.0+cu128 --index-url https://download.pytorch.org/whl/cu128 && \
-    pip3 install --no-cache-dir -r requirements.txt --ignore-installed torch torchaudio
+RUN pip3 install uv
 
-# Verify CUDA installation
-RUN python3 -c "import torch; print('CUDA available:', torch.cuda.is_available()); print('CUDA version:', torch.version.cuda); print('Device count:', torch.cuda.device_count())"
+RUN uv pip install -r requirements.txt --system
 
-# Copy application code
 COPY . .
 
 # create it so permissions are correct
 RUN mkdir -p ${MODEL_DIR}
 
+EXPOSE 8000
+
 # Set default command
-CMD ["uvicorn", "src.server.app:app", "--host", "0.0.0.0", "--port", "8000"]
+CMD ["python3", "-m","src.pipeline.main"]
