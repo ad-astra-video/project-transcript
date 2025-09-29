@@ -1,22 +1,31 @@
-# Video Transcription and Subtitle Integration Pipeline
+# Real-time Video Transcription Pipeline
 
-A Python-based real-time video processing pipeline that receives video segments via a trickle server, transcribes audio using faster-whisper, generates SRT subtitles, and integrates them back into the video stream.
+A Python-based real-time audio transcription pipeline built on the pytrickle framework. The application processes audio streams in real-time, transcribes speech using faster-whisper, and generates live SRT subtitles that are sent back through the trickle protocol.
+
+## Quick Start
+
+```bash
+# Build and run with Docker (recommended)
+docker build -t livepeer/byoc-transcipt .
+docker run -it --gpus all -p 8000:8000 -v /home/user/models:/modelslivepeer/byoc-transcipt
+
+# The service will start on port 8000 and be ready to process audio streams
+# Check logs for "Starting StreamProcessor on port 8000"
+```
 
 ## Features
 
-- **Real-time Processing**: Processes 3-second video segments as they arrive
-- **Speech Transcription**: Uses faster-whisper for accurate audio transcription
-- **Subtitle Integration**: Supports both hard-coded and soft-coded subtitles
-- **Trickle Protocol**: Built-in support for segment-based video streaming
-- **Optional Data URL**: Send subtitle files to a third-party URL (toggleable)
-- **Error Recovery**: Robust error handling and automatic recovery
+- **Real-time Audio Processing**: Processes audio frames as they arrive via pytrickle StreamProcessor
+- **Speech Transcription**: Uses faster-whisper for accurate audio transcription with CUDA acceleration
+- **Live SRT Generation**: Generates real-time SRT subtitles with proper timing
+- **Sliding Window Processing**: Uses configurable audio windows with overlap for continuous transcription
 
 ## Architecture
 
 ```
-Video Segments (Trickle) → Decode → Extract Audio → Transcribe → Generate SRT → Integrate Subtitles → Re-encode → Output (Trickle)
-                                                                                      ↓
-                                                                           Optional: Send to Data URL
+Audio Frames (pytrickle) → Buffer → Sliding Window → Whisper Transcription → SRT Generation → Publish to data_url
+                              ↓
+                        Rolling Buffer (3s window, 1s overlap)
 ```
 
 ## Project Structure
@@ -25,54 +34,54 @@ Video Segments (Trickle) → Decode → Extract Audio → Transcribe → Generat
 src/
 ├── pipeline/
 │   ├── __init__.py           # Pipeline module initialization
-│   ├── config.py             # Configuration management
-│   └── main.py               # Main pipeline orchestration
-├── video/
-│   ├── __init__.py           # Video processing module
-│   └── ffmpeg_decoder.py     # FFmpeg-based video decoding and audio extraction
-├── transcription/
-│   ├── __init__.py           # Transcription module
-│   ├── whisper_client.py     # faster-whisper integration 
-│   └── srt_generator.py      # SRT subtitle generation
-├── subtitles/
-│   ├── __init__.py           # Subtitle integration module
-│   └── subtitle_integrator.py # Hard/soft subtitle integration
-└── trickle/                  # Existing trickle protocol implementation
-    ├── trickle_subscriber.py
-    ├── trickle_publisher.py
-    └── media.py
+│   └── main.py               # Main StreamProcessor-based pipeline
+└── transcription/
+    ├── __init__.py           # Transcription module
+    ├── whisper_client.py     # faster-whisper integration with async support
+    └── srt_generator.py      # SRT subtitle generation with timing
+
+requirements.txt              # Python dependencies including pytrickle from git
+Dockerfile                    # CUDA-enabled container with uv package manager
+.dockerignore                 # Docker build context exclusions
 ```
 
 ## Installation
 
 ### Prerequisites
 
-- Python 3.8+
-- FFmpeg (must be installed and available in PATH)
-- CUDA-compatible GPU (optional, for faster transcription)
+- Python 3.10+
+- CUDA-compatible GPU (recommended for faster transcription)
+- Docker (for containerized deployment)
 
-### Setup
+### Local Development Setup
 
-1. **Clone or navigate to the project directory:**
+1. **Clone the repository:**
    ```bash
-   cd /home/user/project-transcript
+   git clone <repository-url>
+   cd project-transcript
    ```
 
-2. **Install Python dependencies:**
+2. **Create virtual environment:**
+   ```bash
+   python3 -m venv .venv
+   source .venv/bin/activate
+   ```
+
+3. **Install dependencies:**
    ```bash
    pip install -r requirements.txt
    ```
 
-3. **Install FFmpeg:**
+### Docker Setup (Recommended)
+
+1. **Build the Docker image:**
    ```bash
-   # Ubuntu/Debian
-   sudo apt update && sudo apt install ffmpeg
-   
-   # macOS
-   brew install ffmpeg
-   
-   # Windows
-   # Download from https://ffmpeg.org/download.html
+   docker build -t livepeer/byoc-transcipt .
+   ```
+
+2. **Run with GPU support:**
+   ```bash
+   docker run -it --gpus all -p 8000:8000 livepeer/byoc-transcipt
    ```
 
 ## Configuration
@@ -81,21 +90,30 @@ The pipeline is configured via environment variables:
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `SUBSCRIBE_URL` | `http://localhost:8080/subscribe` | Trickle subscriber URL for input video |
-| `PUBLISH_URL` | `http://localhost:8080/publish` | Trickle publisher URL for output video |
-| `DATA_URL` | None | Optional URL for sending subtitle files |
-| `SEGMENT_DURATION` | `3.0` | Video segment duration in seconds |
-| `WHISPER_MODEL` | `base` | Whisper model size (`tiny`, `base`, `small`, `medium`, `large`) |
-| `WHISPER_DEVICE` | `cpu` | Device for transcription (`cpu`, `cuda`) |
-| `HARD_CODE_SUBTITLES` | `true` | Whether to hard-code subtitles (true) or soft-code (false) |
-| `ENABLE_DATA_URL` | `false` | Whether to send subtitles to data URL |
+| `WHISPER_MODEL` | `large` | Whisper model size (`tiny`, `base`, `small`, `medium`, `large`) |
+| `WHISPER_DEVICE` | `cuda` | Device for transcription (`cpu`, `cuda`) |
+| `MODEL_DIR` | `/models` | Directory for storing Whisper models |
+| `PORT` | `8000` | Port for the StreamProcessor server |
+
+### Audio Processing Parameters
+
+| Parameter | Default | Description |
+|-----------|---------|-------------|
+| `audio_sample_rate` | `16000` | Audio sample rate for processing |
+| `chunk_window` | `3.0` | Audio window duration in seconds |
+| `chunk_overlap` | `1.0` | Overlap between windows in seconds |
+| `whisper_language` | `None` | Language code for transcription (auto-detect if None) |
+| `compute_type` | `float16` | Compute precision (`float16`, `float32`) |
 
 ## Usage
 
-### Basic Usage
+### Local Development
 
 ```bash
 # Run with default configuration
+python -m src.pipeline.main
+
+# Or run directly
 python src/pipeline/main.py
 ```
 
@@ -103,106 +121,115 @@ python src/pipeline/main.py
 
 ```bash
 # Set environment variables
-export SUBSCRIBE_URL="http://your-server:8080/subscribe"
-export PUBLISH_URL="http://your-server:8080/publish" 
 export WHISPER_MODEL="medium"
 export WHISPER_DEVICE="cuda"
-export HARD_CODE_SUBTITLES="false"
+export PORT="8000"
 
 # Run pipeline
-python src/pipeline/main.py
+python -m src.pipeline.main
 ```
 
-### Docker Usage (Optional)
+### Docker Usage
 
-```dockerfile
-FROM python:3.9-slim
+```bash
+# Build the image
+docker build -t livepeer/byoc-transcipt .
 
-# Install FFmpeg
-RUN apt-get update && apt-get install -y ffmpeg && rm -rf /var/lib/apt/lists/*
+# Run with GPU support
+docker run -it --gpus all -p 8000:8000 livepeer/byoc-transcipt
 
-# Copy and install requirements
-COPY requirements.txt .
-RUN pip install -r requirements.txt
+# Run with custom environment variables
+docker run -it --gpus all -p 8000:8000 \
+  -e WHISPER_MODEL=medium \
+  -e WHISPER_DEVICE=cuda \
+  livepeer/byoc-transcipt
 
-# Copy source code
-COPY src/ /app/src/
-
-# Set working directory
-WORKDIR /app
-
-# Run pipeline
-CMD ["python", "src/pipeline/main.py"]
+# Run without GPU (CPU only)
+docker run -it -p 8000:8000 \
+  -e WHISPER_DEVICE=cpu \
+  livepeer/byoc-transcipt
 ```
 
 ## API Integration
 
-### Trickle Protocol
+### StreamProcessor Integration
 
-The pipeline integrates with the trickle protocol for video streaming:
+The pipeline uses pytrickle's StreamProcessor for real-time audio processing:
 
-- **Input**: Subscribes to video segments via HTTP GET requests
-- **Output**: Publishes processed segments via HTTP POST requests
-- **Format**: Video segments in `video/mp2t` format
-- **Error Handling**: Automatic recovery from 404 (not ready) and 470 (too old) errors
+- **Input**: Receives audio frames via StreamProcessor
+- **Processing**: Buffers audio in sliding windows for transcription
+- **Output**: Sends subtitle updates via WebSocket data publishing
+- **Format**: Audio frames processed in real-time with configurable sample rates
 
-### Data URL (Optional)
+### WebSocket Data Publishing
 
-When enabled, subtitle files are sent to a third-party URL:
+Subtitle updates are sent via WebSocket in JSON format:
 
-```http
-POST /your-data-endpoint
-Content-Type: text/plain; charset=utf-8
-X-Segment-Id: 123
-
-1
-00:00:00,000 --> 00:00:02,500
-Hello, this is a transcription example.
-
-2
-00:00:02,500 --> 00:00:05,000
-The audio has been processed successfully.
+```json
+{
+  "type": "subtitle_update",
+  "timestamp_utc": "2024-01-01T12:00:00.000Z",
+  "window": {
+    "start": 0.0,
+    "end": 3.0
+  },
+  "srt_content": "1\n00:00:00,000 --> 00:00:02,500\nHello, this is a transcription example.\n\n2\n00:00:02,500 --> 00:00:03,000\nThe audio has been processed successfully."
+}
 ```
+
+### Server Endpoints
+
+The StreamProcessor exposes the following endpoints:
+
+- `GET /health` - Health check endpoint
+- `POST /stream` - Audio stream input (handled by pytrickle)
 
 ## Performance Tuning
 
 ### Whisper Model Selection
 
-| Model | Speed | Accuracy | Memory |
-|-------|--------|----------|---------|
-| `tiny` | Fastest | Lowest | ~1GB |
-| `base` | Fast | Good | ~1GB |
-| `small` | Medium | Better | ~2GB |
-| `medium` | Slower | High | ~5GB |
-| `large` | Slowest | Highest | ~10GB |
+| Model | Speed | Accuracy | VRAM Usage | Recommended Use |
+|-------|--------|----------|------------|------------------|
+| `tiny` | Fastest | Lowest | ~1GB | Testing, low-resource environments |
+| `base` | Fast | Good | ~1GB | Development, real-time applications |
+| `small` | Medium | Better | ~2GB | Balanced performance |
+| `medium` | Slower | High | ~5GB | High accuracy requirements |
+| `large` | Slowest | Highest | ~10GB | Production, maximum accuracy |
 
 ### Hardware Recommendations
 
 - **CPU**: Multi-core processor (4+ cores recommended)
 - **Memory**: 8GB+ RAM (16GB+ for large models)
-- **GPU**: CUDA-compatible GPU for faster transcription (optional)
-- **Storage**: SSD recommended for temporary file operations
+- **GPU**: CUDA-compatible GPU with 4GB+ VRAM (RTX 3060 or better)
+- **Storage**: SSD recommended for model caching and temporary files
+- **Network**: Stable connection for real-time streaming
 
 ## Troubleshooting
 
 ### Common Issues
 
-1. **FFmpeg not found**
+1. **pytrickle import error**
    ```
-   Error: FFmpeg not found in PATH
-   Solution: Install FFmpeg and ensure it's in your system PATH
+   Error: ModuleNotFoundError: No module named 'pytrickle'
+   Solution: Ensure pytrickle is installed from git: pip install git+https://github.com/livepeer/pytrickle.git@v0.1.4
    ```
 
 2. **CUDA out of memory**
    ```
    Error: CUDA out of memory
-   Solution: Use smaller Whisper model or switch to CPU processing
+   Solution: Use smaller Whisper model or switch to CPU processing with WHISPER_DEVICE=cpu
    ```
 
-3. **Trickle connection failed**
+3. **StreamProcessor connection failed**
    ```
-   Error: Failed to connect to trickle server
-   Solution: Verify server URLs and network connectivity
+   Error: Failed to start StreamProcessor
+   Solution: Check port availability and ensure no other services are using port 8000
+   ```
+
+4. **Audio processing issues**
+   ```
+   Error: Audio buffer issues or transcription delays
+   Solution: Adjust chunk_window and chunk_overlap parameters for your use case
    ```
 
 ### Logging
@@ -217,37 +244,12 @@ logging.basicConfig(level=logging.DEBUG)
 ### Performance Monitoring
 
 Monitor these metrics for performance optimization:
-- Segment processing time
-- Memory usage
-- Transcription accuracy
+- Audio buffer processing time
+- Transcription latency (should be < window duration)
+- Memory usage (especially GPU VRAM)
+- WebSocket connection stability
+- Real-time factor (processing speed vs. audio speed)
 
-## Development
-
-### Running Tests
-
-```bash
-# Install test dependencies
-pip install pytest pytest-asyncio
-
-# Run tests
-pytest tests/
-```
-
-### Code Style
-
-The project follows PEP 8 style guidelines:
-
-```bash
-# Install formatting tools
-pip install black isort flake8
-
-# Format code
-black src/
-isort src/
-
-# Check style
-flake8 src/
-```
 
 ## Contributing
 
@@ -263,6 +265,7 @@ This project is licensed under the MIT License - see the LICENSE file for detail
 
 ## Acknowledgments
 
+- [pytrickle](https://github.com/livepeer/pytrickle) for real-time streaming framework
 - [faster-whisper](https://github.com/guillaumekln/faster-whisper) for efficient speech recognition
-- [FFmpeg](https://ffmpeg.org/) for video/audio processing
-- [aiohttp](https://aiohttp.readthedocs.io/) for async HTTP operations
+- [NVIDIA CUDA](https://developer.nvidia.com/cuda-zone) for GPU acceleration
+- [OpenAI Whisper](https://github.com/openai/whisper) for the underlying speech recognition model
