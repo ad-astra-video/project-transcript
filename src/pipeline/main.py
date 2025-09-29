@@ -61,17 +61,6 @@ STATE: Optional[TranscriberState] = None
 PROCESSOR: Optional[StreamProcessor] = None
 
 
-def _normalize_bool(v) -> bool:
-    if isinstance(v, bool):
-        return v
-    if v is None:
-        return False
-    if isinstance(v, (int, float)):
-        return bool(v)
-    s = str(v).strip().lower()
-    return s in {"1", "true", "yes", "y", "on"}
-
-
 def _frame_time_seconds(timestamp: int, time_base) -> float:
     try:
         return float(timestamp) * float(time_base)
@@ -246,6 +235,7 @@ if __name__ == "__main__":
         level=logging.INFO,
         format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
     )
+
     loop = asyncio.get_event_loop()
     loop.run_until_complete(load_model())
 
@@ -253,7 +243,6 @@ if __name__ == "__main__":
     logger.info("Starting StreamProcessor on port %d", port)
     # Instantiate global processor so helper funcs can send data
     PROCESSOR = StreamProcessor(
-        video_processor=None,
         audio_processor=process_audio_async,
         param_updater=update_params,
         on_stream_stop=on_stream_stop,
