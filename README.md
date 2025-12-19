@@ -7,7 +7,7 @@ A Python-based real-time audio transcription pipeline built on the pytrickle fra
 ```bash
 # Build and run with Docker (recommended)
 docker build -t livepeer/byoc-transcipt .
-docker run -it --gpus all -p 8000:8000 -v /home/user/models:/modelslivepeer/byoc-transcipt
+docker run -it --gpus all -p 8000:8000 -v /home/user/project-transcript/models:/models
 
 # The service will start on port 8000 and be ready to process audio streams
 # Check logs for "Starting StreamProcessor on port 8000"

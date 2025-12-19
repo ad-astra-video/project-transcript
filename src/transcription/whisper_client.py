@@ -18,11 +18,21 @@ logger = logging.getLogger(__name__)
 
 
 @dataclass
+class WordTimestamp:
+    """Represents a single word with timing information."""
+    start: float  # Start time in seconds
+    end: float    # End time in seconds
+    text: str     # Word text
+
+
+@dataclass
 class TranscriptionSegment:
     """Represents a transcribed segment with timing information."""
+    id: str       # Stable ID for deduplication
     start: float  # Start time in seconds (segment-relative)
     end: float    # End time in seconds (segment-relative)
     text: str     # Transcribed text
+    words: list   # List of WordTimestamp objects
     
     
 class WhisperClient:
@@ -107,18 +117,35 @@ class WhisperClient:
             # Convert to our format
             transcription_segments = []
             for segment in segments:
+                # Extract word-level timestamps if available
+                words = []
+                if hasattr(segment, 'words') and segment.words:
+                    for word in segment.words:
+                        words.append(WordTimestamp(
+                            start=word.start,
+                            end=word.end,
+                            text=word.word.strip() if hasattr(word, 'word') else str(word).strip()
+                        ))
+                
+                # Generate stable ID from timing
+                seg_id = f"{segment.start:.3f}-{segment.end:.3f}"
+                
                 # If language confidence is below threshold, return empty transcript
                 if language_confidence < self.language_confidence_threshold:
                     transcription_segments.append(TranscriptionSegment(
+                        id=seg_id,
                         start=segment.start,
                         end=segment.end,
-                        text=""  # Empty text for low confidence
+                        text="",  # Empty text for low confidence
+                        words=[]
                     ))
                 else:
                     transcription_segments.append(TranscriptionSegment(
+                        id=seg_id,
                         start=segment.start,
                         end=segment.end,
-                        text=segment.text.strip()
+                        text=segment.text.strip(),
+                        words=words
                     ))
             
             logger.debug(f"Transcribed {len(transcription_segments)} segments for segment {segment_idx} (confidence: {language_confidence:.3f})")
