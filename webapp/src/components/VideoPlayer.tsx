@@ -16,7 +16,9 @@ interface VideoPlayerProps {
 
 const VideoPlayer: React.FC<VideoPlayerProps> = ({ streamState, onVideoElementRef, subtitles = [] }) => {
   const videoRef = useRef<HTMLVideoElement>(null);
-  const trackRef = useRef<HTMLTrackElement | null>(null);
+  const textTrackRef = useRef<TextTrack | null>(null);
+  // Base offset to map subtitle timestamps to the video's currentTime
+  const subtitleBaseRef = useRef<number | null>(null);
 
   useEffect(() => {
     onVideoElementRef(videoRef.current);
@@ -27,6 +29,48 @@ const VideoPlayer: React.FC<VideoPlayerProps> = ({ streamState, onVideoElementRe
       videoRef.current.srcObject = streamState.mediaStream;
     }
   }, [streamState.mediaStream]);
+
+  // Create a JS TextTrack on the video element for dynamic cues
+  // Helper to create/return the TextTrack
+  const ensureTextTrack = (): TextTrack | null => {
+    if (!videoRef.current) return null;
+    if (!textTrackRef.current) {
+      try {
+        const t = videoRef.current.addTextTrack('captions', 'English', 'en');
+        t.mode = 'showing';
+        textTrackRef.current = t;
+        // eslint-disable-next-line no-console
+        console.debug('TextTrack created', t);
+      } catch (e) {
+        // eslint-disable-next-line no-console
+        console.warn('addTextTrack failed', e);
+        return null;
+      }
+    }
+    return textTrackRef.current;
+  };
+
+  useEffect(() => {
+    const video = videoRef.current;
+    if (!video) return;
+
+    const tryCreate = () => {
+      if (streamState.isPreviewing) ensureTextTrack();
+    };
+
+    // If metadata already loaded, try to create immediately
+    if (video.readyState >= 1) {
+      tryCreate();
+    } else {
+      video.addEventListener('loadedmetadata', tryCreate);
+    }
+
+    return () => {
+      video.removeEventListener('loadedmetadata', tryCreate);
+      // reset base when video is removed or preview stops
+      subtitleBaseRef.current = null;
+    };
+  }, [streamState.isPreviewing]);
 
   // Convert parsed subtitle to WebVTT format
   const convertToWebVTT = (subtitles: ParsedSubtitle[]): string => {
@@ -52,26 +96,112 @@ const VideoPlayer: React.FC<VideoPlayerProps> = ({ streamState, onVideoElementRe
 
   // Update track when subtitles change
   useEffect(() => {
-    if (trackRef.current && subtitles.length > 0) {
-      // Clear existing cues
-      while (trackRef.current.track.cues && trackRef.current.track.cues.length > 0) {
-        trackRef.current.track.removeCue(trackRef.current.track.cues[0]);
-      }
-      
-      // Add new cues manually
-      subtitles.forEach((subtitle) => {
-        const cue = new (window.VTTCue || window.TextTrackCue)(
-          subtitle.startTime,
-          subtitle.endTime,
-          subtitle.text
-        );
-        trackRef.current!.track.addCue(cue);
-      });
-      
-      // Enable the track
-      (trackRef.current as any).mode = 'showing';
+    // Ensure there's a TextTrack available (may create it)
+    const track = ensureTextTrack() ?? textTrackRef.current;
+    // Debug
+    // eslint-disable-next-line no-console
+    console.debug('subtitles effect run; track:', track, 'subtitles:', subtitles);
+
+    if (!track) {
+      // No track yet; will run again when isPreviewing changes or when ensureTextTrack is called
+      return;
     }
-  }, [subtitles]);
+
+    if (subtitles.length === 0) {
+      return;
+    }
+
+    // For live subtitles, add cues incrementally
+    const existingCues = Array.from((track.cues ?? []) as any);
+    const existingIds = new Set(existingCues.map((cue: any) => cue.id));
+    const CueCtor = (window as any).VTTCue || (window as any).TextTrackCue;
+
+    // eslint-disable-next-line no-console
+    console.debug('existing cues before update:', existingCues.map((c: any) => c.id));
+
+    // If we don't yet have a base mapping from subtitle timeline -> video.currentTime,
+    // establish it from the earliest incoming subtitle startTime so cues align with the video timeline.
+    if (subtitleBaseRef.current == null && subtitles.length > 0 && videoRef.current) {
+      const minStart = Math.min(...subtitles.map(s => s.startTime));
+      subtitleBaseRef.current = videoRef.current.currentTime - minStart;
+      // eslint-disable-next-line no-console
+      console.debug('subtitle base set to', subtitleBaseRef.current, 'video.currentTime', videoRef.current.currentTime, 'minStart', minStart);
+    }
+
+    subtitles.forEach((subtitle) => {
+      if (!existingIds.has(subtitle.id)) {
+        try {
+          const base = subtitleBaseRef.current ?? 0;
+          const start = base + subtitle.startTime;
+          const end = base + subtitle.endTime;
+          const cue = new CueCtor(start, end, subtitle.text);
+          cue.id = subtitle.id; // Set the ID for tracking
+          track.addCue(cue);
+          // eslint-disable-next-line no-console
+          console.debug('added cue', cue.id, start, end, subtitle.text);
+        } catch (e) {
+          // addCue may throw for overlapping cues in some browsers
+          // eslint-disable-next-line no-console
+          console.warn('addCue failed for subtitle', subtitle, e);
+        }
+      }
+    });
+
+    // Remove old cues that are no longer in the subtitles array
+    Array.from((track.cues ?? []) as any).forEach((cue: any) => {
+      const stillExists = subtitles.some(sub => sub.id === cue.id);
+      if (!stillExists) {
+        try {
+          track.removeCue(cue);
+          // eslint-disable-next-line no-console
+          console.debug('removed cue', cue.id);
+        } catch (e) {
+          // ignore
+        }
+      }
+    });
+
+    // Ensure track is visible
+    track.mode = 'showing';
+  }, [subtitles, streamState.isPreviewing]);
+
+  // Dev helper to add sample cues (useful to verify track/cues visually)
+  const addTestCues = () => {
+    const track = ensureTextTrack();
+    if (!track) {
+      // eslint-disable-next-line no-console
+      console.warn('No text track available');
+      return;
+    }
+    const CueCtor = (window as any).VTTCue || (window as any).TextTrackCue;
+    if (!CueCtor) {
+      // eslint-disable-next-line no-console
+      console.warn('No VTTCue constructor available');
+      return;
+    }
+
+    const samples = [
+      [0, 0.9, 'Hildy!'],
+      [1, 1.4, 'How are you?'],
+      [1.5, 2.9, "Tell me, is the lord of the universe in?"],
+      [3, 4.2, "Yes, he's in - in a bad humor"],
+      [4.3, 6, "Somebody must've stolen the crown jewels"],
+    ];
+
+    samples.forEach((s, i) => {
+      try {
+        const cue = new CueCtor(s[0], s[1], s[2]);
+        cue.id = `debug-${i}`;
+        track.addCue(cue);
+      } catch (e) {
+        // eslint-disable-next-line no-console
+        console.warn('failed to add debug cue', e);
+      }
+    });
+
+    // eslint-disable-next-line no-console
+    console.debug('track cues after adding samples:', track.cues);
+  };
 
   return (
     <div className="card">
@@ -86,15 +216,6 @@ const VideoPlayer: React.FC<VideoPlayerProps> = ({ streamState, onVideoElementRe
               muted
               playsInline
               controls
-            />
-            {/* Subtitle track for video overlay */}
-            <track
-              ref={trackRef}
-              kind="subtitles"
-              src=""
-              srcLang="en"
-              label="English"
-              default
             />
           </>
         ) : (
@@ -118,8 +239,17 @@ const VideoPlayer: React.FC<VideoPlayerProps> = ({ streamState, onVideoElementRe
             <div className="w-2 h-2 bg-red-500 rounded-full animate-pulse"></div>
             <span className="text-sm text-red-600 font-medium">Live</span>
           </div>
-          <div className="text-sm text-gray-500">
-            {streamState.mediaStream?.getVideoTracks().length || 0} video tracks
+          <div className="flex items-center space-x-4">
+            <div className="text-sm text-gray-500">
+              {streamState.mediaStream?.getVideoTracks().length || 0} video tracks
+            </div>
+            <button
+              type="button"
+              onClick={addTestCues}
+              className="text-sm px-2 py-1 bg-gray-100 rounded border"
+            >
+              Add test cues
+            </button>
           </div>
         </div>
       )}
