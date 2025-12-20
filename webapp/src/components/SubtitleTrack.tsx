@@ -84,19 +84,35 @@ const SubtitleTrack: React.FC<SubtitleTrackProps> = ({ subtitles }) => {
 
   // Update track when subtitles change
   useEffect(() => {
-    if (trackRef.current && subtitles.length > 0) {
-      const vttContent = convertToWebVTT(subtitles);
-      const blob = new Blob([vttContent], { type: 'text/vtt' });
-      const url = URL.createObjectURL(blob);
-      
-      trackRef.current.src = url;
-      (trackRef.current as any).mode = 'showing';
-      
-      return () => {
-        URL.revokeObjectURL(url);
-      };
+    if (trackRef.current) {
+      if (subtitles.length > 0) {
+        const vttContent = convertToWebVTT(subtitles);
+        const blob = new Blob([vttContent], { type: 'text/vtt' });
+        const url = URL.createObjectURL(blob);
+        
+        trackRef.current.src = url;
+        (trackRef.current as any).mode = 'showing';
+        
+        return () => {
+          URL.revokeObjectURL(url);
+        };
+      } else {
+        // Clear track when no subtitles
+        trackRef.current.src = '';
+        (trackRef.current as any).mode = 'disabled';
+      }
     }
   }, [subtitles]);
+
+  // Cleanup when component unmounts
+  useEffect(() => {
+    return () => {
+      if (trackRef.current) {
+        trackRef.current.src = '';
+        (trackRef.current as any).mode = 'disabled';
+      }
+    };
+  }, []);
 
   return (
     <div className="card">

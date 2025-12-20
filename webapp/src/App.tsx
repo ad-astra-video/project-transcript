@@ -130,27 +130,8 @@ function App() {
         defaultPipeline: config.defaultPipeline
       });
 
-      // Initialize stream
-      const stream = new Stream(streamConfig);
-      streamRef.current = stream;
-
-      // Start stream using the correct SDK method
-      const startOptions: any = {
-        pipeline: config.defaultPipeline,
-        streamName: `stream-${Date.now()}`,
-        width: 1280,
-        height: 720,
-        fpsLimit: 30,
-        enableVideoIngress: true,
-        enableAudioIngress: true,
-        enableDataOutput: true,
-        customParams:{"chunk_window": 2.0}
-      };
-
-      const startResponse = await stream.start(startOptions);
-      
-      // Store the stream start response and show source selection modal
-      setPendingStreamStart({ stream, streamConfig, startResponse });
+      // Store the stream config and show source selection modal
+      setPendingStreamStart({ streamConfig });
       setIsSourceSelectionOpen(true);
       setIsLoading(false);
 
@@ -173,9 +154,13 @@ function App() {
     setIsSourceSelectionOpen(false);
 
     try {
-      const { stream, streamConfig } = pendingStreamStart;
+      const { streamConfig } = pendingStreamStart;
 
-      // Create updated start options with source selection
+      // Create stream with selected source
+      const stream = new Stream(streamConfig);
+      streamRef.current = stream;
+
+      // Create start options with source selection
       const startOptions = {
         pipeline: config.defaultPipeline || 'transcription',
         streamName: `stream-${Date.now()}`,
@@ -183,28 +168,19 @@ function App() {
         height: 720,
         fpsLimit: 30,
         enableVideoIngress: true,
-        enableAudioIngress: true,
+        enableVideoEgres: false,
         enableDataOutput: true,
         useScreenShare: source === 'screen'
       };
 
-      // Stop the current stream and restart with selected source
-      if (stream) {
-        await stream.stop();
-      }
-
-      // Create new stream with selected source
-      const newStream = new Stream(streamConfig);
-      streamRef.current = newStream;
-
       // Start the stream with selected source
-      const newStartResponse = await newStream.start(startOptions);
+      const startResponse = await stream.start(startOptions);
 
       // Publish to the WHIP URL
-      await newStream.publish(startOptions);
+      await stream.publish(startOptions);
 
       // Get local media stream for preview
-      const localStream = newStream.getLocalStream();
+      const localStream = stream.getLocalStream();
       setStreamState(prev => ({ ...prev, mediaStream: localStream, isPreviewing: true, isPublishing: true }));
 
       // Setup video element with the captured stream
@@ -223,14 +199,14 @@ function App() {
       });
 
       // Connect to data stream with stream name
-      await dataStream.connect({ streamName: newStartResponse.streamId });
+      await dataStream.connect({ streamName: startResponse.streamId });
 
       // Update connection state
       setConnectionState(prev => ({
         ...prev,
         isConnected: true,
         isConnecting: false,
-        streamId: newStartResponse.streamId
+        streamId: startResponse.streamId
       }));
 
       // Clear pending stream start
@@ -334,6 +310,7 @@ function App() {
           {/* WHIP Published Stream Preview */}
           <div>
             <VideoPlayer
+              key={connectionState.streamId || 'no-stream'}
               streamState={streamState}
               onVideoElementRef={handleVideoElementRef}
               subtitles={subtitles}
@@ -346,6 +323,7 @@ function App() {
           </div>
           
           <SubtitleTrack
+            key={`subtitles-${connectionState.streamId || 'no-stream'}`}
             subtitles={subtitles}
           />
         </div>

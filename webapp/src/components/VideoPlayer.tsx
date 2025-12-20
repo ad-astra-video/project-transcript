@@ -38,6 +38,33 @@ const VideoPlayer: React.FC<VideoPlayerProps> = ({
     onVideoElementRef(videoRef.current);
   }, [onVideoElementRef]);
 
+  // Cleanup text track when video element changes or component unmounts
+  useEffect(() => {
+    return () => {
+      if (textTrackRef.current && videoRef.current) {
+        try {
+          // Clear all cues on cleanup
+          if (textTrackRef.current.cues) {
+            const cues = Array.from(textTrackRef.current.cues);
+            cues.forEach(cue => {
+              try {
+                textTrackRef.current!.removeCue(cue);
+              } catch (e) {
+                console.warn('Failed to remove cue during cleanup:', e);
+              }
+            });
+          }
+          // Disable the track
+          textTrackRef.current.mode = 'disabled';
+        } catch (e) {
+          console.warn('Failed to cleanup text track:', e);
+        }
+      }
+      textTrackRef.current = null;
+      subtitleStartTimeRef.current = null;
+    };
+  }, []);
+
   useEffect(() => {
     if (videoRef.current && streamState.mediaStream) {
       videoRef.current.srcObject = streamState.mediaStream;
@@ -46,9 +73,11 @@ const VideoPlayer: React.FC<VideoPlayerProps> = ({
 
   // Create a JS TextTrack on the video element for dynamic cues
   // Helper to create/return the TextTrack
-  const ensureTextTrack = (): TextTrack | null => {
+  const ensureTextTrack = (forceRecreate: boolean = false): TextTrack | null => {
     if (!videoRef.current) return null;
-    if (!textTrackRef.current) {
+    
+    // Force recreation if requested or if track is in bad state
+    if (forceRecreate || !textTrackRef.current || textTrackRef.current.mode === 'disabled') {
       try {
         const t = videoRef.current.addTextTrack('captions', 'English', 'en');
         t.mode = 'showing';
@@ -70,7 +99,8 @@ const VideoPlayer: React.FC<VideoPlayerProps> = ({
 
     const tryCreate = () => {
       if (streamState.isPreviewing) {
-        const track = ensureTextTrack();
+        // Force recreation of text track when preview starts
+        const track = ensureTextTrack(true);
         if (track) {
           track.mode = 'showing';
           console.debug('TextTrack initialized and set to showing mode');
@@ -87,9 +117,30 @@ const VideoPlayer: React.FC<VideoPlayerProps> = ({
 
     return () => {
       video.removeEventListener('loadedmetadata', tryCreate);
-      // reset base when video is removed or preview stops
-      subtitleStartTimeRef.current = null;
     };
+  }, [streamState.isPreviewing]);
+
+  // Reset subtitle start time when preview stops (transcribing stopped)
+  useEffect(() => {
+    if (!streamState.isPreviewing) {
+      subtitleStartTimeRef.current = null;
+      // Clear all cues when preview stops
+      if (textTrackRef.current) {
+        const track = textTrackRef.current;
+        if (track.cues) {
+          const cues = Array.from(track.cues);
+          cues.forEach(cue => {
+            try {
+              track.removeCue(cue);
+            } catch (e) {
+              console.warn('Failed to remove cue:', e);
+            }
+          });
+        }
+        // Disable the track when not previewing
+        track.mode = 'disabled';
+      }
+    }
   }, [streamState.isPreviewing]);
 
   // Update track when subtitles change
@@ -106,6 +157,17 @@ const VideoPlayer: React.FC<VideoPlayerProps> = ({
     }
 
     if (subtitles.length === 0) {
+      // Clear all cues when no subtitles
+      if (track.cues) {
+        const cues = Array.from(track.cues);
+        cues.forEach(cue => {
+          try {
+            track.removeCue(cue);
+          } catch (e) {
+            console.warn('Failed to remove cue:', e);
+          }
+        });
+      }
       return;
     }
 
@@ -171,18 +233,21 @@ const VideoPlayer: React.FC<VideoPlayerProps> = ({
     });
 
     // Remove old cues that are no longer in the subtitles array
-    Array.from((track.cues ?? []) as any).forEach((cue: any) => {
-      const stillExists = subtitles.some(sub => sub.id === cue.id);
-      if (!stillExists) {
-        try {
-          track.removeCue(cue);
-          // eslint-disable-next-line no-console
-          console.debug('removed cue', cue.id);
-        } catch (e) {
-          // ignore
+    if (track.cues) {
+      const cues = Array.from(track.cues);
+      cues.forEach((cue: any) => {
+        const stillExists = subtitles.some(sub => sub.id === cue.id);
+        if (!stillExists) {
+          try {
+            track.removeCue(cue);
+            // eslint-disable-next-line no-console
+            console.debug('removed cue', cue.id);
+          } catch (e) {
+            // ignore
+          }
         }
-      }
-    });
+      });
+    }
 
     // Ensure track is visible
     track.mode = 'showing';
