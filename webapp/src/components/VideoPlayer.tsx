@@ -12,9 +12,23 @@ interface VideoPlayerProps {
   streamState: StreamState;
   onVideoElementRef: (element: HTMLVideoElement | null) => void;
   subtitles: ParsedSubtitle[];
+  onStartTranscribing: () => void;
+  onStopTranscribing: () => void;
+  onConfigure: () => void;
+  isConnecting: boolean;
+  isConnected: boolean;
 }
 
-const VideoPlayer: React.FC<VideoPlayerProps> = ({ streamState, onVideoElementRef, subtitles = [] }) => {
+const VideoPlayer: React.FC<VideoPlayerProps> = ({ 
+  streamState, 
+  onVideoElementRef, 
+  subtitles = [], 
+  onStartTranscribing, 
+  onStopTranscribing, 
+  onConfigure, 
+  isConnecting, 
+  isConnected 
+}) => {
   const videoRef = useRef<HTMLVideoElement>(null);
   const textTrackRef = useRef<TextTrack | null>(null);
   // Track when we started receiving subtitles to calculate relative timestamps
@@ -55,7 +69,13 @@ const VideoPlayer: React.FC<VideoPlayerProps> = ({ streamState, onVideoElementRe
     if (!video) return;
 
     const tryCreate = () => {
-      if (streamState.isPreviewing) ensureTextTrack();
+      if (streamState.isPreviewing) {
+        const track = ensureTextTrack();
+        if (track) {
+          track.mode = 'showing';
+          console.debug('TextTrack initialized and set to showing mode');
+        }
+      }
     };
 
     // If metadata already loaded, try to create immediately
@@ -71,8 +91,6 @@ const VideoPlayer: React.FC<VideoPlayerProps> = ({ streamState, onVideoElementRe
       subtitleStartTimeRef.current = null;
     };
   }, [streamState.isPreviewing]);
-
-  
 
   // Update track when subtitles change
   useEffect(() => {
@@ -110,34 +128,40 @@ const VideoPlayer: React.FC<VideoPlayerProps> = ({ streamState, onVideoElementRe
       if (!existingIds.has(subtitle.id)) {
         try {
           const now = videoRef.current?.currentTime ?? 0;
-          const subtitleStartTime = subtitleStartTimeRef.current ?? now;
           
-          // Calculate timestamps relative to when we started receiving subtitles
-          const start = subtitleStartTime + subtitle.startTime;
-          const end = subtitleStartTime + subtitle.endTime;
-
-          let adjustedStart = start;
-          let adjustedEnd = end;
-
-          const minVisibleDuration = 0.6; // seconds
-          const extendIfExpiredTo = now + 1.8; // seconds
-
-          if (end <= now) {
-            // already expired — extend so it's visible now
-            adjustedEnd = Math.max(extendIfExpiredTo, now + minVisibleDuration);
-            adjustedStart = Math.max(start, now - 0.1);
-          } else if (start <= now && end <= now + 0.1) {
-            // almost expired — extend a little
-            adjustedEnd = Math.max(end, now + minVisibleDuration);
-          } else if (end - start < minVisibleDuration) {
-            adjustedEnd = Math.max(end, start + minVisibleDuration);
+          // Calculate adjusted start time: current video time + 1ms
+          const adjustedStart = now + 0.001; // 1 millisecond from current time
+          
+          // Calculate original duration
+          const originalDuration = subtitle.endTime - subtitle.startTime;
+          
+          // Calculate adjusted end time: adjusted start + original duration
+          const adjustedEnd = adjustedStart + originalDuration;
+          
+          // Check for overlap with last cue and adjust if needed
+          if (existingCues.length > 0) {
+            const lastCue = existingCues[existingCues.length - 1] as any;
+            if (lastCue.endTime > adjustedStart) {
+              // Overlap detected - adjust last cue end to be 1ms before current cue start
+              lastCue.endTime = adjustedStart - 0.001;
+              // eslint-disable-next-line no-console
+              console.debug('adjusted last cue end time to prevent overlap:', lastCue.id, { newEnd: lastCue.endTime });
+            }
           }
-
+          
+          // Create new cue with adjusted timing
           const cue = new CueCtor(adjustedStart, adjustedEnd, subtitle.text);
           cue.id = subtitle.id; // Set the ID for tracking
           track.addCue(cue);
           // eslint-disable-next-line no-console
-          console.debug('added cue', cue.id, { start: adjustedStart, end: adjustedEnd, originalStart: start, originalEnd: end, now });
+          console.debug('added cue', cue.id, { 
+            adjustedStart, 
+            adjustedEnd, 
+            originalDuration, 
+            originalStart: subtitle.startTime, 
+            originalEnd: subtitle.endTime,
+            text: subtitle.text 
+          });
         } catch (e) {
           // addCue may throw for overlapping cues in some browsers
           // eslint-disable-next-line no-console
@@ -162,60 +186,15 @@ const VideoPlayer: React.FC<VideoPlayerProps> = ({ streamState, onVideoElementRe
 
     // Ensure track is visible
     track.mode = 'showing';
+    
+    // Force a re-render by updating the video element
+    if (videoRef.current) {
+      videoRef.current.textTracks[0].mode = 'showing';
+    }
   }, [subtitles, streamState.isPreviewing]);
-
-  // Dev helper to add sample cues (useful to verify track/cues visually)
-  const addTestCues = () => {
-    const track = ensureTextTrack();
-    if (!track) {
-      // eslint-disable-next-line no-console
-      console.warn('No text track available');
-      return;
-    }
-    const CueCtor = (window as any).VTTCue || (window as any).TextTrackCue;
-    if (!CueCtor) {
-      // eslint-disable-next-line no-console
-      console.warn('No VTTCue constructor available');
-      return;
-    }
-
-    const samples = [
-      [0, 0.9, 'Hildy!'],
-      [1, 1.4, 'How are you?'],
-      [1.5, 2.9, "Tell me, is the lord of the universe in?"],
-      [3, 4.2, "Yes, he's in - in a bad humor"],
-      [4.3, 6, "Somebody must've stolen the crown jewels"],
-    ];
-
-    samples.forEach((s, i) => {
-      try {
-        const now = videoRef.current?.currentTime ?? 0;
-        const start = now + (s[0] as number);
-        const end = now + (s[1] as number);
-        const cue = new CueCtor(start, end, s[2] as string);
-        cue.id = `debug-${i}`;
-        track.addCue(cue);
-      } catch (e) {
-        // eslint-disable-next-line no-console
-        console.warn('failed to add debug cue', e);
-      }
-    });
-
-    // Ensure track is showing and log textTracks for debugging
-    try {
-      track.mode = 'showing';
-    } catch (e) {
-      // ignore
-    }
-    // eslint-disable-next-line no-console
-    console.debug('video.textTracks:', videoRef.current?.textTracks);
-    // eslint-disable-next-line no-console
-    console.debug('track cues after adding samples:', Array.from((track.cues ?? []) as any).map((c: any) => ({ id: c.id, start: c.startTime, end: c.endTime })));
-  };
 
   return (
     <div className="card">
-      <h3 className="text-lg font-semibold text-gray-900 mb-4">Video Preview</h3>
       <div className="relative bg-black rounded-lg overflow-hidden">
         {streamState.isPreviewing ? (
           <>
@@ -226,7 +205,16 @@ const VideoPlayer: React.FC<VideoPlayerProps> = ({ streamState, onVideoElementRe
               muted
               playsInline
               controls
-            />
+              crossOrigin="anonymous"
+            >
+              <track
+                kind="captions"
+                src=""
+                srcLang="en"
+                label="English"
+                default
+              />
+            </video>
           </>
         ) : (
           <div className="flex items-center justify-center h-96">
@@ -237,7 +225,7 @@ const VideoPlayer: React.FC<VideoPlayerProps> = ({ streamState, onVideoElementRe
                 </svg>
               </div>
               <p className="text-gray-500">No video stream available</p>
-              <p className="text-sm text-gray-400 mt-1">Start publishing to see preview</p>
+              <p className="text-sm text-gray-400 mt-1">Start transcribing to see preview</p>
             </div>
           </div>
         )}
@@ -251,18 +239,53 @@ const VideoPlayer: React.FC<VideoPlayerProps> = ({ streamState, onVideoElementRe
           </div>
           <div className="flex items-center space-x-4">
             <div className="text-sm text-gray-500">
-              {streamState.mediaStream?.getVideoTracks().length || 0} video tracks
+              {streamState.mediaStream?.getAudioTracks().length || 0} audio tracks
             </div>
-            <button
-              type="button"
-              onClick={addTestCues}
-              className="text-sm px-2 py-1 bg-gray-100 rounded border"
-            >
-              Add test cues
-            </button>
           </div>
         </div>
       )}
+      
+      {/* Control Buttons */}
+      <div className="mt-4 flex items-center justify-center space-x-4">
+        {!isConnected ? (
+          <button
+            onClick={onStartTranscribing}
+            disabled={isConnecting}
+            className="btn-primary flex items-center justify-center space-x-2"
+          >
+            {isConnecting ? (
+              <>
+                <div className="w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin"></div>
+                <span>Connecting...</span>
+              </>
+            ) : (
+              <>
+                <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 10l4.553-2.276A1 1 0 0121 8.618v6.764a1 1 0 01-1.447.894L15 14M5 18h8a2 2 0 002-2V8a2 2 0 00-2-2H5a2 2 0 00-2 2v8a2 2 0 002 2z" />
+                </svg>
+                <span>Start Transcribing</span>
+              </>
+            )}
+          </button>
+        ) : (
+          <button
+            onClick={onStopTranscribing}
+            className="bg-red-600 hover:bg-red-700 text-white font-medium py-2 px-4 rounded-lg transition-colors duration-200 flex items-center justify-center space-x-2"
+          >
+            <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 10a1 1 0 011-1h4a1 1 0 011 1v4a1 1 0 01-1 1h-4a1 1 0 01-1-1v-4z" />
+            </svg>
+            <span>Stop Transcribing</span>
+          </button>
+        )}
+        <button
+          onClick={onConfigure}
+          className="btn-secondary"
+        >
+          Configure
+        </button>
+      </div>
     </div>
   );
 };

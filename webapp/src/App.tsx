@@ -6,12 +6,10 @@ import {
   StreamState,
   ParsedSubtitle,
   SubtitleUpdate,
-  TranscriptData,
-  TranscriptSegment
+  TranscriptData
 } from './types';
 import ConfigModal from './components/ConfigModal';
 import VideoPlayer from './components/VideoPlayer';
-import StreamControls from './components/StreamControls';
 import SubtitleTrack from './components/SubtitleTrack';
 import LoadingSpinner from './components/LoadingSpinner';
 import ErrorDisplay from './components/ErrorDisplay';
@@ -42,7 +40,6 @@ function App() {
   });
   const [subtitles, setSubtitles] = useState<ParsedSubtitle[]>([]);
   const [isLoading, setIsLoading] = useState(false);
-  const [streamInfo, setStreamInfo] = useState<any>(null);
   const [pendingStreamStart, setPendingStreamStart] = useState<any>(null);
 
   // Refs
@@ -151,7 +148,6 @@ function App() {
       };
 
       const startResponse = await stream.start(startOptions);
-      setStreamInfo(startResponse);
       
       // Store the stream start response and show source selection modal
       setPendingStreamStart({ stream, streamConfig, startResponse });
@@ -177,7 +173,7 @@ function App() {
     setIsSourceSelectionOpen(false);
 
     try {
-      const { stream, streamConfig, startResponse } = pendingStreamStart;
+      const { stream, streamConfig } = pendingStreamStart;
 
       // Create updated start options with source selection
       const startOptions = {
@@ -203,7 +199,6 @@ function App() {
 
       // Start the stream with selected source
       const newStartResponse = await newStream.start(startOptions);
-      setStreamInfo(newStartResponse);
 
       // Publish to the WHIP URL
       await newStream.publish(startOptions);
@@ -284,7 +279,6 @@ function App() {
         videoElement: null
       });
 
-      setStreamInfo(null);
       setSubtitles([]);
       setPendingStreamStart(null);
 
@@ -311,24 +305,12 @@ function App() {
         <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
           <div className="flex justify-between items-center py-6">
             <div>
-              <h1 className="text-3xl font-bold text-gray-900">Video Player Webapp</h1>
+              <h1 className="text-3xl font-bold text-gray-900">Live Transcription</h1>
               <p className="text-sm text-gray-600 mt-1">
-                BYOC SDK Integration with Real-time Subtitle Processing
+                
               </p>
             </div>
             <div className="flex items-center space-x-4">
-              {connectionState.isConnected && (
-                <div className="flex items-center space-x-2">
-                  <div className="w-3 h-3 bg-green-500 rounded-full animate-pulse-slow"></div>
-                  <span className="text-sm text-green-600 font-medium">Connected</span>
-                </div>
-              )}
-              <button
-                onClick={() => setIsConfigModalOpen(true)}
-                className="btn-secondary"
-              >
-                Configure
-              </button>
             </div>
           </div>
         </div>
@@ -347,74 +329,28 @@ function App() {
         {/* Loading Spinner */}
         {isLoading && <LoadingSpinner />}
 
-        {/* Stream Controls */}
-        <StreamControls
-          connectionState={connectionState}
-          onConnect={handleConnect}
-          onDisconnect={handleDisconnect}
-          isLoading={isLoading}
-        />
-
         {/* Video Player */}
         <div className="grid grid-cols-1 lg:grid-cols-2 gap-8 mt-8">
           {/* WHIP Published Stream Preview */}
-          <VideoPlayer
-            streamState={streamState}
-            onVideoElementRef={handleVideoElementRef}
-            subtitles={subtitles}
-          />
+          <div>
+            <VideoPlayer
+              streamState={streamState}
+              onVideoElementRef={handleVideoElementRef}
+              subtitles={subtitles}
+              onStartTranscribing={handleConnect}
+              onStopTranscribing={handleDisconnect}
+              onConfigure={() => setIsConfigModalOpen(true)}
+              isConnecting={isLoading}
+              isConnected={connectionState.isConnected}
+            />
+          </div>
           
           <SubtitleTrack
             subtitles={subtitles}
-            videoElement={videoElementRef.current}
           />
         </div>
 
-        {/* Connection Status */}
-        <div className="mt-8 card">
-          <h3 className="text-lg font-semibold text-gray-900 mb-4">Connection Status</h3>
-          <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-            <div className="flex justify-between">
-              <span className="text-gray-600">Status:</span>
-              <span className={`font-medium ${connectionState.isConnected ? 'text-green-600' : 'text-gray-600'}`}>
-                {connectionState.isConnected ? 'Connected' : 'Disconnected'}
-              </span>
-            </div>
-            <div className="flex justify-between">
-              <span className="text-gray-600">Stream ID:</span>
-              <span className="font-medium text-gray-900">
-                {connectionState.streamId || 'None'}
-              </span>
-            </div>
-            <div className="flex justify-between">
-              <span className="text-gray-600">Subtitles:</span>
-              <span className="font-medium text-gray-900">
-                {subtitles.length} cues
-              </span>
-            </div>
-          </div>
-        </div>
-
-        {/* Stream Information */}
-        {streamInfo && (
-          <div className="mt-8 card">
-            <h3 className="text-lg font-semibold text-gray-900 mb-4">Stream Information</h3>
-            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-              <div className="flex justify-between">
-                <span className="text-gray-600">WHIP URL:</span>
-                <span className="font-medium text-gray-900 break-all">
-                  {streamInfo.whipUrl ? 'Available' : 'None'}
-                </span>
-              </div>
-              <div className="flex justify-between">
-                <span className="text-gray-600">Data URL:</span>
-                <span className="font-medium text-gray-900 break-all">
-                  {streamInfo.dataUrl ? 'Available' : 'None'}
-                </span>
-              </div>
-            </div>
-          </div>
-        )}
+        
       </main>
 
       {/* Configuration Modal */}
