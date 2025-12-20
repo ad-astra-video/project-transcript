@@ -11,14 +11,14 @@ declare global {
 interface VideoPlayerProps {
   streamState: StreamState;
   onVideoElementRef: (element: HTMLVideoElement | null) => void;
-  subtitles?: ParsedSubtitle[];
+  subtitles: ParsedSubtitle[];
 }
 
 const VideoPlayer: React.FC<VideoPlayerProps> = ({ streamState, onVideoElementRef, subtitles = [] }) => {
   const videoRef = useRef<HTMLVideoElement>(null);
   const textTrackRef = useRef<TextTrack | null>(null);
-  // Base offset to map subtitle timestamps to the video's currentTime
-  const subtitleBaseRef = useRef<number | null>(null);
+  // Track when we started receiving subtitles to calculate relative timestamps
+  const subtitleStartTimeRef = useRef<number | null>(null);
 
   useEffect(() => {
     onVideoElementRef(videoRef.current);
@@ -68,31 +68,11 @@ const VideoPlayer: React.FC<VideoPlayerProps> = ({ streamState, onVideoElementRe
     return () => {
       video.removeEventListener('loadedmetadata', tryCreate);
       // reset base when video is removed or preview stops
-      subtitleBaseRef.current = null;
+      subtitleStartTimeRef.current = null;
     };
   }, [streamState.isPreviewing]);
 
-  // Convert parsed subtitle to WebVTT format
-  const convertToWebVTT = (subtitles: ParsedSubtitle[]): string => {
-    const vttHeader = 'WEBVTT\n\n';
-    const vttCues = subtitles.map((subtitle, index) => {
-      const startTime = formatTime(subtitle.startTime);
-      const endTime = formatTime(subtitle.endTime);
-      return `${index + 1}\n${startTime} --> ${endTime}\n${subtitle.text}\n`;
-    }).join('\n');
-    
-    return vttHeader + vttCues;
-  };
-
-  // Format time to WebVTT format (HH:MM:SS.mmm)
-  const formatTime = (seconds: number): string => {
-    const hours = Math.floor(seconds / 3600);
-    const minutes = Math.floor((seconds % 3600) / 60);
-    const secs = Math.floor(seconds % 60);
-    const milliseconds = Math.floor((seconds % 1) * 1000);
-    
-    return `${hours.toString().padStart(2, '0')}:${minutes.toString().padStart(2, '0')}:${secs.toString().padStart(2, '0')}.${milliseconds.toString().padStart(3, '0')}`;
-  };
+  
 
   // Update track when subtitles change
   useEffect(() => {
@@ -119,26 +99,45 @@ const VideoPlayer: React.FC<VideoPlayerProps> = ({ streamState, onVideoElementRe
     // eslint-disable-next-line no-console
     console.debug('existing cues before update:', existingCues.map((c: any) => c.id));
 
-    // If we don't yet have a base mapping from subtitle timeline -> video.currentTime,
-    // establish it from the earliest incoming subtitle startTime so cues align with the video timeline.
-    if (subtitleBaseRef.current == null && subtitles.length > 0 && videoRef.current) {
-      const minStart = Math.min(...subtitles.map(s => s.startTime));
-      subtitleBaseRef.current = videoRef.current.currentTime - minStart;
+    // Initialize subtitle start time when we first receive subtitles
+    if (subtitleStartTimeRef.current == null && subtitles.length > 0 && videoRef.current) {
+      subtitleStartTimeRef.current = videoRef.current.currentTime;
       // eslint-disable-next-line no-console
-      console.debug('subtitle base set to', subtitleBaseRef.current, 'video.currentTime', videoRef.current.currentTime, 'minStart', minStart);
+      console.debug('subtitle start time set to', subtitleStartTimeRef.current);
     }
 
     subtitles.forEach((subtitle) => {
       if (!existingIds.has(subtitle.id)) {
         try {
-          const base = subtitleBaseRef.current ?? 0;
-          const start = base + subtitle.startTime;
-          const end = base + subtitle.endTime;
-          const cue = new CueCtor(start, end, subtitle.text);
+          const now = videoRef.current?.currentTime ?? 0;
+          const subtitleStartTime = subtitleStartTimeRef.current ?? now;
+          
+          // Calculate timestamps relative to when we started receiving subtitles
+          const start = subtitleStartTime + subtitle.startTime;
+          const end = subtitleStartTime + subtitle.endTime;
+
+          let adjustedStart = start;
+          let adjustedEnd = end;
+
+          const minVisibleDuration = 0.6; // seconds
+          const extendIfExpiredTo = now + 1.8; // seconds
+
+          if (end <= now) {
+            // already expired — extend so it's visible now
+            adjustedEnd = Math.max(extendIfExpiredTo, now + minVisibleDuration);
+            adjustedStart = Math.max(start, now - 0.1);
+          } else if (start <= now && end <= now + 0.1) {
+            // almost expired — extend a little
+            adjustedEnd = Math.max(end, now + minVisibleDuration);
+          } else if (end - start < minVisibleDuration) {
+            adjustedEnd = Math.max(end, start + minVisibleDuration);
+          }
+
+          const cue = new CueCtor(adjustedStart, adjustedEnd, subtitle.text);
           cue.id = subtitle.id; // Set the ID for tracking
           track.addCue(cue);
           // eslint-disable-next-line no-console
-          console.debug('added cue', cue.id, start, end, subtitle.text);
+          console.debug('added cue', cue.id, { start: adjustedStart, end: adjustedEnd, originalStart: start, originalEnd: end, now });
         } catch (e) {
           // addCue may throw for overlapping cues in some browsers
           // eslint-disable-next-line no-console
@@ -190,7 +189,10 @@ const VideoPlayer: React.FC<VideoPlayerProps> = ({ streamState, onVideoElementRe
 
     samples.forEach((s, i) => {
       try {
-        const cue = new CueCtor(s[0], s[1], s[2]);
+        const now = videoRef.current?.currentTime ?? 0;
+        const start = now + (s[0] as number);
+        const end = now + (s[1] as number);
+        const cue = new CueCtor(start, end, s[2] as string);
         cue.id = `debug-${i}`;
         track.addCue(cue);
       } catch (e) {
@@ -199,8 +201,16 @@ const VideoPlayer: React.FC<VideoPlayerProps> = ({ streamState, onVideoElementRe
       }
     });
 
+    // Ensure track is showing and log textTracks for debugging
+    try {
+      track.mode = 'showing';
+    } catch (e) {
+      // ignore
+    }
     // eslint-disable-next-line no-console
-    console.debug('track cues after adding samples:', track.cues);
+    console.debug('video.textTracks:', videoRef.current?.textTracks);
+    // eslint-disable-next-line no-console
+    console.debug('track cues after adding samples:', Array.from((track.cues ?? []) as any).map((c: any) => ({ id: c.id, start: c.startTime, end: c.endTime })));
   };
 
   return (

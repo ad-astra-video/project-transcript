@@ -146,7 +146,8 @@ function App() {
         fpsLimit: 30,
         enableVideoIngress: true,
         enableAudioIngress: true,
-        enableDataOutput: true
+        enableDataOutput: true,
+        customParams:{"chunk_window": 2.0}
       };
 
       const startResponse = await stream.start(startOptions);
