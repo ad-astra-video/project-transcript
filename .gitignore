@@ -3,3 +3,7 @@ __pycache__
 ffmpeg-6*
 
 .venv*
+
+.env
+
+node_modules/
