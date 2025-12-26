@@ -295,8 +295,7 @@ async def update_params(params: dict):
 
 from aiohttp import web        
 
-async def handle_stream_start(request: web.Request) -> web.Response:
-    """Handle /stream/start endpoint - resets stream media time origin and forwards to pytrickle."""
+async def on_stream_start(params: dict):
     global STATE
     try:
         logger.info(f"Stream start request received, resetting media time origin")
@@ -309,7 +308,6 @@ async def handle_stream_start(request: web.Request) -> web.Response:
             STATE.current_segments = []
             STATE.current_srt = ""
         # Forward to the pytrickle server's actual handler
-        return await PROCESSOR.server._handle_start_stream(request)
     except Exception as e:
         logger.error(f"Error in stream start: {e}")
         return web.Response(text=str(e), status=500)        
@@ -354,14 +352,11 @@ if __name__ == "__main__":
     PROCESSOR = StreamProcessor(
         audio_processor=process_audio_async,
         param_updater=update_params,
+        on_stream_start=on_stream_start,
         on_stream_stop=on_stream_stop,
         name="transcriber",
         port=port,
     )
 
-    # Add custom routes for orchestrator compatibility
-    PROCESSOR.server.app.router.add_post('/stream/start', handle_stream_start)
-    PROCESSOR.server.app.router.add_post('/stream/stop', on_stream_stop)
-    logger.info(f"Added /stream/start and /stream/stop endpoints")
 
     PROCESSOR.run()
