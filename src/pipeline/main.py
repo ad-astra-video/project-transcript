@@ -45,7 +45,7 @@ class TranscriberState:
         # Audio processing
         self.audio_sample_rate: int = 16000
         self.window_seconds: float = 3.0
-        self.overlap_seconds: float = 1.0
+        self.overlap_seconds: float = 2.0
         self.audio_buffer: np.ndarray = np.zeros((0,), dtype=np.float32)  # mono float32 [-1,1]
         self.buffer_start_ts: Optional[float] = None  # seconds
         self.buffer_rate: Optional[int] = None
