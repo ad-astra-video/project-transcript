@@ -1,0 +1,46 @@
+services:
+  register-worker:
+    build:
+      context: ./register
+      dockerfile: Dockerfile.register_worker
+    container_name: byoc-transcription-register-worker
+    environment:
+      - "ORCH_URL=https://${ORCH_SERVICE_ADDR}"
+      - "ORCH_SECRET=${ORCH_SECRET}"
+      - "CAPABILITY_NAME=${CAPABILITY_NAME}"
+      - "CAPABILITY_DESCRIPTION=video analysis"
+      - "CAPABILITY_URL=${AI_RUNNER_URL}"
+      - "CAPABILITY_PRICE_PER_UNIT=${CAPABILITY_PRICE}"
+      - "CAPABILITY_PRICE_SCALING=1"
+      - "CAPABILITY_CAPACITY=${CAPABILITY_CAPACITY}"
+  transcription-1:
+    image: livepeer/byoc-transcript
+    build:
+      context: .
+    container_name: byoc-transcription-1
+    runtime: nvidia
+    environment:
+      - CUDA_VISIBLE_DEVICES=0
+    volumes:
+      - ./models:/models
+    ports:
+      - 8000:8000
+  vllm:
+    image: vllm/vllm-openai:latest
+    container_name: byoc-transcription-vllm
+    runtime: nvidia
+    environment:
+      - CUDA_VISIBLE_DEVICES=0
+    volumes:
+      - ./models:/models
+    ports:
+      - 5000:5000
+    command: >
+      vllm_openai_server
+      --model google/gemma-3n-E4B-it
+      --port 5000
+      --quantization bitsandbytes
+networks:
+  default:
+    name: byoc-stream
+    external: true
