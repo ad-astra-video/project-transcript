@@ -41,7 +41,6 @@ typing_extensions==4.8.0
 urllib3==2.0.7
 uvicorn==0.35.0
 yarl==1.20.1
-pytrickle==0.1.6
-#git+https://github.com/livepeer/pytrickle.git@a51bacdab9dcb8ef50fc4d69549ddfae09ef9b79
-#pytrickle@git+https://github.com/livepeer/pytrickle.git@5f3830729c9ad00e0a034f087c38105dbb65e6e0
+git+https://github.com/livepeer/pytrickle.git
+
 
