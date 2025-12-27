@@ -13,8 +13,8 @@ services:
       - "CAPABILITY_PRICE_PER_UNIT=${CAPABILITY_PRICE}"
       - "CAPABILITY_PRICE_SCALING=1"
       - "CAPABILITY_CAPACITY=${CAPABILITY_CAPACITY}"
-  transcription-1:
-    image: livepeer/byoc-transcript
+  transcription:
+    image: ${RUNNER_IMAGE}
     build:
       context: .
     container_name: byoc-transcription-1
@@ -24,23 +24,27 @@ services:
     volumes:
       - ./models:/models
     ports:
-      - 8000:8000
+      - ${AI_RUNNER_PORT}:8000
   vllm:
     image: vllm/vllm-openai:latest
     container_name: byoc-transcription-vllm
     runtime: nvidia
     environment:
       - CUDA_VISIBLE_DEVICES=0
+      - CUDA_DEVICE_ORDER=PCI_BUS_ID
+      - HUGGING_FACE_HUB_TOKEN=${HF_TOKEN}
     volumes:
-      - ./models:/models
+      - ./models:/root/.cache/huggingface
     ports:
       - 5000:5000
     command: >
-      vllm_openai_server
-      --model google/gemma-3n-E4B-it
+      --model Nanbeige/Nanbeige4-3B-Thinking-2511
       --port 5000
-      --quantization bitsandbytes
+      --gpu-memory-utilization 0.75
+      --kv-cache-dtype fp8
+      --max-num-batched-tokens 1024
+      --max-num-seqs 10      
 networks:
   default:
-    name: byoc-stream
+    name: byoc-runners
     external: true

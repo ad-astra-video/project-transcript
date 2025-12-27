@@ -7,3 +7,4 @@ ffmpeg-6*
 .env
 
 node_modules/
+models/
