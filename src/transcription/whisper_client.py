@@ -8,6 +8,7 @@ import os
 from typing import Optional, List, Dict, Any
 from dataclasses import dataclass
 from pathlib import Path
+import numpy as np
 
 try:
     from faster_whisper import WhisperModel
@@ -33,6 +34,7 @@ class TranscriptionSegment:
     end: float    # End time in seconds (segment-relative)
     text: str     # Transcribed text
     words: list   # List of WordTimestamp objects
+    speaker: str | None = None  # Optional speaker label
     
     
 class WhisperClient:
