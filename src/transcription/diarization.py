@@ -304,7 +304,7 @@ def diarization_worker(hf_token: str, request_queue, result_queue):
                 for s, speaker in enumerate(diarization_result.speaker_diarization.labels()):
                     speaker_embedding = diarization_result.speaker_embeddings[s]
                     speaker_id, score, alt_speakers = speakers.identify(speaker_embedding)
-                    speaker_ids[speaker] = {"id": speaker_id, "score": score}
+                    speaker_ids[speaker] = {"id": speaker_id, "score": score, "alt_speakers": alt_speakers}
                 # Extract segments
                 segments = []
                 for turn, speaker in diarization_result.speaker_diarization:
@@ -312,7 +312,8 @@ def diarization_worker(hf_token: str, request_queue, result_queue):
                         start=turn.start,
                         end=turn.end,
                         speaker=str(speaker_ids[speaker]["id"]),
-                        confidence=str(speaker_ids[speaker]["score"])
+                        confidence=str(speaker_ids[speaker]["score"]),
+                        alt_speakers=speaker_ids[speaker]["alt_speakers"] if len(speaker_ids[speaker]["alt_speakers"]) > 0 else None
                     ))
                 logger.info(f"Extracted {len(segments)} speaker segments")
                 if len(segments) > 1:
