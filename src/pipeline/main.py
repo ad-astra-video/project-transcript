@@ -21,7 +21,6 @@ sys.path.insert(0, str(src_path))
 
 from transcription.diarization import DiarizationProcess, DiarizationResult, SpeakerSegment
 from transcription.whisper_client import WhisperClient, TranscriptionSegment, WordTimestamp
-from transcription.srt_generator import SRTGenerator
 from pytrickle import StreamProcessor
 from pytrickle import AudioFrame
 import numpy as np
@@ -38,7 +37,6 @@ class TranscriberState:
     def __init__(self):
         # Model and generators
         self.whisper_client: Optional[WhisperClient] = None
-        self.srt_generator: SRTGenerator = SRTGenerator()
 
         # Whisper config
         self.whisper_model: str = "large"

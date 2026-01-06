@@ -6,7 +6,6 @@ __version__ = "1.0.0"
 
 from .diarization import DiarizationProcess, SpeakerSegment, DiarizationRequest, DiarizationResult
 from .whisper_client import WhisperClient, TranscriptionSegment, WordTimestamp
-from .srt_generator import SRTGenerator
 
 __all__ = [
     "DiarizationProcess",
@@ -16,5 +15,4 @@ __all__ = [
     "WhisperClient",
     "TranscriptionSegment",
     "WordTimestamp",
-    "SRTGenerator",
 ]
