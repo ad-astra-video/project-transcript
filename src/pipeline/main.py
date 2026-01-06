@@ -21,6 +21,7 @@ sys.path.insert(0, str(src_path))
 
 from transcription.diarization import DiarizationProcess, DiarizationResult, SpeakerSegment
 from transcription.whisper_client import WhisperClient, TranscriptionSegment, WordTimestamp
+from summary.summary_client import SummaryClient, SummarySegment
 from pytrickle import StreamProcessor
 from pytrickle import AudioFrame
 import numpy as np
@@ -37,6 +38,7 @@ class TranscriberState:
     def __init__(self):
         # Model and generators
         self.whisper_client: Optional[WhisperClient] = None
+        self.summary_client: Optional[SummaryClient] = None
 
         # Whisper config
         self.whisper_model: str = "large"
@@ -72,6 +74,10 @@ class TranscriberState:
         # Temp file tracking for cleanup (when both transcribe and diarize are done)
         self.pending_temp_files: Dict[str, Dict] = {}
 
+        # Summary worker for async processing
+        self.summary_queue: asyncio.Queue = asyncio.Queue()
+        self.summary_worker_task: Optional[asyncio.Task] = None
+
 
 # Global state and processor reference
 STATE: Optional[TranscriberState] = None
@@ -103,6 +109,12 @@ async def load_model(**kwargs):
     STATE.window_seconds = float(params.get("chunk_window", STATE.window_seconds))
     STATE.overlap_seconds = float(params.get("chunk_overlap", STATE.overlap_seconds))
 
+    # Summary params
+    summary_base_url = params.get("summary_base_url", "https://byoc-transcription-vllm:5000/v1")
+    summary_api_key = params.get("summary_api_key", "")
+    summary_history_length = int(params.get("summary_history_length", 0))
+    summary_model = params.get("summary_model", "")
+
     # Init model
     STATE.whisper_client = WhisperClient(
         model_size=STATE.whisper_model,
@@ -111,6 +123,16 @@ async def load_model(**kwargs):
         language=STATE.whisper_language,
     )
     await STATE.whisper_client.initialize()
+
+    # Initialize summary client
+    STATE.summary_client = SummaryClient(
+        base_url=summary_base_url,
+        api_key=summary_api_key,
+        history_length=summary_history_length,
+        model=summary_model,
+    )
+    await STATE.summary_client.initialize()
+    logger.info("Summary client initialized")
 
     # Initialize diarization in separate process
     STATE.diarization_process = DiarizationProcess(
@@ -262,6 +284,68 @@ def _check_cleanup(audio_path: str):
         del STATE.pending_temp_files[audio_path]
 
 
+async def _summary_worker(self):
+    """Background task to process summary requests from the queue."""
+    logger.info("Starting summary worker")
+    while STATE is not None:
+        try:
+            # Wait for work with timeout to allow checking STATE
+            work_item = await asyncio.wait_for(self.summary_queue.get(), timeout=0.5)
+            if work_item is None:
+                break
+            
+            segments, window_start_ts, end_ts = work_item
+            
+            try:
+                # Convert segments to dict format for summary client
+                segments_dict = _build_segments_payload(segments, window_start_ts)
+                
+                # Get cleaned/summarized segments
+                summary_segments = await STATE.summary_client.process_segments(segments_dict)
+                
+                if summary_segments:
+                    logger.info(f"Summary processed {len(summary_segments)} segments")
+                    # Send summary data to client
+                    if PROCESSOR is not None:
+                        summary_payload = {
+                            "type": "context_summary",
+                            "timestamp_utc": datetime.now(timezone.utc).isoformat(),
+                            "timing": {
+                                "media_window_start_ms": int(window_start_ts * 1000),
+                                "media_window_end_ms": int(end_ts * 1000)
+                            },
+                            "segments": [
+                                {
+                                    "original_text": seg.original_text,
+                                    "cleaned_text": seg.cleaned_text,
+                                    "summary": seg.summary,
+                                    "start_ms": int(seg.timestamp_start * 1000),
+                                    "end_ms": int(seg.timestamp_end * 1000),
+                                    "speaker": seg.speaker
+                                }
+                                for seg in summary_segments
+                            ]
+                        }
+                        await PROCESSOR.send_data(json.dumps(summary_payload))
+                        logger.debug(f"Sent summary data for window [{int(window_start_ts*1000)}ms - {int(end_ts*1000)}ms]")
+            except Exception as e:
+                logger.error(f"Summary processing error: {e}")
+        except asyncio.TimeoutError:
+            continue
+        except asyncio.CancelledError:
+            break
+        except Exception as e:
+            logger.error(f"Summary worker error: {e}")
+    logger.info("Summary worker stopped")
+
+
+async def _start_summary_worker(self):
+    """Start the summary worker task."""
+    if self.summary_worker_task is None or self.summary_worker_task.done():
+        self.summary_worker_task = asyncio.create_task(_summary_worker(self))
+        logger.info("Summary worker task started")
+
+
 async def _send_speakers_message(segments: list[SpeakerSegment], window_start_ts: float, window_end_ts: float):
     """Send speakers message to client (client saves to database)."""
     if PROCESSOR is None or not segments:
@@ -390,6 +474,14 @@ async def _transcribe_current_window(now_ts: float):
 
     STATE.current_segments = segments
 
+    # Queue summary work for async processing (non-blocking)
+    if STATE.summary_client is not None:
+        try:
+            # Put work on queue for background processing
+            STATE.summary_queue.put_nowait((segments, window_start_ts, end_ts))
+        except Exception as e:
+            logger.error(f"Failed to queue summary work: {e}")
+
     keep_len = int(max(0, STATE.overlap_seconds * sr))
     STATE.audio_buffer = STATE.audio_buffer[-keep_len:] if keep_len > 0 else np.zeros((0,), dtype=np.float32)
     end_ts = window_start_ts + (win_len / float(sr))
@@ -497,8 +589,18 @@ async def update_params(params: dict):
     if "chunk_overlap" in params:
         STATE.overlap_seconds = float(params["chunk_overlap"])
     
+    # Summary parameters
+    if "summary_base_url" in params or "summary_api_key" in params or "summary_history_length" in params or "summary_model" in params:
+        if STATE.summary_client is not None:
+            STATE.summary_client.update_params(
+                base_url=params.get("summary_base_url"),
+                api_key=params.get("summary_api_key"),
+                history_length=params.get("summary_history_length"),
+                model=params.get("summary_model"),
+            )
+    
     # If Whisper model parameters changed, reinitialize the client
-    whisper_params_changed = any(param in params for param in 
+    whisper_params_changed = any(param in params for param in
                                 ["whisper_model", "whisper_language", "whisper_device", "compute_type"])
     
     if whisper_params_changed and STATE.whisper_client is not None:
@@ -534,6 +636,13 @@ async def on_stream_start(params: dict):
             STATE.diarization_audio_buffer = np.zeros((0,), dtype=np.float32)  # Reset diarization buffer
             STATE.diarization_buffer_start_ts = None
             
+            # Reset summary client state
+            if STATE.summary_client is not None:
+                STATE.summary_client.reset()
+            
+            # Start summary worker for this stream
+            await _start_summary_worker(STATE)
+            
             # Start diarization polling task for this stream
             if STATE.diarization_process is not None:
                 STATE.diarization_poll_task = asyncio.create_task(_poll_diarization_results())
@@ -566,6 +675,16 @@ async def on_stream_stop():
     STATE.buffer_rate = None
     STATE.stream_start_media_ts = None
     STATE.pending_temp_files = {}
+    
+    # Cancel the summary worker
+    if STATE.summary_worker_task is not None:
+        STATE.summary_worker_task.cancel()
+        STATE.summary_worker_task = None
+        logger.info("Summary worker task cancelled")
+    
+    # Close summary client
+    if STATE.summary_client is not None:
+        await STATE.summary_client.close()
     
     # Reset diarization process state (keep process running)
     if STATE.diarization_process is not None:
