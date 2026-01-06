@@ -10,8 +10,8 @@ services:
       - "CAPABILITY_NAME=${CAPABILITY_NAME}"
       - "CAPABILITY_DESCRIPTION=video analysis"
       - "CAPABILITY_URL=${AI_RUNNER_URL}"
-      - "CAPABILITY_PRICE_PER_UNIT=${CAPABILITY_PRICE}"
-      - "CAPABILITY_PRICE_SCALING=1"
+      - "CAPABILITY_PRICE_PER_UNIT=${CAPABILITY_PRICE_PER_UNIT}"
+      - "CAPABILITY_PRICE_SCALING=${CAPABILITY_PRICE_SCALING}"
       - "CAPABILITY_CAPACITY=${CAPABILITY_CAPACITY}"
   transcription:
     image: ${RUNNER_IMAGE}
@@ -21,8 +21,10 @@ services:
     runtime: nvidia
     environment:
       - CUDA_VISIBLE_DEVICES=0
+      - HF_TOKEN=${HF_TOKEN}
     volumes:
       - ./models:/models
+      #- ./src:/app/src
     ports:
       - ${AI_RUNNER_PORT}:8000
   vllm:
@@ -38,12 +40,12 @@ services:
     ports:
       - 5000:5000
     command: >
-      --model Nanbeige/Nanbeige4-3B-Thinking-2511
+      --model Qwen/Qwen3-VL-4B-Instruct
       --port 5000
       --gpu-memory-utilization 0.75
       --kv-cache-dtype fp8
       --max-num-batched-tokens 1024
-      --max-num-seqs 10      
+      --max-num-seqs 10
 networks:
   default:
     name: byoc-runners

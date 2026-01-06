@@ -38,6 +38,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libunistring-dev \
     libaom-dev \
     libdav1d-dev \
+    ffmpeg \
     && rm -rf /var/lib/apt/lists/*
 
 # Create app directory
