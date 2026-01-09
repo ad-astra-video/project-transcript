@@ -226,9 +226,9 @@ You are optimized for live understanding, not post-hoc summarization.
             if segment_new_words:
                 new_segments.append({
                     "id": segment.get("id", ""),
-                    "start": segment.get("start", 0.0),
-                    "end": segment.get("end", 0.0),
-                    "text": segment.get("text", ""),
+                    "start": segment_new_words[0].get("start", 0.0),
+                    "end": segment_new_words[-1].get("end", 0.0),
+                    "text": " ".join(w.get("text", "") for w in segment_new_words),
                     "words": segment_new_words,
                     "speaker": segment.get("speaker")
                 })
@@ -344,20 +344,25 @@ You are optimized for live understanding, not post-hoc summarization.
         # Get context from history
         context = self._build_context()
         
-        # Send to LLM for cleaning/summarization
+        # Send to LLM to extract context
         summary_text = await self.summarize_text(new_text, context)
         
         # Create summary segments
         summary_segments = []
-        for segment in new_segments:
-            summary_segments.append(SummarySegment(
-                original_text=segment.get("text", ""),
-                cleaned_text="",
-                summary=summary_text,
-                timestamp_start=segment.get("start", 0.0),
-                timestamp_end=segment.get("end", 0.0),
-                speaker=segment.get("speaker")
-            ))
+        # Get the first segment's start timestamp
+        first_start = new_segments[0].get("start", 0.0)
+        
+        # Get the last segment's end timestamp
+        last_end = new_segments[-1].get("end", 0.0)
+        
+        summary_segments.append(SummarySegment(
+            original_text=segment.get("text", ""),
+            cleaned_text="",
+            summary=summary_text,
+            timestamp_start=first_start,
+            timestamp_end=last_end,
+            speaker=new_segments[0].get("speaker")
+        ))
         
         return summary_segments
     
