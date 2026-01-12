@@ -7,7 +7,7 @@ import logging
 import os
 from typing import Optional, List, Dict, Any
 from dataclasses import dataclass
-import httpx
+import aiohttp
 
 logger = logging.getLogger(__name__)
 
@@ -92,7 +92,7 @@ You are optimized for live understanding, not post-hoc summarization.
         self._accumulated_segments: List[Dict[str, Any]] = []
         
         # HTTP client
-        self._client: Optional[httpx.AsyncClient] = None
+        self._client: Optional[aiohttp.ClientSession] = None
         self._lock = asyncio.Lock()
     
     async def initialize(self):
@@ -102,13 +102,10 @@ You are optimized for live understanding, not post-hoc summarization.
         This method creates an HTTP client, calls the /models endpoint to get available models,
         and sets the model to the first available model or the default one.
         """
-        self._client = httpx.AsyncClient(timeout=60.0)
-        
         try:
-            response = await self._client.get(f"{self.base_url}/models")
-            response.raise_for_status()
-            
-            result = response.json()
+            async with self._client.get(f"{self.base_url}/models") as response:
+                await response.check_status()
+                result = await response.json()
             
             # Extract model from response - typically a list of models
             if isinstance(result, list) and len(result) > 0:
@@ -179,16 +176,16 @@ You are optimized for live understanding, not post-hoc summarization.
         
         logger.info(f"SummaryClient params updated: base_url={self.base_url}, history_length={self.history_length}, model={self.model}")
     
-    async def _get_client(self) -> httpx.AsyncClient:
+    async def _get_client(self) -> aiohttp.ClientSession:
         """Get or create HTTP client."""
         if self._client is None:
-            self._client = httpx.AsyncClient(timeout=60.0)
+            self._client = aiohttp.ClientSession()
         return self._client
     
     async def close(self):
         """Close the HTTP client."""
         if self._client is not None:
-            await self._client.aclose()
+            await self._client.close()
             self._client = None
     
     def get_new_words_since(self, segments: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
@@ -296,15 +293,13 @@ You are optimized for live understanding, not post-hoc summarization.
             
             logger.debug(f"Sending to LLM: {self.base_url}/chat/completions")
             
-            response = await client.post(
+            async with client.post(
                 f"{self.base_url}/chat/completions",
                 json=payload,
                 headers=headers
-            )
-            
-            response.raise_for_status()
-            
-            result = response.json()
+            ) as response:
+                await response.check_status()
+                result = await response.json()
             
             # Extract cleaned text from response
             if "choices" in result and len(result["choices"]) > 0:
@@ -313,8 +308,8 @@ You are optimized for live understanding, not post-hoc summarization.
             
             return ""
             
-        except httpx.HTTPStatusError as e:
-            logger.error(f"HTTP error from LLM API: {e.response.status_code} - {e.response.text}")
+        except aiohttp.ClientResponseError as e:
+            logger.error(f"HTTP error from LLM API: {e.status} - {e.message}")
             raise
         except Exception as e:
             logger.error(f"Error calling LLM API: {e}")
