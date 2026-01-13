@@ -104,7 +104,7 @@ You are optimized for live understanding, not post-hoc summarization.
         """
         try:
             async with self._client.get(f"{self.base_url}/models") as response:
-                await response.check_status()
+                await response.raise_for_status()
                 result = await response.json()
             
             # Extract model from response - typically a list of models
@@ -298,7 +298,7 @@ You are optimized for live understanding, not post-hoc summarization.
                 json=payload,
                 headers=headers
             ) as response:
-                await response.check_status()
+                await response.raise_for_status()
                 result = await response.json()
             
             # Extract cleaned text from response

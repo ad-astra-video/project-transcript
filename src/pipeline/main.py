@@ -110,7 +110,7 @@ async def load_model(**kwargs):
     STATE.overlap_seconds = float(params.get("chunk_overlap", STATE.overlap_seconds))
 
     # Summary params
-    summary_base_url = params.get("summary_base_url", "https://byoc-transcription-vllm:5000/v1")
+    summary_base_url = params.get("summary_base_url", "http://byoc-transcription-vllm:5000/v1")
     summary_api_key = params.get("summary_api_key", "")
     summary_history_length = int(params.get("summary_history_length", 0))
     summary_model = params.get("summary_model", "")
@@ -294,7 +294,7 @@ async def _summary_worker(self):
             if work_item is None:
                 break
             
-            segments, window_start_ts, end_ts = work_item
+            segments, window_start_ts, window_end_ts = work_item
             
             try:
                 # Convert segments to dict format for summary client
@@ -312,7 +312,7 @@ async def _summary_worker(self):
                             "timestamp_utc": datetime.now(timezone.utc).isoformat(),
                             "timing": {
                                 "media_window_start_ms": int(window_start_ts * 1000),
-                                "media_window_end_ms": int(end_ts * 1000)
+                                "media_window_end_ms": int(window_end_ts * 1000)
                             },
                             "segments": [
                                 {
@@ -327,7 +327,7 @@ async def _summary_worker(self):
                             ]
                         }
                         await PROCESSOR.send_data(json.dumps(summary_payload))
-                        logger.debug(f"Sent summary data for window [{int(window_start_ts*1000)}ms - {int(end_ts*1000)}ms]")
+                        logger.debug(f"Sent summary data for window [{int(window_start_ts*1000)}ms - {int(window_end_ts*1000)}ms]")
             except Exception as e:
                 logger.error(f"Summary processing error: {e}")
         except asyncio.TimeoutError:
@@ -474,6 +474,9 @@ async def _transcribe_current_window(now_ts: float):
 
     STATE.current_segments = segments
 
+    # Calculate end timestamp before queuing summary work
+    end_ts = window_start_ts + (win_len / float(sr))
+
     # Queue summary work for async processing (non-blocking)
     if STATE.summary_client is not None:
         try:
@@ -484,7 +487,6 @@ async def _transcribe_current_window(now_ts: float):
 
     keep_len = int(max(0, STATE.overlap_seconds * sr))
     STATE.audio_buffer = STATE.audio_buffer[-keep_len:] if keep_len > 0 else np.zeros((0,), dtype=np.float32)
-    end_ts = window_start_ts + (win_len / float(sr))
     STATE.buffer_start_ts = end_ts - (keep_len / float(sr))
 
     if PROCESSOR is not None:
