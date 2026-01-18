@@ -40,7 +40,7 @@ class TranscriptionSegment:
 class WhisperClient:
     """Client for faster-whisper transcription."""
     
-    def __init__(self, model_size: str = "base", device: str = "cuda", compute_type: str ="float16", language: str | None = None, language_confidence_threshold: float = 0.5):
+    def __init__(self, model_size: str = "turbo", device: str = "cpu", compute_type: str ="float32", language: str | None = None, language_confidence_threshold: float = 0.5):
         """
         Initialize the whisper client.
         

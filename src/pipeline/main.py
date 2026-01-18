@@ -10,6 +10,7 @@ import logging
 import os
 import sys
 import json
+from collections import deque
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional, Dict
@@ -41,15 +42,15 @@ class TranscriberState:
         self.summary_client: Optional[SummaryClient] = None
 
         # Whisper config
-        self.whisper_model: str = "large"
+        self.whisper_model: str = "turbo"
         self.whisper_language: Optional[str] = None
         self.whisper_device: str = "cuda"
         self.compute_type: str = "float16"
 
         # Audio processing
         self.audio_sample_rate: int = 16000
-        self.window_seconds: float = 3.0
-        self.overlap_seconds: float = 2.0
+        self.window_seconds: float = 2.5
+        self.overlap_seconds: float = 1.0
         self.audio_buffer: np.ndarray = np.zeros((0,), dtype=np.float32)  # mono float32 [-1,1]
         self.buffer_start_ts: Optional[float] = None  # seconds
         self.buffer_rate: Optional[int] = None
@@ -76,7 +77,12 @@ class TranscriberState:
 
         # Summary worker for async processing
         self.summary_queue: asyncio.Queue = asyncio.Queue()
-        self.summary_worker_task: Optional[asyncio.Task] = None
+        self.summary_results: deque = deque(maxlen=100)  # Bounded deque for summary results
+        self.summary_worker_tasks: list[asyncio.Task] = []
+        self.summary_sender_task: Optional[asyncio.Task] = None  # Background sender task
+        
+        # Summary window tracking
+        self.summary_window_counter: int = 0  # Counter for unique window IDs
 
 
 # Global state and processor reference
@@ -284,50 +290,60 @@ def _check_cleanup(audio_path: str):
         del STATE.pending_temp_files[audio_path]
 
 
-async def _summary_worker(self):
+async def _summary_worker():
     """Background task to process summary requests from the queue."""
     logger.info("Starting summary worker")
     while STATE is not None:
         try:
             # Wait for work with timeout to allow checking STATE
-            work_item = await asyncio.wait_for(self.summary_queue.get(), timeout=0.5)
+            work_item = await asyncio.wait_for(STATE.summary_queue.get(), timeout=0.5)
             if work_item is None:
                 break
             
-            segments, window_start_ts, window_end_ts = work_item
+            segments, window_id, window_start_ts, window_end_ts = work_item
+            logger.info(f"Summary worker received work for window {window_id} [{window_start_ts:.3f}s - {window_end_ts:.3f}s]")
             
             try:
                 # Convert segments to dict format for summary client
                 segments_dict = _build_segments_payload(segments, window_start_ts)
+                logger.info(f"Built payload with {len(segments_dict)} segments")
                 
-                # Get cleaned/summarized segments
-                summary_segments = await STATE.summary_client.process_segments(segments_dict)
+                try:
+                    summary_segments = await asyncio.wait_for(
+                        STATE.summary_client.process_segments(segments_dict, window_id, window_start_ts, window_end_ts),
+                        timeout=50.0
+                    )
+                except asyncio.TimeoutError:
+                    logger.warning(f"Summarization timed out for window {window_id} [{window_start_ts:.3f}s - {window_end_ts:.3f}s]")
+                    continue
+                except Exception as e:
+                    logger.error(f"Error in summarization task: {e}")
+                    continue
                 
                 if summary_segments:
                     logger.info(f"Summary processed {len(summary_segments)} segments")
-                    # Send summary data to client
-                    if PROCESSOR is not None:
-                        summary_payload = {
-                            "type": "context_summary",
-                            "timestamp_utc": datetime.now(timezone.utc).isoformat(),
-                            "timing": {
-                                "media_window_start_ms": int(window_start_ts * 1000),
-                                "media_window_end_ms": int(window_end_ts * 1000)
-                            },
-                            "segments": [
-                                {
-                                    "original_text": seg.original_text,
-                                    "cleaned_text": seg.cleaned_text,
-                                    "summary": seg.summary,
-                                    "start_ms": int(seg.timestamp_start * 1000),
-                                    "end_ms": int(seg.timestamp_end * 1000),
-                                    "speaker": seg.speaker
-                                }
-                                for seg in summary_segments
-                            ]
-                        }
-                        await PROCESSOR.send_data(json.dumps(summary_payload))
-                        logger.debug(f"Sent summary data for window [{int(window_start_ts*1000)}ms - {int(window_end_ts*1000)}ms]")
+                    # Store summary data in deque for background sender
+                    summary_payload = {
+                        "type": "context_summary",
+                        "timestamp_utc": datetime.now(timezone.utc).isoformat(),
+                        "timing": {
+                            "window_id": window_id,
+                            "media_window_start_ms": int(window_start_ts * 1000),
+                            "media_window_end_ms": int(window_end_ts * 1000)
+                        },
+                        "segments": [
+                            {
+                                "original_text": seg.original_text,
+                                "cleaned_text": seg.cleaned_text,
+                                "summary": seg.summary,
+                                "start_ms": int(seg.timestamp_start),
+                                "end_ms": int(seg.timestamp_end),
+                            }
+                            for seg in summary_segments
+                        ]
+                    }
+                    STATE.summary_results.append(summary_payload)
+                    logger.debug(f"Stored summary data for window {window_id} [{int(window_start_ts*1000)}ms - {int(window_end_ts*1000)}ms]")
             except Exception as e:
                 logger.error(f"Summary processing error: {e}")
         except asyncio.TimeoutError:
@@ -340,10 +356,47 @@ async def _summary_worker(self):
 
 
 async def _start_summary_worker(self):
-    """Start the summary worker task."""
-    if self.summary_worker_task is None or self.summary_worker_task.done():
-        self.summary_worker_task = asyncio.create_task(_summary_worker(self))
-        logger.info("Summary worker task started")
+    """Start multiple summary worker tasks and the sender task."""
+    num_workers = 4  # Default number of concurrent workers
+    if not self.summary_worker_tasks or all(t.done() for t in self.summary_worker_tasks):
+        self.summary_worker_tasks = [
+            asyncio.create_task(_summary_worker())
+            for _ in range(num_workers)
+        ]
+        logger.info(f"Started {num_workers} summary worker tasks")
+    
+    # Start summary sender task if not already running
+    if self.summary_sender_task is None or self.summary_sender_task.done():
+        self.summary_sender_task = asyncio.create_task(_summary_sender())
+        logger.info("Started summary sender task")
+
+
+async def _summary_sender():
+    """Background task that monitors deque and sends results to client."""
+    logger.info("Starting summary sender")
+    while STATE is not None:
+        try:
+            if len(STATE.summary_results) == 0:
+                await asyncio.sleep(0.1)  # Sleep if empty
+                continue
+            
+            # Drain all results and send
+            while len(STATE.summary_results) > 0:
+                result = STATE.summary_results.popleft()
+                try:
+                    if PROCESSOR is not None:
+                        await PROCESSOR.send_data(json.dumps(result))
+                        logger.debug(f"Sent summary result")
+                except Exception as e:
+                    logger.error(f"Error sending summary result: {e}")
+            
+            await asyncio.sleep(0.05)  # Small pause between batches
+            
+        except asyncio.CancelledError:
+            break
+        except Exception as e:
+            logger.error(f"Summary sender error: {e}")
+    logger.info("Summary sender stopped")
 
 
 async def _send_speakers_message(segments: list[SpeakerSegment], window_start_ts: float, window_end_ts: float):
@@ -480,8 +533,13 @@ async def _transcribe_current_window(now_ts: float):
     # Queue summary work for async processing (non-blocking)
     if STATE.summary_client is not None:
         try:
+            # Generate unique window_id for this summary window
+            window_id = STATE.summary_window_counter
+            STATE.summary_window_counter += 1
+            
             # Put work on queue for background processing
-            STATE.summary_queue.put_nowait((segments, window_start_ts, end_ts))
+            STATE.summary_queue.put_nowait((segments, window_id, window_start_ts, end_ts))
+            logger.info(f"Queued summary work for window {window_id} [{window_start_ts:.3f}s - {end_ts:.3f}s] with {len(segments)} segments")
         except Exception as e:
             logger.error(f"Failed to queue summary work: {e}")
 
@@ -642,6 +700,9 @@ async def on_stream_start(params: dict):
             if STATE.summary_client is not None:
                 STATE.summary_client.reset()
             
+            # Reset summary window counter
+            STATE.summary_window_counter = 0
+            
             # Start summary worker for this stream
             await _start_summary_worker(STATE)
             
@@ -678,15 +739,13 @@ async def on_stream_stop():
     STATE.stream_start_media_ts = None
     STATE.pending_temp_files = {}
     
-    # Cancel the summary worker
-    if STATE.summary_worker_task is not None:
-        STATE.summary_worker_task.cancel()
-        STATE.summary_worker_task = None
-        logger.info("Summary worker task cancelled")
+    # Cancel all summary workers
+    for task in STATE.summary_worker_tasks:
+        task.cancel()
+    STATE.summary_worker_tasks = []
+    logger.info("Summary worker tasks cancelled")
     
-    # Close summary client
-    if STATE.summary_client is not None:
-        await STATE.summary_client.close()
+    # Summary client no longer needs explicit close - sessions are created per-request
     
     # Reset diarization process state (keep process running)
     if STATE.diarization_process is not None:

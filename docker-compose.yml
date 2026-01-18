@@ -45,7 +45,7 @@ services:
       --gpu-memory-utilization 0.75
       --kv-cache-dtype fp8
       --max-num-batched-tokens 1024
-      --max-num-seqs 10
+      --max-num-seqs ${MAX_CONCURRENT_SUMMARIES}
 networks:
   default:
     name: byoc-runners

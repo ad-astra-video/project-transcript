@@ -3,6 +3,7 @@ Summary client for LLM-based transcription cleaning and summarization.
 """
 
 import asyncio
+import json
 import logging
 import os
 from typing import Optional, List, Dict, Any
@@ -23,12 +24,122 @@ class SummarySegment:
     speaker: str | None = None
 
 
+@dataclass
+class WindowInsight:
+    """Insight extracted from a summary window."""
+    insight_type: str  # ACTION, DECISION, QUESTION, FACT, RISK
+    text: str
+    window_id: int  # Which summary window this belongs to
+    timestamp_start: float
+    timestamp_end: float
+
+
+@dataclass
+class SummaryWindow:
+    """A 5-second summary window with text and insights."""
+    window_id: int
+    text: str  # Non-overlapping text for this window
+    insights: List[WindowInsight]
+    timestamp_start: float
+    timestamp_end: float
+    char_count: int  # Length of text for context limit calculation
+
+
+class WindowManager:
+    """Manages summary windows and their text/insights."""
+    
+    def __init__(self, max_chars: int = 100000):
+        self._windows: List[SummaryWindow] = []  # Ordered oldest -> newest
+        self._char_count: int = 0
+        self._next_window_id: int = 0
+        self.max_chars = max_chars
+    
+    def add_window(self, text: str, timestamp_start: float, timestamp_end: float) -> int:
+        """
+        Add a new window, dropping oldest if over char limit.
+        
+        Args:
+            text: Text content for this window
+            timestamp_start: Start timestamp in seconds
+            timestamp_end: End timestamp in seconds
+        
+        Returns:
+            window_id of the added window
+        """
+        window_id = self._next_window_id
+        
+        # Check if adding would exceed limit
+        new_char_count = self._char_count + len(text)
+        
+        # Drop oldest windows until under limit
+        while new_char_count > self.max_chars and self._windows:
+            oldest = self._windows.pop(0)
+            self._char_count -= oldest.char_count
+            new_char_count = self._char_count + len(text)
+        
+        # Create and add window
+        window = SummaryWindow(
+            window_id=window_id,
+            text=text,
+            insights=[],
+            timestamp_start=timestamp_start,
+            timestamp_end=timestamp_end,
+            char_count=len(text)
+        )
+        self._windows.append(window)
+        self._char_count = len(text)  # Reset to current window only
+        self._next_window_id += 1
+        
+        return window_id
+    
+    def get_accumulated_text(self) -> str:
+        """Get all window text concatenated."""
+        return " ".join(w.text for w in self._windows)
+    
+    def get_window_insights(self, window_id: int) -> List[WindowInsight]:
+        """Get insights for a specific window."""
+        for window in self._windows:
+            if window.window_id == window_id:
+                return window.insights
+        return []
+    
+    def add_insight_to_window(self, window_id: int, insight: WindowInsight):
+        """Add an insight to a specific window."""
+        for window in self._windows:
+            if window.window_id == window_id:
+                window.insights.append(insight)
+                return
+    
+    def drop_window(self, window_id: int):
+        """Drop a window and its insights."""
+        for i, window in enumerate(self._windows):
+            if window.window_id == window_id:
+                self._char_count -= window.char_count
+                self._windows.pop(i)
+                return
+    
+    def get_all_insights(self) -> List[WindowInsight]:
+        """Get all insights from all windows."""
+        all_insights = []
+        for window in self._windows:
+            all_insights.extend(window.insights)
+        return all_insights
+    
+    def clear(self):
+        """Clear all windows."""
+        self._windows.clear()
+        self._char_count = 0
+    
+    def __len__(self):
+        return len(self._windows)
+
+
 class SummaryClient:
     """Client for LLM-based transcription cleaning and summarization."""
     
     def __init__(
         self,
-        base_url: str = "https://byoc-transcription-vllm:5000/v1",
+        base_url: str = "http://byoc-transcription-vllm:5000/v1",
         api_key: str = "",
         history_length: int = 0,
         model: Optional[str] = None,
@@ -53,14 +164,15 @@ Guidelines:
 - Prefer concise, atomic insights over long prose.
 - Update or invalidate earlier insights if new information contradicts them.
 - Ignore filler speech, false starts, and verbal noise unless it affects meaning.
-- When unsure, mark confidence as low rather than guessing.
+- When unsure, mark confidence as low rather than guessing. Do not return RISK because of uncertainty.
 
 Output Format:
 - Clearly label insight type (e.g. ACTION, DECISION, QUESTION, FACT, RISK)
-- Use JSON lists for each labeled insight
-- Include timestamps or transcript offsets when possible
+- JSON should be list of insights in format example [{"type": "ACTION", "text": "insight text", "confidence": 0.90}, {"type": "QUESTION", "text": "insight text", "confidence": 0.20}]
+- Only output valid JSON and one json object per response after thinking briefly
+- keys in the json object should always be lowercase
 
-You are optimized for live understanding, not post-hoc summarization.
+You are optimized for live understanding, not post-hoc summarization. Think briefly.
 """.strip()
     ):
         """
@@ -83,17 +195,25 @@ You are optimized for live understanding, not post-hoc summarization.
         self.temperature = temperature
         self.system_prompt = system_prompt
         
-        # Track last word seen for incremental updates
-        self._last_word: Optional[str] = None
-        self._last_word_timestamp: Optional[float] = None
+        # Window-based state management
+        self._window_manager: WindowManager = WindowManager()
         
-        # Accumulated text for summarization
-        self._accumulated_text: str = ""
-        self._accumulated_segments: List[Dict[str, Any]] = []
+        # Track last processed timestamp per window
+        self._window_last_timestamp: Dict[int, float] = {}
         
-        # HTTP client
-        self._client: Optional[aiohttp.ClientSession] = None
-        self._lock = asyncio.Lock()
+        # Track whether we've performed the first summary call
+        self._has_performed_summary: bool = False
+        
+        # Lock for thread safety (though we're single-threaded in async)
+        self._lock: Optional[asyncio.Lock] = None
+        
+        # Concurrency limiter for summary calls (set via env var)
+        try:
+            max_concurrent = int(os.getenv("MAX_CONCURRENT_SUMMARIES", "4"))
+        except Exception:
+            max_concurrent = 4
+        self.max_concurrent_summaries: int = max(1, max_concurrent)
+        self._semaphore: asyncio.Semaphore = asyncio.Semaphore(self.max_concurrent_summaries)
     
     async def initialize(self):
         """
@@ -102,10 +222,27 @@ You are optimized for live understanding, not post-hoc summarization.
         This method creates an HTTP client, calls the /models endpoint to get available models,
         and sets the model to the first available model or the default one.
         """
+        logger.info("SummaryClient.initialize called")
+        
         try:
-            async with self._client.get(f"{self.base_url}/models") as response:
-                await response.raise_for_status()
-                result = await response.json()
+            # Create a fresh session for this request to avoid event loop issues
+            connector = aiohttp.TCPConnector(
+                limit=100, 
+                limit_per_host=30, 
+                enable_cleanup_closed=True,
+                use_dns_cache=False
+            )
+            timeout = aiohttp.ClientTimeout(total=None)
+            
+            async with aiohttp.ClientSession(connector=connector, timeout=timeout) as client:
+                async with client.get(f"{self.base_url}/models") as response:
+                    response.raise_for_status()
+                    result = await response.json()
+            logger.info(f"Received models from {self.base_url}/models")
+            
+            #setup lock
+            if self._lock is None:
+                self._lock = asyncio.Lock()
             
             # Extract model from response - typically a list of models
             if isinstance(result, list) and len(result) > 0:
@@ -176,71 +313,64 @@ You are optimized for live understanding, not post-hoc summarization.
         
         logger.info(f"SummaryClient params updated: base_url={self.base_url}, history_length={self.history_length}, model={self.model}")
     
-    async def _get_client(self) -> aiohttp.ClientSession:
-        """Get or create HTTP client."""
-        if self._client is None:
-            self._client = aiohttp.ClientSession()
-        return self._client
-    
-    async def close(self):
-        """Close the HTTP client."""
-        if self._client is not None:
-            await self._client.close()
-            self._client = None
-    
-    def get_new_words_since(self, segments: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    def get_new_text_for_window(
+        self,
+        segments: List[Dict[str, Any]],
+        window_id: int
+    ) -> str:
         """
-        Get new words/segments since the last processed word.
+        Get non-overlapping text from segments for a specific window.
         
         Args:
             segments: List of segment dictionaries with 'words' containing word timestamps
-            
+            window_id: The window we're processing text for
+        
         Returns:
-            List of new segments since last processed word
+            Non-overlapping text for this window
         """
-        new_segments = []
+        last_ts = self._window_last_timestamp.get(window_id, 0)
+        new_text_parts = []
         
         for segment in segments:
-            words = segment.get("words", [])
-            segment_new_words = []
+            seg_start = segment.get("start_ms", segment.get("start", 0))
+            seg_end = segment.get("end_ms", segment.get("end", 0))
             
-            for word in words:
-                word_text = word.get("text", "")
-                word_start = word.get("start", 0.0)
-                
-                # Check if this word is after the last seen word
-                if self._last_word is None:
-                    # First time, include all words
-                    segment_new_words.append(word)
-                elif self._last_word_timestamp is None or word_start > self._last_word_timestamp:
-                    segment_new_words.append(word)
-                
-                # Update last seen word
-                if word_text:
-                    self._last_word = word_text
-                    self._last_word_timestamp = word_start
+            if seg_end <= last_ts:
+                # Segment entirely before last processed - skip
+                continue
             
-            if segment_new_words:
-                new_segments.append({
-                    "id": segment.get("id", ""),
-                    "start": segment_new_words[0].get("start", 0.0),
-                    "end": segment_new_words[-1].get("end", 0.0),
-                    "text": " ".join(w.get("text", "") for w in segment_new_words),
-                    "words": segment_new_words,
-                    "speaker": segment.get("speaker")
-                })
+            if seg_start > last_ts:
+                # Segment entirely after last processed - include all
+                text = segment.get("text", "")
+                if text:
+                    new_text_parts.append(text)
+            else:
+                # Segment overlaps - include only the new portion
+                text = segment.get("text", "")
+                if text:
+                    words = text.split()
+                    # Calculate how many words to skip based on timestamp overlap
+                    seg_duration = seg_end - seg_start
+                    if seg_duration > 0:
+                        overlap_ratio = (last_ts - seg_start) / seg_duration
+                        skip_count = int(len(words) * overlap_ratio)
+                        new_words = words[skip_count:]
+                        if new_words:
+                            new_text_parts.append(" ".join(new_words))
         
-        return new_segments
+        # Update last timestamp for this window
+        if segments:
+            last_seg_end = segments[-1].get("end_ms", segments[-1].get("end", 0))
+            self._window_last_timestamp[window_id] = last_seg_end
+        
+        return " ".join(new_text_parts)
     
     def _build_context(self) -> str:
-        """Build context string from accumulated segments based on history_length."""
-        if self.history_length == 0:
-            # Include all accumulated text
-            return self._accumulated_text
-        
-        # Include last N segments
-        recent_segments = self._accumulated_segments[-self.history_length:]
-        return " ".join(s.get("cleaned_text", "") or s.get("text", "") for s in recent_segments)
+        """Build context string from WindowManager accumulated text."""
+        accumulated_text = self._window_manager.get_accumulated_text()
+        if accumulated_text:
+            return f"\nRecent Transcript:\n{accumulated_text}"
+        return ""
     
     async def summarize_text(self, text: str, context: str = "") -> str:
         """
@@ -253,118 +383,244 @@ You are optimized for live understanding, not post-hoc summarization.
         Returns:
             Cleaned and summarized text
         """
-        try:
-            client = await self._get_client()
+        logger.info(f"summarize_text called with text length={len(text)}, context length={len(context)}")
+        
+        async def _do_request() -> str:
+            # Create a fresh session for this request to avoid event loop issues
+            # This ensures the session is created in the current event loop context
+            connector = aiohttp.TCPConnector(
+                limit=100,
+                limit_per_host=30,
+                enable_cleanup_closed=True,
+                use_dns_cache=False
+            )
+            timeout = aiohttp.ClientTimeout(total=None)
             
-            messages = []
-            
-            # System prompt
-            messages.append({
-                "role": "system",
-                "content": self.system_prompt
-            })
-            
-            # Context from history
-            if context:
-                messages.append({
-                    "role": "system",
-                    "content": f"Previous context:\n{context}"
-                })
-            
-            # User message with text to clean
-            messages.append({
-                "role": "user",
-                "content": f"Analyze the following transcript text and report only new or changed insights since the previous context.:\n\n{text}"
-            })
-            
-            payload = {
-                "model": self.model,
-                "messages": messages,
-                "max_tokens": self.max_tokens,
-                "temperature": self.temperature
-            }
-            
-            headers = {
-                "Content-Type": "application/json"
-            }
-            
-            if self.api_key:
-                headers["Authorization"] = f"Bearer {self.api_key}"
-            
-            logger.debug(f"Sending to LLM: {self.base_url}/chat/completions")
-            
-            async with client.post(
-                f"{self.base_url}/chat/completions",
-                json=payload,
-                headers=headers
-            ) as response:
-                await response.raise_for_status()
-                result = await response.json()
-            
-            # Extract cleaned text from response
-            if "choices" in result and len(result["choices"]) > 0:
-                summary_text = result["choices"][0]["message"]["content"]
-                return summary_text.strip()
-            
-            return ""
-            
-        except aiohttp.ClientResponseError as e:
-            logger.error(f"HTTP error from LLM API: {e.status} - {e.message}")
-            raise
-        except Exception as e:
-            logger.error(f"Error calling LLM API: {e}")
-            raise
+            try:
+                async with aiohttp.ClientSession(connector=connector, timeout=timeout) as client:
+                    messages = []
+                    
+                    # System prompt
+                    messages.append({
+                        "role": "system",
+                        "content": self.system_prompt
+                    })
+                    
+                    # Context from history
+                    if context:
+                        messages.append({
+                            "role": "system",
+                            "content": f"Previous context:\n{context}"
+                        })
+                    
+                    # User message with text to clean
+                    messages.append({
+                        "role": "user",
+                        "content": f"Analyze the following transcript text and report only new or changed insights since the previous context.:\n\n{text}"
+                    })
+                    
+                    payload = {
+                        "model": self.model,
+                        "messages": messages,
+                        "max_tokens": self.max_tokens,
+                        "temperature": self.temperature
+                    }
+                    
+                    headers = {
+                        "Content-Type": "application/json"
+                    }
+                    
+                    if self.api_key:
+                        headers["Authorization"] = f"Bearer {self.api_key}"
+                    
+                    logger.info(f"Sending to LLM: {self.base_url}/chat/completions messages: {messages} ")
+                    
+                    # Make HTTP request without timeout - rely on outer timeout in main.py
+                    async with client.post(
+                        f"{self.base_url}/chat/completions",
+                        json=payload,
+                        headers=headers
+                    ) as response:
+                        response.raise_for_status()
+                        result = await response.json()
+                    
+                    # Extract summary text from response
+                    if "choices" in result and len(result["choices"]) > 0:
+                        summary_text = result["choices"][0]["message"]["content"]
+                        summary_text_results = summary_text.split("</think>")
+                        if len(summary_text_results) > 1:
+                            summary_text = summary_text_results[-1].strip()
+                        summary_text = summary_text.replace("```json", "").replace("```", "").strip()
+
+                        logger.info(f"summarize_text received response, length={len(summary_text)}")
+                        return summary_text.strip()
+                    
+                    logger.info("summarize_text received empty response")
+                    return ""
+                    
+            except aiohttp.ClientResponseError as e:
+                logger.error(f"HTTP error from LLM API: {e.status} - {e.message}")
+                raise
+            except Exception as e:
+                logger.error(f"Error calling LLM API: {e}")
+                raise
+
+        semaphore = getattr(self, "_semaphore", None)
+        if semaphore is not None:
+            async with semaphore:
+                return await _do_request()
+        else:
+            return await _do_request()
     
-    async def process_segments(self, segments: List[Dict[str, Any]]) -> List[SummarySegment]:
+    async def process_segments(
+        self,
+        segments: List[Dict[str, Any]],
+        window_id: int,
+        window_start: float,
+        window_end: float
+    ) -> List[SummarySegment]:
         """
-        Process transcription segments and return actionable summary information.
+        Process transcription segments for a 5-second summary window.
         
         Args:
             segments: List of transcription segments
-            
+            window_id: Unique identifier for this summary window
+            window_start: Start timestamp of the window
+            window_end: End timestamp of the window
+        
         Returns:
             List of SummarySegment objects with actionable summary information
         """
-        # Get new words since last processed
-        new_segments = self.get_new_words_since(segments)
+        logger.info(f"SummaryClient.process_segments called with {len(segments)} segments for window {window_id}")
         
-        if not new_segments:
+        # Get non-overlapping text for this window
+        new_text = self.get_new_text_for_window(segments, window_id)
+        
+        if not new_text:
+            logger.info(f"No new text for window {window_id}")
             return []
         
-        # Build accumulated text
-        new_text = " ".join(s.get("text", "") for s in new_segments)
-        self._accumulated_text += " " + new_text
-        self._accumulated_segments.extend(new_segments)
+        logger.info(f"Got {len(new_text)} chars of new text for window {window_id}")
         
-        # Get context from history
+        # Add window to WindowManager (automatically drops oldest if over char limit)
+        self._window_manager.add_window(new_text, window_start, window_end)
+        
+        # Get context from accumulated text
         context = self._build_context()
         
-        # Send to LLM to extract context
+        # If this is the first summary, require at least 5 words
+        accumulated_text = self._window_manager.get_accumulated_text()
+        word_count = len(accumulated_text.split())
+        if not self._has_performed_summary and word_count < 5:
+            logger.info(f"Skipping first summary - only {word_count} accumulated words (need >=5)")
+            return []
+        
+        # Send new text + accumulated context to LLM
+        logger.info(f"Sending {len(new_text)} chars new text + {len(accumulated_text)} chars context to LLM")
         summary_text = await self.summarize_text(new_text, context)
         
-        # Create summary segments
-        summary_segments = []
-        # Get the first segment's start timestamp
-        first_start = new_segments[0].get("start", 0.0)
+        logger.info(f"Processed window {window_id}, summary length={len(summary_text)}")
         
-        # Get the last segment's end timestamp
-        last_end = new_segments[-1].get("end", 0.0)
+        # Extract insights and add to window
+        if summary_text:
+            insights = self._extract_insights(summary_text, window_id, window_start, window_end)
+            for insight in insights:
+                self._window_manager.add_insight_to_window(window_id, insight)
         
-        summary_segments.append(SummarySegment(
-            original_text=segment.get("text", ""),
-            cleaned_text="",
+        # Create summary segment
+        summary_segment = SummarySegment(
+            original_text=accumulated_text,
+            cleaned_text=accumulated_text,
             summary=summary_text,
-            timestamp_start=first_start,
-            timestamp_end=last_end,
-            speaker=new_segments[0].get("speaker")
-        ))
+            timestamp_start=window_start,
+            timestamp_end=window_end,
+            speaker=segments[0].get("speaker") if segments else None
+        )
         
-        return summary_segments
+        # Mark that we have performed at least one summary
+        self._has_performed_summary = True
+        
+        logger.info(f"Returning summary segment for window {window_id}")
+        
+        return [summary_segment]
+    
+    def _extract_insights(
+        self,
+        summary_text: str,
+        window_id: int,
+        window_start: float,
+        window_end: float
+    ) -> List[WindowInsight]:
+        """
+        Extract insights from summary text and return as WindowInsight objects.
+        
+        Args:
+            summary_text: Text returned from LLM
+            window_id: The window these insights belong to
+            window_start: Start timestamp of the window
+            window_end: End timestamp of the window
+        
+        Returns:
+            List of WindowInsight objects
+        """
+        insights = []
+        
+        if not summary_text:
+            return insights
+        
+        try:
+            # Try to parse as JSON array
+            data = json.loads(summary_text)
+            if isinstance(data, list):
+                for item in data:
+                    if isinstance(item, dict):
+                        insight_type = item.get("type", "FACT")
+                        insight_text = item.get("text", "") or item.get("insight", "")
+                        if insight_text:
+                            insights.append(WindowInsight(
+                                insight_type=insight_type,
+                                text=insight_text,
+                                window_id=window_id,
+                                timestamp_start=window_start,
+                                timestamp_end=window_end
+                            ))
+            elif isinstance(data, dict):
+                # Single object with insight types
+                for key, value in data.items():
+                    if isinstance(value, list):
+                        for item in value:
+                            if isinstance(item, dict):
+                                insight_type = item.get("type", "FACT")
+                                insight_text = item.get("text", "") or item.get("insight", "")
+                                if insight_text:
+                                    insights.append(WindowInsight(
+                                        insight_type=insight_type,
+                                        text=insight_text,
+                                        window_id=window_id,
+                                        timestamp_start=window_start,
+                                        timestamp_end=window_end
+                                    ))
+        except json.JSONDecodeError:
+            # Fallback: try to extract bullet points from text
+            lines = summary_text.strip().split('\n')
+            for line in lines:
+                line = line.strip()
+                if line and (line.startswith('-') or line.startswith('*') or line.startswith('•')):
+                    text = line.lstrip('-*•').strip()
+                    if text:
+                        insights.append(WindowInsight(
+                            insight_type="FACT",
+                            text=text,
+                            window_id=window_id,
+                            timestamp_start=window_start,
+                            timestamp_end=window_end
+                        ))
+        
+        return insights
     
     def reset(self):
-        """Reset accumulated state."""
-        self._last_word = None
-        self._last_word_timestamp = None
-        self._accumulated_text = ""
-        self._accumulated_segments = []
+        """Reset all accumulated state."""
+        self._window_manager.clear()
+        self._window_last_timestamp.clear()
+        self._has_performed_summary = False
         logger.info("SummaryClient state reset")
