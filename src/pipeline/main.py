@@ -83,6 +83,9 @@ class TranscriberState:
         
         # Summary window tracking
         self.summary_window_counter: int = 0  # Counter for unique window IDs
+        
+        # Stop request flag for graceful shutdown
+        self.stop_requested: bool = False  # Flag to signal workers to stop
 
 
 # Global state and processor reference
@@ -295,6 +298,11 @@ async def _summary_worker():
     logger.info("Starting summary worker")
     while STATE is not None:
         try:
+            # Check if stop is requested - exit gracefully without accepting new work
+            if STATE is not None and STATE.stop_requested:
+                logger.info("Summary worker stopping - stop requested")
+                break
+            
             # Wait for work with timeout to allow checking STATE
             work_item = await asyncio.wait_for(STATE.summary_queue.get(), timeout=0.5)
             if work_item is None:
@@ -302,6 +310,16 @@ async def _summary_worker():
             
             segments, window_id, window_start_ts, window_end_ts = work_item
             logger.info(f"Summary worker received work for window {window_id} [{window_start_ts:.3f}s - {window_end_ts:.3f}s]")
+            
+            # Check if stop is requested before processing LLM request
+            if STATE is not None and STATE.stop_requested:
+                logger.info(f"Summary worker skipping window {window_id} - stop requested")
+                continue
+            
+            # Check if summary client requests stop
+            if STATE is not None and STATE.summary_client is not None and STATE.summary_client.stop_requested:
+                logger.info(f"Summary worker skipping window {window_id} - client stop requested")
+                continue
             
             try:
                 # Convert segments to dict format for summary client
@@ -357,6 +375,10 @@ async def _summary_worker():
 
 async def _start_summary_worker(self):
     """Start multiple summary worker tasks and the sender task."""
+    # Reset stop flag for new stream
+    self.stop_requested = False
+    logger.info("Summary worker stop flag reset for new stream")
+    
     num_workers = int(os.environ.get("MAX_CONCURRENT_SUMMARIES", 4))  # Default number of concurrent workers
     if not self.summary_worker_tasks or all(t.done() for t in self.summary_worker_tasks):
         self.summary_worker_tasks = [
@@ -720,6 +742,65 @@ async def on_stream_stop():
     global STATE
     if STATE is None:
         return
+    
+    # Record stop request time
+    stop_requested_at = datetime.now(timezone.utc).isoformat()
+    logger.info(f"Stop request received at {stop_requested_at}")
+    
+    # Signal workers to stop accepting new work
+    STATE.stop_requested = True
+    
+    # Signal summary client to stop new LLM requests
+    if STATE.summary_client is not None:
+        STATE.summary_client.stop()
+        logger.info("Summary client stop requested")
+    
+    # Wait for summary worker tasks to complete (up to 60 seconds)
+    workers_completed_at = None
+    wait_duration_seconds = 0.0
+    
+    if STATE.summary_worker_tasks:
+        try:
+            # Wait for all worker tasks to complete with 60 second timeout
+            done, pending = await asyncio.wait(
+                STATE.summary_worker_tasks,
+                timeout=60.0
+            )
+            workers_completed_at = datetime.now(timezone.utc).isoformat()
+            wait_duration_seconds = (datetime.fromisoformat(workers_completed_at.replace('+00:00', '')) -
+                                   datetime.fromisoformat(stop_requested_at.replace('+00:00', ''))).total_seconds()
+            
+            logger.info(f"All summary workers completed in {wait_duration_seconds:.2f}s")
+            
+            # Cancel any pending tasks
+            for task in pending:
+                task.cancel()
+        except Exception as e:
+            logger.error(f"Error waiting for summary workers: {e}")
+            # Cancel all tasks on error
+            for task in STATE.summary_worker_tasks:
+                task.cancel()
+            workers_completed_at = datetime.now(timezone.utc).isoformat()
+            wait_duration_seconds = (datetime.fromisoformat(workers_completed_at.replace('+00:00', '')) -
+                                   datetime.fromisoformat(stop_requested_at.replace('+00:00', ''))).total_seconds()
+    
+    # Send worker stop timing payload before closing
+    if PROCESSOR is not None:
+        try:
+            timing_payload = {
+                "type": "summary_workers_stopped",
+                "timestamp_utc": datetime.now(timezone.utc).isoformat(),
+                "timing": {
+                    "stop_requested_at": stop_requested_at,
+                    "workers_completed_at": workers_completed_at or stop_requested_at,
+                    "wait_duration_seconds": round(wait_duration_seconds, 2)
+                }
+            }
+            await PROCESSOR.send_data(json.dumps(timing_payload))
+            logger.info(f"Sent summary workers stop timing: wait_duration={wait_duration_seconds:.2f}s")
+        except Exception as e:
+            logger.error(f"Error sending worker stop timing: {e}")
+    
     # Optionally send final transcript packet with remaining segments
     if PROCESSOR is not None and STATE.current_segments:
         try:
@@ -732,6 +813,7 @@ async def on_stream_stop():
             await PROCESSOR.send_data(json.dumps(payload))
         except Exception:
             pass
+    
     # Reset buffers
     STATE.audio_buffer = np.zeros((0,), dtype=np.float32)
     STATE.buffer_start_ts = None
@@ -739,11 +821,9 @@ async def on_stream_stop():
     STATE.stream_start_media_ts = None
     STATE.pending_temp_files = {}
     
-    # Cancel all summary workers
-    for task in STATE.summary_worker_tasks:
-        task.cancel()
+    # Clear worker tasks list
     STATE.summary_worker_tasks = []
-    logger.info("Summary worker tasks cancelled")
+    logger.info("Summary worker tasks cleared")
     
     # Reset summary client state (clear windows, insights, timestamps)
     if STATE.summary_client is not None:
