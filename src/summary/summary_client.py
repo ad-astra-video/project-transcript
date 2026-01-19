@@ -67,7 +67,7 @@ class WindowManager:
             window_id of the added window
         """
         window_id = self._next_window_id
-        
+                
         # Check if adding would exceed limit
         new_char_count = self._char_count + len(text)
         
@@ -89,12 +89,12 @@ class WindowManager:
         self._windows.append(window)
         self._char_count = len(text)  # Reset to current window only
         self._next_window_id += 1
-        
+
         return window_id
     
     def get_accumulated_text(self) -> str:
         """Get all window text concatenated."""
-        return " ".join(w.text for w in self._windows)
+        return " ".join(w.text for w in self._windows[:-2])
     
     def get_window_insights(self, window_id: int) -> List[WindowInsight]:
         """Get insights for a specific window."""
@@ -146,33 +146,34 @@ class SummaryClient:
         max_tokens: int = 3072,
         temperature: float = 0.0,
         system_prompt: str = """
-You are a real-time conversation intelligence engine.
+You are a high-performance conversation intelligence engine optimized for REAL-TIME processing streams. You receive continuous, imperfect speech-to-text output that may include: fragmented sentences, partial transcripts, future corrections, out-of-order segments, missing punctuation, and speaker changes. Your task is to continuously extract the most critical insights with minimal latency while maintaining accuracy across stream continuity.
 
-You receive an ongoing stream of imperfect speech-to-text transcription. The text may be partial, corrected later, out of order, or lack punctuation.
+**Core Functionality:** Process each new transcription segment immediately as it arrives, prioritizing actionable intelligence over detailed analysis. Prioritize extracting:
 
-Your task is to continuously extract high-signal insights from the conversation, prioritizing:
+1. **ACTION**: Concrete next steps, deadlines, responsible parties (with clear owners) and required actions ("Buy X by Y date" vs "Need to buy X")
+2. **DECISION**: Final or conditional agreements, approvals, and commitments that change meeting outcomes ("We'll proceed with Plan B," "This requires CEO approval by Friday")
+3. **QUESTION/UNRESOLVED**: Critical blockers needing resolution (NOT just open questions), dependencies, risks requiring escalation
+4. **FACT/NUMBER**: Quantifiable data points essential for records or comparisons (dates, amounts, names of key stakeholders)
+5. **SENTIMENT SHIFT** when detected in real-time conversations between participants - not emotional commentary but topic pivots affecting outcomes
 
-- Action items and commitments
-- Decisions and agreements
-- Open questions and unresolved issues
-- Key facts, numbers, dates, and names
-- Shifts in topic, intent, or sentiment
+**Critical Real-Time Guidelines:**
+**Stream Continuity First** - Assume transcript segments may arrive out-of-order or with gaps. Reference context from previous messages to fill blanks where possible (confidence flags must be adjusted)  
+**Update > Guess** - If new information contradicts prior insights, immediately invalidate and update the record rather than preserving outdated analysis  
+**Confidence Tiers**: Use confidence levels that reflect real-time uncertainty: 0.95+ = definitive decision/fact; 0.75-0.89 = probable but requires verification; <0.75 = tentative insight requiring follow-up (never RISK unless imminent failure risk)  
+**Atomic Output** - Each response should contain ONLY the most significant changes since last update, not full reanalysis of entire stream history  
+**Speaker Awareness**: If multiple speakers detected (e.g., "Alex says... Sarah says..."), attribute insights to appropriate parties when possible without breaking context flow  
+**Critical Thresholds for Action**: Only output ACTION items that have clear owners + deadlines or consequences if missing deadline/owner info is provided in current segment  
+**Noise Handling**: Ignore filler words, repetitions, and non-content pauses unless they contain repeated phrases indicating urgency ("Again!", "Just to confirm!")  
+**NEVER summarize** entire conversations - only surface what materially changes understanding of next steps or critical outcomes  
+**DO NOT invent details** where transcript is incomplete (e.g., not making up names for missing figures)  
+**Incremental Confidence Decay**: Gradually reduce confidence ratings when no new context confirms assertions, but never below 0.5 until explicit correction  
+**Update Frequency**: Prioritize outputting significant changes at least every 3-5 seconds of continuous speech to maintain real-time awareness without overwhelming system  
 
-Guidelines:
-- Do not summarize everything. Surface only what materially changes understanding or next steps.
-- Treat statements as tentative until reinforced or confirmed later.
-- Prefer concise, atomic insights over long prose.
-- Update or invalidate earlier insights if new information contradicts them.
-- Ignore filler speech, false starts, and verbal noise unless it affects meaning.
-- When unsure, mark confidence as low rather than guessing. Do not return RISK because of uncertainty.
-
-Output Format:
-- Clearly label insight type (e.g. ACTION, DECISION, QUESTION, FACT, RISK)
-- JSON should be list of insights in format example [{"type": "ACTION", "text": "insight text", "confidence": 0.90}, {"type": "QUESTION", "text": "insight text", "confidence": 0.20}]
-- Only output valid JSON and one json object per response after thinking briefly
-- keys in the json object should always be lowercase
-
-You are optimized for live understanding, not post-hoc summarization. Think briefly.
+**Output Protocol:** 
+- Always return VALID JSON with single object: `{"insights": [{"type":"TYPE","insight":"concise insight text","confidence":0.xx}, ...]}`  
+- If no material changes since last response, return `{"insights": []}` with minimal weight for system health metrics only when absolutely necessary (max 1 insight)  
+- Max insights per update: 3 most critical items to maintain processing efficiency  
+- Never output empty JSON or partial fields - ensure full structure always valid  
 """.strip()
     ):
         """
@@ -587,10 +588,10 @@ You are optimized for live understanding, not post-hoc summarization. Think brie
             elif isinstance(data, dict):
                 # Single object with insight types
                 for key, value in data.items():
-                    if isinstance(value, list):
+                    if key == "insights" and isinstance(value, list):
                         for item in value:
                             if isinstance(item, dict):
-                                insight_type = item.get("type", "FACT")
+                                insight_type = item.get("type", "OTHER")
                                 insight_text = item.get("text", "") or item.get("insight", "")
                                 if insight_text:
                                     insights.append(WindowInsight(

@@ -20,8 +20,9 @@ services:
     container_name: byoc-transcription-1
     runtime: nvidia
     environment:
-      - CUDA_VISIBLE_DEVICES=0
+      - CUDA_VISIBLE_DEVICES=${TRANSCIPTION_CUDA_VISIBLE_DEVICES}
       - HF_TOKEN=${HF_TOKEN}
+      - MAX_CONCURRENT_SUMMARIES=${MAX_CONCURRENT_SUMMARIES}
     volumes:
       - ./models:/models
       #- ./src:/app/src
@@ -32,7 +33,7 @@ services:
     container_name: byoc-transcription-vllm
     runtime: nvidia
     environment:
-      - CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES}
+      - CUDA_VISIBLE_DEVICES=${VLLM_CUDA_VISIBLE_DEVICES}
       - CUDA_DEVICE_ORDER=PCI_BUS_ID
       - HUGGING_FACE_HUB_TOKEN=${HF_TOKEN}
     volumes:
@@ -44,7 +45,7 @@ services:
       --port 5000
       --gpu-memory-utilization 0.75
       --kv-cache-dtype fp8
-      --max-num-batched-tokens 1024
+      --max-num-batched-tokens 512
       --max-num-seqs ${MAX_CONCURRENT_SUMMARIES}
 networks:
   default:
