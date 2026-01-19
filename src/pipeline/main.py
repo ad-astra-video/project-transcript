@@ -745,7 +745,10 @@ async def on_stream_stop():
     STATE.summary_worker_tasks = []
     logger.info("Summary worker tasks cancelled")
     
-    # Summary client no longer needs explicit close - sessions are created per-request
+    # Reset summary client state (clear windows, insights, timestamps)
+    if STATE.summary_client is not None:
+        STATE.summary_client.reset()
+        logger.info("Summary client state reset")
     
     # Reset diarization process state (keep process running)
     if STATE.diarization_process is not None:
