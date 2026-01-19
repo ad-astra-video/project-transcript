@@ -16,8 +16,8 @@ logger = logging.getLogger(__name__)
 @dataclass
 class SummarySegment:
     """Represents a summarized/cleaned segment."""
-    original_text: str
-    cleaned_text: str
+    summary_type: str = "summary"
+    background_context: str
     summary: str
     timestamp_start: float
     timestamp_end: float
@@ -48,7 +48,7 @@ class SummaryWindow:
 class WindowManager:
     """Manages summary windows and their text/insights."""
     
-    def __init__(self, max_chars: int = 100000):
+    def __init__(self, max_chars: int = 1000000):
         self._windows: List[SummaryWindow] = []  # Ordered oldest -> newest
         self._char_count: int = 0
         self._next_window_id: int = 0
@@ -152,9 +152,10 @@ You are a high-performance conversation intelligence engine optimized for REAL-T
 
 1. **ACTION**: Concrete next steps, deadlines, responsible parties (with clear owners) and required actions ("Buy X by Y date" vs "Need to buy X")
 2. **DECISION**: Final or conditional agreements, approvals, and commitments that change meeting outcomes ("We'll proceed with Plan B," "This requires CEO approval by Friday")
-3. **QUESTION/UNRESOLVED**: Critical blockers needing resolution (NOT just open questions), dependencies, risks requiring escalation
-4. **FACT/NUMBER**: Quantifiable data points essential for records or comparisons (dates, amounts, names of key stakeholders)
-5. **SENTIMENT SHIFT** when detected in real-time conversations between participants - not emotional commentary but topic pivots affecting outcomes
+3. **QUESTION**: Critical blockers needing resolution (NOT just open questions), dependencies, risks requiring escalation
+4. **KEY POINT**: Quantifiable data points essential for records or comparisons (dates, amounts, names of key stakeholders)
+5. **SENTIMENT** when detected in real-time conversations between participants - inclues topic pivots if tone changes, can include emotional changes when shifting
+6. **NOTES** used to keep a running summary log of the conversation for context - avoid cluttering with low-value info
 
 **Critical Real-Time Guidelines:**
 **Stream Continuity First** - Assume transcript segments may arrive out-of-order or with gaps. Reference context from previous messages to fill blanks where possible (confidence flags must be adjusted)  
@@ -162,7 +163,7 @@ You are a high-performance conversation intelligence engine optimized for REAL-T
 **Confidence Tiers**: Use confidence levels that reflect real-time uncertainty: 0.95+ = definitive decision/fact; 0.75-0.89 = probable but requires verification; <0.75 = tentative insight requiring follow-up (never RISK unless imminent failure risk)  
 **Atomic Output** - Each response should contain ONLY the most significant changes since last update, not full reanalysis of entire stream history  
 **Speaker Awareness**: If multiple speakers detected (e.g., "Alex says... Sarah says..."), attribute insights to appropriate parties when possible without breaking context flow  
-**Critical Thresholds for Action**: Only output ACTION items that have clear owners + deadlines or consequences if missing deadline/owner info is provided in current segment  
+**Critical Thresholds for Action**: Only output ACTION items that have clear owners and/or deadlines or consequences if missing deadline/owner info is provided in current segment, indicate owner if provided
 **Noise Handling**: Ignore filler words, repetitions, and non-content pauses unless they contain repeated phrases indicating urgency ("Again!", "Just to confirm!")  
 **NEVER summarize** entire conversations - only surface what materially changes understanding of next steps or critical outcomes  
 **DO NOT invent details** where transcript is incomplete (e.g., not making up names for missing figures)  
@@ -170,10 +171,12 @@ You are a high-performance conversation intelligence engine optimized for REAL-T
 **Update Frequency**: Prioritize outputting significant changes at least every 3-5 seconds of continuous speech to maintain real-time awareness without overwhelming system  
 
 **Output Protocol:** 
+- Valid types are ACTION, DECISION, QUESTION, KEY POINT, RISK, SENTIMENT, NOTES
 - Always return VALID JSON with single object: `{"insights": [{"type":"TYPE","insight":"concise insight text","confidence":0.xx}, ...]}`  
 - If no material changes since last response, return `{"insights": []}` with minimal weight for system health metrics only when absolutely necessary (max 1 insight)  
-- Max insights per update: 3 most critical items to maintain processing efficiency  
-- Never output empty JSON or partial fields - ensure full structure always valid  
+- Max insights per update: 3 most critical items to maintain processing efficiency. Overview insights do not count towards this limit.  
+- Never output empty JSON or partial fields - ensure full structure always valid
+- think very briefly to gather thoughts, no long chain of thought, then output the JSON ONLY
 """.strip()
     ):
         """
@@ -210,11 +213,14 @@ You are a high-performance conversation intelligence engine optimized for REAL-T
         
         # Concurrency limiter for summary calls (set via env var)
         try:
-            max_concurrent = int(os.getenv("MAX_CONCURRENT_SUMMARIES", "4"))
+            max_concurrent = int(os.getenv("MAX_CONCURRENT_SUMMARIES", "15"))
         except Exception:
-            max_concurrent = 4
+            max_concurrent = 15
         self.max_concurrent_summaries: int = max(1, max_concurrent)
         self._semaphore: asyncio.Semaphore = asyncio.Semaphore(self.max_concurrent_summaries)
+        
+        # Stop request flag for graceful shutdown
+        self.stop_requested: bool = False  # Flag to prevent new LLM requests
     
     async def initialize(self):
         """
@@ -445,19 +451,22 @@ You are a high-performance conversation intelligence engine optimized for REAL-T
                         response.raise_for_status()
                         result = await response.json()
                     
-                    # Extract summary text from response
+                    # Extract summary text from response and return the thinking as the background_context
                     if "choices" in result and len(result["choices"]) > 0:
                         summary_text = result["choices"][0]["message"]["content"]
                         summary_text_results = summary_text.split("</think>")
+
+                        summary_text_background_context = summary_text_results[0].replace("<think>", "").replace("</think>", "")
+
                         if len(summary_text_results) > 1:
                             summary_text = summary_text_results[-1].strip()
                         summary_text = summary_text.replace("```json", "").replace("```", "").strip()
 
                         logger.info(f"summarize_text received response, length={len(summary_text)}")
-                        return summary_text.strip()
+                        return summary_text.strip(), summary_text_background_context.strip()
                     
                     logger.info("summarize_text received empty response")
-                    return ""
+                    return "", ""
                     
             except aiohttp.ClientResponseError as e:
                 logger.error(f"HTTP error from LLM API: {e.status} - {e.message}")
@@ -476,6 +485,7 @@ You are a high-performance conversation intelligence engine optimized for REAL-T
     async def process_segments(
         self,
         segments: List[Dict[str, Any]],
+        summary_type: str,
         window_id: int,
         window_start: float,
         window_end: float
@@ -518,7 +528,7 @@ You are a high-performance conversation intelligence engine optimized for REAL-T
         
         # Send new text + accumulated context to LLM
         logger.info(f"Sending {len(new_text)} chars new text + {len(accumulated_text)} chars context to LLM")
-        summary_text = await self.summarize_text(new_text, context)
+        summary_text, summary_background_context = await self.summarize_text(new_text, context)
         
         logger.info(f"Processed window {window_id}, summary length={len(summary_text)}")
         
@@ -530,8 +540,8 @@ You are a high-performance conversation intelligence engine optimized for REAL-T
         
         # Create summary segment
         summary_segment = SummarySegment(
-            original_text=accumulated_text,
-            cleaned_text=accumulated_text,
+            type=summary_type,
+            background_context=summary_background_context,
             summary=summary_text,
             timestamp_start=window_start,
             timestamp_end=window_end,
@@ -575,7 +585,7 @@ You are a high-performance conversation intelligence engine optimized for REAL-T
             if isinstance(data, list):
                 for item in data:
                     if isinstance(item, dict):
-                        insight_type = item.get("type", "FACT")
+                        insight_type = item.get("type", "NOTES")
                         insight_text = item.get("text", "") or item.get("insight", "")
                         if insight_text:
                             insights.append(WindowInsight(
@@ -591,7 +601,7 @@ You are a high-performance conversation intelligence engine optimized for REAL-T
                     if key == "insights" and isinstance(value, list):
                         for item in value:
                             if isinstance(item, dict):
-                                insight_type = item.get("type", "OTHER")
+                                insight_type = item.get("type", "NOTES")
                                 insight_text = item.get("text", "") or item.get("insight", "")
                                 if insight_text:
                                     insights.append(WindowInsight(
@@ -610,7 +620,7 @@ You are a high-performance conversation intelligence engine optimized for REAL-T
                     text = line.lstrip('-*•').strip()
                     if text:
                         insights.append(WindowInsight(
-                            insight_type="FACT",
+                            insight_type="NOTES",
                             text=text,
                             window_id=window_id,
                             timestamp_start=window_start,
@@ -619,9 +629,15 @@ You are a high-performance conversation intelligence engine optimized for REAL-T
         
         return insights
     
+    def stop(self):
+        """Signal stop to prevent new LLM requests."""
+        self.stop_requested = True
+        logger.info("SummaryClient stop requested - no new LLM requests will be sent")
+    
     def reset(self):
         """Reset all accumulated state."""
         self._window_manager.clear()
         self._window_last_timestamp.clear()
         self._has_performed_summary = False
+        self.stop_requested = False  # Reset stop flag
         logger.info("SummaryClient state reset")
