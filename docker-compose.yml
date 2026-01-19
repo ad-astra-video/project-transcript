@@ -32,7 +32,7 @@ services:
     container_name: byoc-transcription-vllm
     runtime: nvidia
     environment:
-      - CUDA_VISIBLE_DEVICES=0
+      - CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES}
       - CUDA_DEVICE_ORDER=PCI_BUS_ID
       - HUGGING_FACE_HUB_TOKEN=${HF_TOKEN}
     volumes:
@@ -40,7 +40,7 @@ services:
     ports:
       - 5000:5000
     command: >
-      --model Qwen/Qwen3-VL-4B-Instruct
+      --model ${LOCAL_SUMMARY_MODEL}
       --port 5000
       --gpu-memory-utilization 0.75
       --kv-cache-dtype fp8
