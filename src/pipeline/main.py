@@ -357,7 +357,7 @@ async def _summary_worker():
 
 async def _start_summary_worker(self):
     """Start multiple summary worker tasks and the sender task."""
-    num_workers = 4  # Default number of concurrent workers
+    num_workers = int(os.environ.get("MAX_CONCURRENT_SUMMARIES", 4))  # Default number of concurrent workers
     if not self.summary_worker_tasks or all(t.done() for t in self.summary_worker_tasks):
         self.summary_worker_tasks = [
             asyncio.create_task(_summary_worker())
