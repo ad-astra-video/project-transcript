@@ -20,7 +20,7 @@ import time
 src_path = Path(__file__).parent.parent
 sys.path.insert(0, str(src_path))
 
-from transcription.diarization import DiarizationProcess, DiarizationResult, SpeakerSegment
+from diarization.diarization_client import DiarizationClient, DiarizationResult, SpeakerSegment
 from transcription.whisper_client import WhisperClient, TranscriptionSegment, WordTimestamp
 from summary.summary_client import SummaryClient, SummarySegment
 from pytrickle import StreamProcessor
@@ -122,7 +122,7 @@ async def load_model(**kwargs):
     summary_base_url = params.get("summary_base_url", "http://byoc-transcription-vllm:5000/v1")
     summary_api_key = params.get("summary_api_key", "")
     summary_history_length = int(params.get("summary_history_length", 0))
-    summary_model = params.get("summary_model", "")
+    summary_model = params.get("summary_model", os.environ.get("LOCAL_SUMMARY_MODEL", ""))
 
     # Init model
     STATE.whisper_client = WhisperClient(
@@ -142,13 +142,21 @@ async def load_model(**kwargs):
     )
     await STATE.summary_client.initialize()
     logger.info("Summary client initialized")
+    
+    # Send startup warm-up request to verify model availability
+    startup_success = await STATE.summary_client.startup_summary()
+    if startup_success:
+        logger.info("Startup warm-up request successful - model is responsive")
+    else:
+        logger.warning("Startup warm-up request failed - model may not be available")
 
-    # Initialize diarization in separate process
-    STATE.diarization_process = DiarizationProcess(
+    # Initialize diarization client
+    STATE.diarization_client = DiarizationClient(
         hf_token=os.getenv("HF_TOKEN")
     )
-    await STATE.diarization_process.start()
-    logger.info("Diarization process started")
+    await STATE.diarization_client.initialize()
+    await STATE.diarization_client.start()
+    logger.info("Diarization client started")
     # Note: Polling task is started in on_stream_start(), not here
 
 
@@ -327,10 +335,14 @@ async def _summary_worker():
                 logger.info(f"Built payload with {len(segments_dict)} segments")
                 
                 try:
+                    start = time.perf_counter()
                     summary_segments = await asyncio.wait_for(
-                        STATE.summary_client.process_segments(segments_dict, window_id, window_start_ts, window_end_ts),
+                        STATE.summary_client.process_segments("context_summary", segments_dict, window_id, window_start_ts, window_end_ts),
                         timeout=50.0
                     )
+                    end = time.perf_counter()
+                    if not PROCESSOR is None:
+                        PROCESSOR.send_monitoring_event({"duration_seconds": end - start, "window_id": window_id, "window_start_ms": window_start_ts * 1000, "window_end_ms": window_end_ts * 1000}, "llm_summary_request_stats")
                 except asyncio.TimeoutError:
                     logger.warning(f"Summarization timed out for window {window_id} [{window_start_ts:.3f}s - {window_end_ts:.3f}s]")
                     continue
@@ -351,17 +363,16 @@ async def _summary_worker():
                         },
                         "segments": [
                             {
-                                "original_text": seg.original_text,
-                                "cleaned_text": seg.cleaned_text,
+                                "id": f"{window_id}-{i}",
+                                "summary_type": seg.summary_type,
+                                "background_context": seg.background_context,
                                 "summary": seg.summary,
-                                "start_ms": int(seg.timestamp_start),
-                                "end_ms": int(seg.timestamp_end),
                             }
-                            for seg in summary_segments
+                            for i, seg in enumerate(summary_segments)
                         ]
                     }
                     STATE.summary_results.append(summary_payload)
-                    logger.debug(f"Stored summary data for window {window_id} [{int(window_start_ts*1000)}ms - {int(window_end_ts*1000)}ms]")
+                    logger.debug(f"Staged summary data for window {window_id} [{int(window_start_ts*1000)}ms - {int(window_end_ts*1000)}ms]")
             except Exception as e:
                 logger.error(f"Summary processing error: {e}")
         except asyncio.TimeoutError:
@@ -487,7 +498,7 @@ async def _poll_diarization_results():
     """Background task to poll diarization results from the separate process."""
     logger.info("Starting diarization result polling")
     poll_count = 0
-    while STATE is not None and STATE.diarization_process is not None:
+    while STATE is not None and STATE.diarization_process is not None and not STATE.stop_requested:
         is_running = STATE.diarization_process.is_running
         if not is_running:
             logger.info(f"Diarization process not running, skipping poll cycle {poll_count}")
@@ -725,11 +736,16 @@ async def on_stream_start(params: dict):
             # Reset summary window counter
             STATE.summary_window_counter = 0
             
+            # Clear summary queues to prevent stale data from previous stream
+            STATE.summary_queue._queue.clear()
+            STATE.summary_results.clear()
+            logger.info("Summary queues cleared")
+            
             # Start summary worker for this stream
             await _start_summary_worker(STATE)
             
             # Start diarization polling task for this stream
-            if STATE.diarization_process is not None:
+            if STATE.diarization_client is not None:
                 STATE.diarization_poll_task = asyncio.create_task(_poll_diarization_results())
                 logger.info("Diarization polling task started for stream")
         # Forward to the pytrickle server's actual handler
@@ -755,16 +771,16 @@ async def on_stream_stop():
         STATE.summary_client.stop()
         logger.info("Summary client stop requested")
     
-    # Wait for summary worker tasks to complete (up to 60 seconds)
+    # Wait for summary worker tasks to complete (up to 5 seconds)
     workers_completed_at = None
     wait_duration_seconds = 0.0
     
     if STATE.summary_worker_tasks:
         try:
-            # Wait for all worker tasks to complete with 60 second timeout
+            # Wait for all worker tasks to complete with 5 second timeout
             done, pending = await asyncio.wait(
                 STATE.summary_worker_tasks,
-                timeout=60.0
+                timeout=5.0
             )
             workers_completed_at = datetime.now(timezone.utc).isoformat()
             wait_duration_seconds = (datetime.fromisoformat(workers_completed_at.replace('+00:00', '')) -
@@ -830,9 +846,10 @@ async def on_stream_stop():
         STATE.summary_client.reset()
         logger.info("Summary client state reset")
     
-    # Reset diarization process state (keep process running)
-    if STATE.diarization_process is not None:
-        await STATE.diarization_process.reset()
+    # Reset diarization client state (keep process running)
+    if STATE.diarization_client is not None:
+        STATE.diarization_client.reset()
+        await STATE.diarization_client.reset_process()
     
     # Cancel the polling task
     if STATE.diarization_poll_task is not None:

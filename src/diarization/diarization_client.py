@@ -1,8 +1,8 @@
 """
-Diarization process management for speaker diarization.
+Diarization client for speaker diarization using pyannote.audio.
 
-This module provides a separate process for running pyannote speaker diarization,
-isolating it from the main async event loop.
+This module provides a client class for running pyannote speaker diarization,
+with proper lifecycle management similar to SummaryClient.
 """
 
 import asyncio
@@ -15,7 +15,6 @@ from collections import deque
 import tempfile
 import wave
 import numpy as np
-import math
 
 try:
     from pyannote.audio import Pipeline
@@ -23,6 +22,10 @@ except ImportError:
     Pipeline = None
 
 logger = logging.getLogger(__name__)
+
+
+# Special marker for reset signal
+RESET_SIGNAL = "RESET_SIGNAL"
 
 
 @dataclass
@@ -33,6 +36,7 @@ class SpeakerSegment:
     speaker: str   # Speaker label
     confidence: float  # Confidence score for the speaker assignment
     alt_speakers: Optional[Dict[str, float]] = None  # Alternative speakers with scores
+
 
 @dataclass
 class DiarizationRequest:
@@ -251,6 +255,7 @@ class SpeakerMemory:
         self.speaker_counter = 0
         self.match_log.clear()
 
+
 def diarization_worker(hf_token: str, request_queue, result_queue):
     """
     Worker function for diarization process.
@@ -294,6 +299,12 @@ def diarization_worker(hf_token: str, request_queue, result_queue):
             logger.info(f"Received diarization request: {request.request_id}, audio: {request.audio_path}")
             if request is None:  # Shutdown signal
                 break
+            
+            # Handle reset signal for new stream
+            if request == RESET_SIGNAL:
+                logger.info("Received reset signal - clearing speaker memory for new stream")
+                speakers.reset()
+                continue
             
             try:
                 # Run diarization
@@ -344,26 +355,61 @@ def diarization_worker(hf_token: str, request_queue, result_queue):
             logger.error(f"Worker error: {e}")
 
 
-class DiarizationProcess:
-    """Manages a separate process for speaker diarization."""
+class DiarizationClient:
+    """Client for speaker diarization using pyannote.audio."""
     
-    def __init__(self, hf_token: str):
+    def __init__(
+        self,
+        hf_token: str = "",
+        threshold: float = 0.70,
+        recency_boost: float = 0.00,
+        history_size: int = 20,
+        min_samples_for_match: int = 1
+    ):
         """
-        Initialize the diarization process manager.
+        Initialize the diarization client.
         
         Args:
             hf_token: HuggingFace token for accessing pyannote models
+            threshold: Cosine similarity threshold for speaker match
+            recency_boost: Bonus added to most recent speaker's similarity
+            history_size: Number of recent speaker IDs to track
+            min_samples_for_match: Minimum observations before matching against a speaker
         """
         self.hf_token = hf_token
+        self.threshold = threshold
+        self.recency_boost = recency_boost
+        self.history_size = history_size
+        self.min_samples_for_match = min_samples_for_match
+        
+        # State management
+        self._lock: Optional[asyncio.Lock] = None
+        self._speaker_memory: Optional[SpeakerMemory] = None
         self._process: Optional[multiprocessing.Process] = None
         self._request_queue: Optional[multiprocessing.Queue] = None
         self._result_queue: Optional[multiprocessing.Queue] = None
         self._running = False
-        self._lock = asyncio.Lock()
+        self.stop_requested: bool = False
+    
+    async def initialize(self):
+        """Initialize lock and speaker memory."""
+        logger.info("DiarizationClient.initialize called")
+        
+        if self._lock is None:
+            self._lock = asyncio.Lock()
+        
+        self._speaker_memory = SpeakerMemory(
+            threshold=self.threshold,
+            recency_boost=self.recency_boost,
+            history_size=self.history_size,
+            min_samples_for_match=self.min_samples_for_match
+        )
+        
+        logger.info(f"DiarizationClient initialized with threshold={self.threshold}")
     
     async def start(self):
         """Start the diarization process."""
-        logger.debug("DiarizationProcess.start() called")
+        logger.debug("DiarizationClient.start() called")
         async with self._lock:
             if self._running:
                 logger.info("Diarization process already running")
@@ -384,9 +430,48 @@ class DiarizationProcess:
             self._running = True
             logger.info("Diarization process started")
     
-    async def stop(self):
+    def update_params(
+        self,
+        threshold: Optional[float] = None,
+        recency_boost: Optional[float] = None,
+        history_size: Optional[int] = None,
+        min_samples_for_match: Optional[int] = None
+    ):
+        """
+        Update client parameters dynamically.
+        
+        Args:
+            threshold: New similarity threshold
+            recency_boost: New recency boost value
+            history_size: New history size
+            min_samples_for_match: New min samples for match
+        """
+        if threshold is not None:
+            self.threshold = threshold
+        if recency_boost is not None:
+            self.recency_boost = recency_boost
+        if history_size is not None:
+            self.history_size = history_size
+        if min_samples_for_match is not None:
+            self.min_samples_for_match = min_samples_for_match
+        
+        logger.info(f"DiarizationClient params updated: threshold={self.threshold}, recency_boost={self.recency_boost}")
+    
+    def stop(self):
+        """Signal stop to prevent new requests."""
+        self.stop_requested = True
+        logger.info("DiarizationClient stop requested")
+    
+    def reset(self):
+        """Reset all accumulated state."""
+        if self._speaker_memory is not None:
+            self._speaker_memory.reset()
+        self.stop_requested = False
+        logger.info("DiarizationClient state reset")
+    
+    async def stop_process(self):
         """Stop the diarization process gracefully."""
-        logger.info("DiarizationProcess.stop() called")
+        logger.info("DiarizationClient.stop_process() called")
         async with self._lock:
             if not self._running:
                 return
@@ -409,7 +494,7 @@ class DiarizationProcess:
             self._result_queue = None
             logger.info("Diarization process stopped")
     
-    async def reset(self):
+    async def reset_process(self):
         """Reset internal state without stopping the process.
         
         This clears queues and resets state for a new stream while
@@ -423,6 +508,8 @@ class DiarizationProcess:
                         self._request_queue.get_nowait()
                 except Exception:
                     pass
+                # Send reset signal to clear speaker memory in worker
+                self._request_queue.put(RESET_SIGNAL)
             if self._result_queue is not None:
                 try:
                     while not self._result_queue.empty():
@@ -439,7 +526,7 @@ class DiarizationProcess:
             audio_path: Path to the audio file
             request_id: Unique request identifier
         """
-        #logger.info(f"DiarizationProcess.process_audio() called: {audio_path}, {request_id}")
+        #logger.info(f"DiarizationClient.process_audio() called: {audio_path}, {request_id}")
         if not self._running:
             raise RuntimeError("Diarization process not started")
         

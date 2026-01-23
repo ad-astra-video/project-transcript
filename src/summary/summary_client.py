@@ -8,7 +8,10 @@ import logging
 import os
 from typing import Optional, List, Dict, Any
 from dataclasses import dataclass
-import aiohttp
+from openai import AsyncOpenAI
+from openai.types.chat.chat_completion import ChatCompletion
+from pydantic import BaseModel
+from enum import Enum
 
 logger = logging.getLogger(__name__)
 
@@ -16,23 +19,40 @@ logger = logging.getLogger(__name__)
 @dataclass
 class SummarySegment:
     """Represents a summarized/cleaned segment."""
-    summary_type: str = "summary"
+    summary_type: str
     background_context: str
     summary: str
     timestamp_start: float
     timestamp_end: float
-    speaker: str | None = None
-
 
 @dataclass
 class WindowInsight:
     """Insight extracted from a summary window."""
-    insight_type: str  # ACTION, DECISION, QUESTION, FACT, RISK
-    text: str
-    window_id: int  # Which summary window this belongs to
+    insight_type: str  
+    insight_text: str
+    window_id: int
     timestamp_start: float
     timestamp_end: float
 
+class InsightType(str, Enum):
+    """Enumeration of possible insight types."""
+    ACTION = "ACTION"
+    DECISION = "DECISION"
+    QUESTION = "QUESTION"
+    KEY_POINT = "KEY POINT"
+    RISK = "RISK"
+    SENTIMENT = "SENTIMENT"
+    NOTES = "NOTES"
+
+class InsightResponseItemSchema(BaseModel):
+    """Schema for a single insight item."""
+    insight_type: InsightType
+    insight_text: str
+    confidence: float
+
+class InsightsResponseSchema(BaseModel):
+    """Schema for insights response from LLM."""
+    insights: List[InsightResponseItemSchema]
 
 @dataclass
 class SummaryWindow:
@@ -48,7 +68,7 @@ class SummaryWindow:
 class WindowManager:
     """Manages summary windows and their text/insights."""
     
-    def __init__(self, max_chars: int = 1000000):
+    def __init__(self, max_chars: int = 15000):
         self._windows: List[SummaryWindow] = []  # Ordered oldest -> newest
         self._char_count: int = 0
         self._next_window_id: int = 0
@@ -139,12 +159,12 @@ class SummaryClient:
     
     def __init__(
         self,
-        base_url: str = "http://byoc-transcription-vllm:5000/v1",
         api_key: str = "",
+        base_url: str = "http://byoc-transcription-vllm:5000/v1",
         history_length: int = 0,
-        model: Optional[str] = None,
+        model: str = "Nanbeige/Nanbeige4-3B-Thinking-2511",
         max_tokens: int = 3072,
-        temperature: float = 0.0,
+        temperature: float = 0.2,
         system_prompt: str = """
 You are a high-performance conversation intelligence engine optimized for REAL-TIME processing streams. You receive continuous, imperfect speech-to-text output that may include: fragmented sentences, partial transcripts, future corrections, out-of-order segments, missing punctuation, and speaker changes. Your task is to continuously extract the most critical insights with minimal latency while maintaining accuracy across stream continuity.
 
@@ -155,7 +175,7 @@ You are a high-performance conversation intelligence engine optimized for REAL-T
 3. **QUESTION**: Critical blockers needing resolution (NOT just open questions), dependencies, risks requiring escalation
 4. **KEY POINT**: Quantifiable data points essential for records or comparisons (dates, amounts, names of key stakeholders)
 5. **SENTIMENT** when detected in real-time conversations between participants - inclues topic pivots if tone changes, can include emotional changes when shifting
-6. **NOTES** used to keep a running summary log of the conversation for context - avoid cluttering with low-value info
+6. **NOTES** used to keep a running summary log of the conversation for context. Notes should be frequent where conversation is providing new information that is not filler.
 
 **Critical Real-Time Guidelines:**
 **Stream Continuity First** - Assume transcript segments may arrive out-of-order or with gaps. Reference context from previous messages to fill blanks where possible (confidence flags must be adjusted)  
@@ -168,13 +188,13 @@ You are a high-performance conversation intelligence engine optimized for REAL-T
 **NEVER summarize** entire conversations - only surface what materially changes understanding of next steps or critical outcomes  
 **DO NOT invent details** where transcript is incomplete (e.g., not making up names for missing figures)  
 **Incremental Confidence Decay**: Gradually reduce confidence ratings when no new context confirms assertions, but never below 0.5 until explicit correction  
-**Update Frequency**: Prioritize outputting significant changes at least every 3-5 seconds of continuous speech to maintain real-time awareness without overwhelming system  
+**Update Frequency**: Prioritize outputting significant changes at least every 3-5 seconds of continuous speech to maintain real-time awareness without overwhelming system. Notes should be frequent to assist with log of conversation.
 
 **Output Protocol:** 
 - Valid types are ACTION, DECISION, QUESTION, KEY POINT, RISK, SENTIMENT, NOTES
-- Always return VALID JSON with single object: `{"insights": [{"type":"TYPE","insight":"concise insight text","confidence":0.xx}, ...]}`  
+- Always return VALID JSON with single object: `{"insights": [{"insight_type":"TYPE","insight_text":"concise insight text","confidence":0.xx}, ...]}`  
 - If no material changes since last response, return `{"insights": []}` with minimal weight for system health metrics only when absolutely necessary (max 1 insight)  
-- Max insights per update: 3 most critical items to maintain processing efficiency. Overview insights do not count towards this limit.  
+- Max insights per update: 3 most critical items to maintain processing efficiency. NOTES insights do not count towards this limit.  
 - Never output empty JSON or partial fields - ensure full structure always valid
 - think very briefly to gather thoughts, no long chain of thought, then output the JSON ONLY
 """.strip()
@@ -183,10 +203,10 @@ You are a high-performance conversation intelligence engine optimized for REAL-T
         Initialize the summary client.
         
         Args:
-            base_url: Base URL for the OpenAI-compatible API
             api_key: API key for authentication
+            base_url: Base URL for the OpenAI-compatible API
             history_length: Number of previous segments to include in context (0 = all history)
-            model: Model name to use for summarization (None to fetch from /models endpoint)
+            model: Model name to use for summarization
             max_tokens: Maximum tokens to generate
             temperature: Temperature for generation
             system_prompt: System prompt for the LLM
@@ -198,6 +218,10 @@ You are a high-performance conversation intelligence engine optimized for REAL-T
         self.max_tokens = max_tokens
         self.temperature = temperature
         self.system_prompt = system_prompt
+        self.response_json_schema = InsightsResponseSchema.model_json_schema()
+
+        # Initialize OpenAI async client
+        self.client = AsyncOpenAI(api_key=api_key, base_url=base_url)
         
         # Window-based state management
         self._window_manager: WindowManager = WindowManager()
@@ -224,58 +248,64 @@ You are a high-performance conversation intelligence engine optimized for REAL-T
     
     async def initialize(self):
         """
-        Initialize the HTTP client and fetch the model from the /models endpoint.
+        Initialize the lock for async operations.
         
-        This method creates an HTTP client, calls the /models endpoint to get available models,
-        and sets the model to the first available model or the default one.
+        With the OpenAI client, we no longer need to fetch models from /models endpoint.
         """
         logger.info("SummaryClient.initialize called")
         
-        try:
-            # Create a fresh session for this request to avoid event loop issues
-            connector = aiohttp.TCPConnector(
-                limit=100, 
-                limit_per_host=30, 
-                enable_cleanup_closed=True,
-                use_dns_cache=False
-            )
-            timeout = aiohttp.ClientTimeout(total=None)
+        if self._lock is None:
+            self._lock = asyncio.Lock()
+        
+        logger.info(f"SummaryClient initialized with model: {self.model}")
+    
+    async def startup_summary(self) -> bool:
+        """
+        Send a startup summary request with only the system prompt.
+        This serves as a warm-up request to check model availability.
+        
+        Returns:
+            True if the request succeeded, False otherwise
+        """
+        logger.info("SummaryClient.startup_summary - sending warm-up request with system prompt only")
+        
+        async def _do_startup_request() -> bool:
+            messages = []
             
-            async with aiohttp.ClientSession(connector=connector, timeout=timeout) as client:
-                async with client.get(f"{self.base_url}/models") as response:
-                    response.raise_for_status()
-                    result = await response.json()
-            logger.info(f"Received models from {self.base_url}/models")
+            # System prompt only - no user messages
+            messages.append({
+                "role": "system",
+                "content": self.system_prompt
+            })
             
-            #setup lock
-            if self._lock is None:
-                self._lock = asyncio.Lock()
-            
-            # Extract model from response - typically a list of models
-            if isinstance(result, list) and len(result) > 0:
-                self.model = result[0]
-            elif isinstance(result, dict):
-                # Handle common response formats
-                if "data" in result and isinstance(result["data"], list) and len(result["data"]) > 0:
-                    # OpenAI-compatible format: {"data": [{"id": "model_name", ...}]}
-                    self.model = result["data"][0].get("id", result["data"][0].get("object", ""))
-                elif "default" in result:
-                    self.model = result["default"]
-                elif "model" in result:
-                    self.model = result["model"]
+            try:
+                logger.info(f"Sending startup warm-up request to model: {self.model}")
+                
+                # Send minimal request with just system prompt
+                response: ChatCompletion = await self.client.chat.completions.create(
+                    model=self.model,
+                    messages=messages,
+                    max_tokens=1,  # Minimal response, just to verify model is responsive
+                    temperature=0.0,   # Deterministic response
+                )
+                
+                if response.choices and len(response.choices) > 0:
+                    logger.info(f"Startup warm-up successful, model responded")
+                    return True
                 else:
-                    # Try to get first value from dict
-                    values = list(result.values())
-                    if values and isinstance(values[0], str):
-                        self.model = values[0]
-            
-            logger.info(f"SummaryClient initialized with model: {self.model}")
-        except Exception as e:
-            logger.error(f"Error fetching model from /models endpoint: {e}")
-            # Fallback to a default model if available
-            if self.model is None:
-                self.model = "Qwen/Qwen3-VL-4B-Instruct"
-            logger.warning(f"Using fallback model: {self.model}")
+                    logger.warning(f"Startup warm-up received empty response")
+                    return False
+                    
+            except Exception as e:
+                logger.error(f"Startup warm-up failed: {e}")
+                return False
+        
+        semaphore = getattr(self, "_semaphore", None)
+        if semaphore is not None:
+            async with semaphore:
+                return await _do_startup_request()
+        else:
+            return await _do_startup_request()
     
     def update_params(
         self,
@@ -379,7 +409,7 @@ You are a high-performance conversation intelligence engine optimized for REAL-T
             return f"\nRecent Transcript:\n{accumulated_text}"
         return ""
     
-    async def summarize_text(self, text: str, context: str = "") -> str:
+    async def summarize_text(self, text: str, context: str = "") -> tuple[str, str]:
         """
         Send text to LLM for cleaning and summarization.
         
@@ -388,89 +418,57 @@ You are a high-performance conversation intelligence engine optimized for REAL-T
             context: Additional context from previous segments
             
         Returns:
-            Cleaned and summarized text
+            Tuple of (cleaned_summary, background_context)
         """
         logger.info(f"summarize_text called with text length={len(text)}, context length={len(context)}")
         
-        async def _do_request() -> str:
-            # Create a fresh session for this request to avoid event loop issues
-            # This ensures the session is created in the current event loop context
-            connector = aiohttp.TCPConnector(
-                limit=100,
-                limit_per_host=30,
-                enable_cleanup_closed=True,
-                use_dns_cache=False
-            )
-            timeout = aiohttp.ClientTimeout(total=None)
+        async def _do_request() -> tuple[str, str]:
+            messages = []
+            
+            # System prompt
+            messages.append({
+                "role": "system",
+                "content": self.system_prompt
+            })
+            
+            # Context from history
+            if context:
+                messages.append({
+                    "role": "system",
+                    "content": f"Previous context:\n{context}"
+                })
+            
+            # User message with text to clean
+            messages.append({
+                "role": "user",
+                "content": f"Analyze the following transcript text and report only new or changed insights since the previous context.:\n\n{text}"
+            })
             
             try:
-                async with aiohttp.ClientSession(connector=connector, timeout=timeout) as client:
-                    messages = []
-                    
-                    # System prompt
-                    messages.append({
-                        "role": "system",
-                        "content": self.system_prompt
-                    })
-                    
-                    # Context from history
-                    if context:
-                        messages.append({
-                            "role": "system",
-                            "content": f"Previous context:\n{context}"
-                        })
-                    
-                    # User message with text to clean
-                    messages.append({
-                        "role": "user",
-                        "content": f"Analyze the following transcript text and report only new or changed insights since the previous context.:\n\n{text}"
-                    })
-                    
-                    payload = {
-                        "model": self.model,
-                        "messages": messages,
-                        "max_tokens": self.max_tokens,
-                        "temperature": self.temperature
-                    }
-                    
-                    headers = {
-                        "Content-Type": "application/json"
-                    }
-                    
-                    if self.api_key:
-                        headers["Authorization"] = f"Bearer {self.api_key}"
-                    
-                    logger.info(f"Sending to LLM: {self.base_url}/chat/completions messages: {messages} ")
-                    
-                    # Make HTTP request without timeout - rely on outer timeout in main.py
-                    async with client.post(
-                        f"{self.base_url}/chat/completions",
-                        json=payload,
-                        headers=headers
-                    ) as response:
-                        response.raise_for_status()
-                        result = await response.json()
-                    
-                    # Extract summary text from response and return the thinking as the background_context
-                    if "choices" in result and len(result["choices"]) > 0:
-                        summary_text = result["choices"][0]["message"]["content"]
-                        summary_text_results = summary_text.split("</think>")
+                logger.info(f"Sending to LLM for analysis")
+                
+                # Use OpenAI client directly
+                response: ChatCompletion = await self.client.chat.completions.create(
+                    model=self.model,
+                    messages=messages,
+                    max_tokens=self.max_tokens,
+                    temperature=self.temperature,
+                    response_format={"type": "json_schema", "json_schema": {"name": "insights", "schema": self.response_json_schema}}
+                )
+                
+                # Extract summary text from response
+                if response.choices and len(response.choices) > 0:
+                    summary_text = response.choices[0].message.content or ""
+                    summary_text = summary_text.replace("```json", "").replace("```", "").strip()
 
-                        summary_text_background_context = summary_text_results[0].replace("<think>", "").replace("</think>", "")
+                    summary_text_background_context = response.choices[0].message.reasoning or ""
 
-                        if len(summary_text_results) > 1:
-                            summary_text = summary_text_results[-1].strip()
-                        summary_text = summary_text.replace("```json", "").replace("```", "").strip()
-
-                        logger.info(f"summarize_text received response, length={len(summary_text)}")
-                        return summary_text.strip(), summary_text_background_context.strip()
-                    
-                    logger.info("summarize_text received empty response")
-                    return "", ""
-                    
-            except aiohttp.ClientResponseError as e:
-                logger.error(f"HTTP error from LLM API: {e.status} - {e.message}")
-                raise
+                    logger.info(f"summarize_text received response, length={len(summary_text)}")
+                    return summary_text.strip(), summary_text_background_context.strip()
+                
+                logger.info("summarize_text received empty response")
+                return "", ""
+                
             except Exception as e:
                 logger.error(f"Error calling LLM API: {e}")
                 raise
@@ -484,8 +482,8 @@ You are a high-performance conversation intelligence engine optimized for REAL-T
     
     async def process_segments(
         self,
-        segments: List[Dict[str, Any]],
         summary_type: str,
+        segments: List[Dict[str, Any]],
         window_id: int,
         window_start: float,
         window_end: float
@@ -540,12 +538,11 @@ You are a high-performance conversation intelligence engine optimized for REAL-T
         
         # Create summary segment
         summary_segment = SummarySegment(
-            type=summary_type,
+            summary_type=summary_type,
             background_context=summary_background_context,
             summary=summary_text,
             timestamp_start=window_start,
             timestamp_end=window_end,
-            speaker=segments[0].get("speaker") if segments else None
         )
         
         # Mark that we have performed at least one summary
@@ -585,12 +582,12 @@ You are a high-performance conversation intelligence engine optimized for REAL-T
             if isinstance(data, list):
                 for item in data:
                     if isinstance(item, dict):
-                        insight_type = item.get("type", "NOTES")
-                        insight_text = item.get("text", "") or item.get("insight", "")
+                        insight_type = item.get("insight_type", "NOTES")
+                        insight_text = item.get("insight_text", "") or item.get("insight", "") or item.get("text", "")
                         if insight_text:
                             insights.append(WindowInsight(
                                 insight_type=insight_type,
-                                text=insight_text,
+                                insight_text=insight_text,
                                 window_id=window_id,
                                 timestamp_start=window_start,
                                 timestamp_end=window_end
@@ -606,7 +603,7 @@ You are a high-performance conversation intelligence engine optimized for REAL-T
                                 if insight_text:
                                     insights.append(WindowInsight(
                                         insight_type=insight_type,
-                                        text=insight_text,
+                                        insight_text=insight_text,
                                         window_id=window_id,
                                         timestamp_start=window_start,
                                         timestamp_end=window_end
@@ -621,7 +618,7 @@ You are a high-performance conversation intelligence engine optimized for REAL-T
                     if text:
                         insights.append(WindowInsight(
                             insight_type="NOTES",
-                            text=text,
+                            insight_text=text,
                             window_id=window_id,
                             timestamp_start=window_start,
                             timestamp_end=window_end
