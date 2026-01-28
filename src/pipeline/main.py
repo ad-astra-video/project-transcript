@@ -40,6 +40,7 @@ class TranscriberState:
         # Model and generators
         self.whisper_client: Optional[WhisperClient] = None
         self.summary_client: Optional[SummaryClient] = None
+        self.diarization_client: Optional[DiarizationClient] = None
 
         # Whisper config
         self.whisper_model: str = "turbo"
@@ -64,7 +65,6 @@ class TranscriberState:
         self.stream_start_media_ts: Optional[float] = None
 
         # Diarization process
-        self.diarization_process: Optional[DiarizationProcess] = None
         self.diarization_poll_task: Optional[asyncio.Task] = None
         self.diarization_counter: int = 0  # Track transcribe calls for diarization scheduling
         self.diarization_temp_files: list[dict] = []  # Track temp files with timestamps for combining
@@ -209,8 +209,9 @@ def _diarization_buffer_duration_seconds() -> float:
 
 async def _run_diarization_on_window():
     """Run diarization on accumulated 6-second audio window."""
-    assert STATE is not None and STATE.diarization_process is not None
+    assert STATE is not None and STATE.diarization_client is not None
     if STATE.buffer_rate is None or STATE.diarization_buffer_start_ts is None:
+        logger.debug("Diarization skipped - buffer_rate or diarization_buffer_start_ts is None")
         return
     
     sr = STATE.buffer_rate
@@ -219,6 +220,7 @@ async def _run_diarization_on_window():
     total_len = len(STATE.diarization_audio_buffer)
     
     if total_len < win_len:
+        logger.debug(f"Diarization skipped - buffer too short: {total_len} < {win_len}")
         return
     
     # Take the first 6 seconds from the buffer
@@ -228,6 +230,8 @@ async def _run_diarization_on_window():
     
     temp_path = _write_wav(window_samples, sr)
     diarization_request_id = str(uuid.uuid4())
+    
+    logger.info(f"Diarization: preparing window [{window_start_ts:.3f}s - {window_end_ts:.3f}s], audio_len={total_len}, temp_path={temp_path}")
     
     try:
         # Track temp file for cleanup
@@ -239,16 +243,18 @@ async def _run_diarization_on_window():
         # Store timestamps for this request
         STATE.diarization_window_timestamps[diarization_request_id] = (window_start_ts, window_end_ts)
         
-        # Send to diarization process
-        await STATE.diarization_process.process_audio(temp_path, diarization_request_id)
-        logger.info(f"Diarization on window [{window_start_ts:.3f}s - {window_end_ts:.3f}s]")
+        # Send to diarization process (FIX: use diarization_client, not diarization_process)
+        logger.debug(f"Diarization: calling process_audio with request_id={diarization_request_id}")
+        await STATE.diarization_client.process_audio(temp_path, diarization_request_id)
+        logger.info(f"Diarization: successfully sent window [{window_start_ts:.3f}s - {window_end_ts:.3f}s] for processing")
         
         # Remove processed audio from buffer
         STATE.diarization_audio_buffer = STATE.diarization_audio_buffer[win_len:]
         STATE.diarization_buffer_start_ts = window_end_ts
         
     except Exception as e:
-        logger.error(f"Diarization error: {e}")
+        logger.error(f"Diarization error in _run_diarization_on_window: {type(e).__name__}: {e}")
+        logger.error(f"Diarization error details - temp_path={temp_path}, request_id={diarization_request_id}")
         _mark_diarized(temp_path)
 
 
@@ -498,8 +504,8 @@ async def _poll_diarization_results():
     """Background task to poll diarization results from the separate process."""
     logger.info("Starting diarization result polling")
     poll_count = 0
-    while STATE is not None and STATE.diarization_process is not None and not STATE.stop_requested:
-        is_running = STATE.diarization_process.is_running
+    while STATE is not None and STATE.diarization_client is not None and not STATE.stop_requested:
+        is_running = STATE.diarization_client.is_running
         if not is_running:
             logger.info(f"Diarization process not running, skipping poll cycle {poll_count}")
             await asyncio.sleep(0.1)
@@ -507,7 +513,7 @@ async def _poll_diarization_results():
         poll_count += 1
         if poll_count % 50 == 0:
             logger.info(f"Diarization polling cycle {poll_count}")
-        result = await STATE.diarization_process.get_result(timeout=0.05)
+        result = await STATE.diarization_client.get_result(timeout=0.05)
         if result is not None:
             logger.debug(f"Got diarization result: {result.request_id}")
             await _handle_diarization_result(result)
@@ -647,15 +653,31 @@ def _build_segments_payload(segments: list[TranscriptionSegment], window_start_t
 
 
 async def process_audio_async(frame: AudioFrame):
+    """Process audio frame and run transcription/diarization."""
     if STATE is None:
+        logger.warning("process_audio_async called but STATE is None")
         return None
+    
+    logger.debug(f"process_audio_async: timestamp={frame.timestamp}, time_base={frame.time_base}, samples_shape={frame.samples.shape}")
+    
     _append_audio(frame)
-    if _buffer_duration_seconds() >= STATE.window_seconds:
+    
+    buffer_dur = _buffer_duration_seconds()
+    logger.debug(f"process_audio_async: buffer_dur={buffer_dur:.3f}s, window_seconds={STATE.window_seconds}")
+    
+    if buffer_dur >= STATE.window_seconds:
         now_ts = _frame_time_seconds(frame.timestamp, frame.time_base)
+        logger.debug(f"process_audio_async: triggering transcription for window")
         await _transcribe_current_window(now_ts)
+    
     # Run diarization on 6-second chunks
-    if _diarization_buffer_duration_seconds() >= 6.0:
+    diarization_dur = _diarization_buffer_duration_seconds()
+    logger.debug(f"process_audio_async: diarization_dur={diarization_dur:.3f}s")
+    
+    if diarization_dur >= 6.0:
+        logger.debug(f"process_audio_async: triggering diarization")
         await _run_diarization_on_window()
+    
     return None
 
 

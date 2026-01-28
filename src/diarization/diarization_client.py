@@ -23,10 +23,8 @@ except ImportError:
 
 logger = logging.getLogger(__name__)
 
-
 # Special marker for reset signal
 RESET_SIGNAL = "RESET_SIGNAL"
-
 
 @dataclass
 class SpeakerSegment:
@@ -37,13 +35,11 @@ class SpeakerSegment:
     confidence: float  # Confidence score for the speaker assignment
     alt_speakers: Optional[Dict[str, float]] = None  # Alternative speakers with scores
 
-
 @dataclass
 class DiarizationRequest:
     """Request for diarization processing."""
     audio_path: str
     request_id: str
-
 
 @dataclass
 class DiarizationResult:
@@ -52,7 +48,6 @@ class DiarizationResult:
     audio_path: str
     segments: List[SpeakerSegment]
     error: Optional[str] = None
-
 
 class SpeakerMemory:
     """
@@ -296,16 +291,15 @@ def diarization_worker(hf_token: str, request_queue, result_queue):
     while True:
         try:
             request = request_queue.get(timeout=1.0)
-            logger.info(f"Received diarization request: {request.request_id}, audio: {request.audio_path}")
             if request is None:  # Shutdown signal
                 break
-            
             # Handle reset signal for new stream
             if request == RESET_SIGNAL:
                 logger.info("Received reset signal - clearing speaker memory for new stream")
                 speakers.reset()
                 continue
-            
+
+            logger.info(f"Received diarization request: {request.request_id}, audio: {request.audio_path}")
             try:
                 # Run diarization
                 diarization_result = pipeline(request.audio_path)
