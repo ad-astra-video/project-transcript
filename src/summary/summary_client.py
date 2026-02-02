@@ -164,7 +164,7 @@ class SummaryClient:
         history_length: int = 0,
         model: str = "Nanbeige/Nanbeige4-3B-Thinking-2511",
         max_tokens: int = 3072,
-        temperature: float = 0.2,
+        temperature: float = 0.0,
         system_prompt: str = """
 You are a high-performance conversation intelligence engine optimized for REAL-TIME processing streams. You receive continuous, imperfect speech-to-text output that may include: fragmented sentences, partial transcripts, future corrections, out-of-order segments, missing punctuation, and speaker changes. Your task is to continuously extract the most critical insights with minimal latency while maintaining accuracy across stream continuity.
 
