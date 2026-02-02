@@ -15,6 +15,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional, Dict
 import time
+from aiohttp import web
 
 # Add src to path for imports
 src_path = Path(__file__).parent.parent
@@ -695,7 +696,21 @@ async def update_params(params: dict):
         STATE.whisper_device = str(params["whisper_device"])
     if "compute_type" in params:
         STATE.compute_type = str(params["compute_type"])
+    # If Whisper model parameters changed, reinitialize the client
+    whisper_params_changed = any(param in params for param in
+                                ["whisper_model", "whisper_language", "whisper_device", "compute_type"])
     
+    if whisper_params_changed and STATE.whisper_client is not None:
+        
+        # Reinitialize WhisperClient with new parameters
+        STATE.whisper_client = WhisperClient(
+            model_size=STATE.whisper_model,
+            device=STATE.whisper_device,
+            compute_type=STATE.compute_type,
+            language=STATE.whisper_language,
+        )
+        await STATE.whisper_client.initialize()
+
     # Audio processing parameters
     if "audio_sample_rate" in params:
         STATE.audio_sample_rate = int(params["audio_sample_rate"])
@@ -712,25 +727,7 @@ async def update_params(params: dict):
                 api_key=params.get("summary_api_key"),
                 history_length=params.get("summary_history_length"),
                 model=params.get("summary_model"),
-            )
-    
-    # If Whisper model parameters changed, reinitialize the client
-    whisper_params_changed = any(param in params for param in
-                                ["whisper_model", "whisper_language", "whisper_device", "compute_type"])
-    
-    if whisper_params_changed and STATE.whisper_client is not None:
-        
-        # Reinitialize WhisperClient with new parameters
-        STATE.whisper_client = WhisperClient(
-            model_size=STATE.whisper_model,
-            device=STATE.whisper_device,
-            compute_type=STATE.compute_type,
-            language=STATE.whisper_language,
-        )
-        await STATE.whisper_client.initialize()
-
-
-from aiohttp import web        
+            )     
 
 async def on_stream_start(params: dict):
     global STATE
