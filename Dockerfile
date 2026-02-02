@@ -7,9 +7,7 @@ ENV PATH="/usr/local/cuda/bin:${PATH}"
 ENV LD_LIBRARY_PATH="/usr/local/cuda/lib64:/usr/local/cuda/extras/CUPTI/lib64:/home/user/.local/lib/python3.10/site-packages/nvidia/cudnn/lib/:${LD_LIBRARY_PATH}"
 
 # Default environment variables
-ENV WHISPER_MODEL=large
-ENV WHISPER_DEVICE=cuda
-ENV MODEL_DIR=/models
+ENV WHISPER_MODEL=large WHISPER_DEVICE=cuda MODEL_DIR=/models UV_HTTP_TIMEOUT=600
 
 # Install system dependencies
 RUN apt-get update && apt-get install -y --no-install-recommends \
