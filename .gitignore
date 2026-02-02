@@ -8,3 +8,4 @@ ffmpeg-6*
 
 node_modules/
 models/
+plans/
