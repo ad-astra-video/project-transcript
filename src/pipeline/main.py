@@ -13,7 +13,7 @@ import json
 from collections import deque
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Optional, Dict
+from typing import Optional, Dict, Set
 import time
 from aiohttp import web
 
@@ -87,6 +87,10 @@ class TranscriberState:
         
         # Stop request flag for graceful shutdown
         self.stop_requested: bool = False  # Flag to signal workers to stop
+
+        # Shutdown tracking for graceful shutdown via update_params
+        self.shutdown_requested: bool = False  # Signal to stop accepting new work
+        self.shutdown_completed: bool = False  # All in-flight work done
 
 
 # Global state and processor reference
@@ -244,6 +248,9 @@ async def _run_diarization_on_window():
         # Store timestamps for this request
         STATE.diarization_window_timestamps[diarization_request_id] = (window_start_ts, window_end_ts)
         
+        # Add request to in-flight tracking in diarization client
+        STATE.diarization_client.add_in_flight_request(diarization_request_id)
+        
         # Send to diarization process (FIX: use diarization_client, not diarization_process)
         logger.debug(f"Diarization: calling process_audio with request_id={diarization_request_id}")
         await STATE.diarization_client.process_audio(temp_path, diarization_request_id)
@@ -313,30 +320,36 @@ async def _summary_worker():
     logger.info("Starting summary worker")
     while STATE is not None:
         try:
-            # Check if stop is requested - exit gracefully without accepting new work
-            if STATE is not None and STATE.stop_requested:
-                logger.info("Summary worker stopping - stop requested")
+            # Wait for work with timeout to allow checking shutdown state
+            try:
+                work_item = await asyncio.wait_for(STATE.summary_queue.get(), timeout=0.5)
+            except asyncio.TimeoutError:
+                # Timeout is expected - check if we should shutdown
+                if STATE.shutdown_requested and STATE.summary_queue.empty():
+                    logger.info("Summary worker stopping - shutdown requested and queue empty")
+                    break
+                continue
+            except asyncio.CancelledError:
+                # Task was cancelled externally - exit gracefully
                 break
             
-            # Wait for work with timeout to allow checking STATE
-            work_item = await asyncio.wait_for(STATE.summary_queue.get(), timeout=0.5)
+            # Check for None shutdown signal
             if work_item is None:
+                logger.info("Summary worker received shutdown signal - exiting")
                 break
             
             segments, window_id, window_start_ts, window_end_ts = work_item
             logger.info(f"Summary worker received work for window {window_id} [{window_start_ts:.3f}s - {window_end_ts:.3f}s]")
             
-            # Check if stop is requested before processing LLM request
+            # Check if stop is requested before processing
             if STATE is not None and STATE.stop_requested:
                 logger.info(f"Summary worker skipping window {window_id} - stop requested")
                 continue
             
-            # Check if summary client requests stop
-            if STATE is not None and STATE.summary_client is not None and STATE.summary_client.stop_requested:
-                logger.info(f"Summary worker skipping window {window_id} - client stop requested")
-                continue
-            
             try:
+                # Add window to in-flight tracking in summary client
+                STATE.summary_client.add_in_flight_window(window_id)
+                
                 # Convert segments to dict format for summary client
                 segments_dict = _build_segments_payload(segments, window_start_ts)
                 logger.info(f"Built payload with {len(segments_dict)} segments")
@@ -382,6 +395,9 @@ async def _summary_worker():
                     logger.debug(f"Staged summary data for window {window_id} [{int(window_start_ts*1000)}ms - {int(window_end_ts*1000)}ms]")
             except Exception as e:
                 logger.error(f"Summary processing error: {e}")
+            finally:
+                # Remove from in-flight tracking regardless of success or failure
+                STATE.summary_client.remove_in_flight_window(window_id)
         except asyncio.TimeoutError:
             continue
         except asyncio.CancelledError:
@@ -497,6 +513,9 @@ async def _handle_diarization_result(result: DiarizationResult):
             start_idx = max(0, total_len - win_len)
             window_start_ts = STATE.buffer_start_ts + (start_idx / float(sr)) if STATE.buffer_start_ts else 0
             window_end_ts = window_start_ts + (win_len / float(sr))
+        
+        # Remove from in-flight tracking in diarization client
+        STATE.diarization_client.remove_in_flight_request(result.request_id)
         
         await _send_speakers_message(result.segments, window_start_ts, window_end_ts)
 
@@ -682,9 +701,78 @@ async def process_audio_async(frame: AudioFrame):
     return None
 
 
+async def _handle_graceful_shutdown():
+    """Handle graceful shutdown via update_params."""
+    logger.info("Starting graceful shutdown process")
+    
+    # Phase 1: Signal stop - no new audio to buffers
+    STATE.shutdown_requested = True
+    
+    # Phase 2: Flush remaining buffered audio
+    await _flush_audio_buffers()
+    
+    # Phase 3: Send shutdown signals to workers (None per worker)
+    num_workers = len(STATE.summary_worker_tasks)
+    for _ in range(num_workers):
+        STATE.summary_queue.put_nowait(None)
+    logger.info(f"Sent {num_workers} shutdown signals to summary workers")
+    
+    STATE.diarization_client.send_shutdown_signal()
+    
+    # Phase 4: Wait for completion with timeout
+    start_time = time.time()
+    timeout = 90.0
+    
+    while time.time() - start_time < timeout:
+        # Check summary workers
+        all_workers_done = all(t.done() for t in STATE.summary_worker_tasks)
+        
+        # Check diarization
+        diarization_idle = STATE.diarization_client.is_idle()
+        
+        if all_workers_done and diarization_idle:
+            STATE.shutdown_completed = True
+            await PROCESSOR.send_data(json.dumps({
+                "type": "shutdown_complete",
+                "timestamp_utc": datetime.now(timezone.utc).isoformat()
+            }))
+            logger.info("Graceful shutdown completed successfully")
+            return
+        
+        await asyncio.sleep(0.1)
+    
+    # Timeout - send timeout signal
+    await PROCESSOR.send_data(json.dumps({
+        "type": "shutdown_timeout",
+        "pending_summaries": STATE.summary_client.get_pending_count(),
+        "pending_diarizations": STATE.diarization_client.get_pending_count()
+    }))
+    logger.warning("Graceful shutdown timed out")
+
+
+async def _flush_audio_buffers():
+    """Process any remaining audio in buffers as final requests."""
+    logger.info("Flushing remaining audio buffers")
+    
+    # Flush transcription buffer if has data
+    if len(STATE.audio_buffer) > 0 and STATE.buffer_rate is not None:
+        await _transcribe_current_window(
+            STATE.buffer_start_ts + _buffer_duration_seconds()
+        )
+    
+    # Flush diarization buffer if has data
+    if len(STATE.diarization_audio_buffer) > 0:
+        await _run_diarization_on_window()
+
+
 async def update_params(params: dict):
     """Update runtime parameters for the transcription pipeline."""
     if STATE is None:
+        return
+    
+    # Handle graceful shutdown request - fire and forget to avoid blocking HTTP handler
+    if params.get("shutdown"):
+        asyncio.create_task(_handle_graceful_shutdown())
         return
     
     # Whisper model parameters
@@ -727,7 +815,7 @@ async def update_params(params: dict):
                 api_key=params.get("summary_api_key"),
                 history_length=params.get("summary_history_length"),
                 model=params.get("summary_model"),
-            )     
+            )
 
 async def on_stream_start(params: dict):
     global STATE
@@ -754,6 +842,10 @@ async def on_stream_start(params: dict):
             
             # Reset summary window counter
             STATE.summary_window_counter = 0
+            
+            # Reset shutdown state for new stream
+            STATE.shutdown_requested = False
+            STATE.shutdown_completed = False
             
             # Clear summary queues to prevent stale data from previous stream
             STATE.summary_queue._queue.clear()
@@ -784,11 +876,7 @@ async def on_stream_stop():
     
     # Signal workers to stop accepting new work
     STATE.stop_requested = True
-    
-    # Signal summary client to stop new LLM requests
-    if STATE.summary_client is not None:
-        STATE.summary_client.stop()
-        logger.info("Summary client stop requested")
+    logger.info("Summary client stop requested")
     
     # Wait for summary worker tasks to complete (up to 5 seconds)
     workers_completed_at = None
@@ -868,7 +956,6 @@ async def on_stream_stop():
     # Reset diarization client state (keep process running)
     if STATE.diarization_client is not None:
         STATE.diarization_client.reset()
-        await STATE.diarization_client.reset_process()
     
     # Cancel the polling task
     if STATE.diarization_poll_task is not None:

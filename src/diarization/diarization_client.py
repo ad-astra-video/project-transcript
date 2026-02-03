@@ -288,13 +288,35 @@ def diarization_worker(hf_token: str, request_queue, result_queue):
     
     speakers = SpeakerMemory(threshold=0.70)
 
+    shutdown_received = False
     while True:
         try:
-            request = request_queue.get(timeout=1.0)
-            if request is None:  # Shutdown signal
-                break
+            # Check for shutdown signal with timeout
+            try:
+                request = request_queue.get(timeout=1.0)
+            except multiprocessing.queues.Empty:
+                # Queue empty - check if we should shutdown
+                if shutdown_received:
+                    logger.info("Diarization worker shutting down - all work processed")
+                    break
+                continue
+            
+            # Handle shutdown signal
+            if request is None:
+                # Check if there are pending requests before shutting down
+                if not request_queue.empty():
+                    # Mark that we received shutdown signal, continue processing
+                    shutdown_received = True
+                    logger.info("Diarization worker received shutdown signal, processing remaining items")
+                    continue
+                else:
+                    # Queue is empty, safe to exit
+                    logger.info("Diarization worker shutting down - queue empty")
+                    break
+            
             # Handle reset signal for new stream
             if request == RESET_SIGNAL:
+                shutdown_received = False  # Reset for new stream
                 logger.info("Received reset signal - clearing speaker memory for new stream")
                 speakers.reset()
                 continue
@@ -383,7 +405,9 @@ class DiarizationClient:
         self._request_queue: Optional[multiprocessing.Queue] = None
         self._result_queue: Optional[multiprocessing.Queue] = None
         self._running = False
-        self.stop_requested: bool = False
+        
+        # In-flight tracking for graceful shutdown
+        self.in_flight_requests: set[str] = set()  # Track request IDs being processed
     
     async def initialize(self):
         """Initialize lock and speaker memory."""
@@ -451,17 +475,42 @@ class DiarizationClient:
         
         logger.info(f"DiarizationClient params updated: threshold={self.threshold}, recency_boost={self.recency_boost}")
     
-    def stop(self):
-        """Signal stop to prevent new requests."""
-        self.stop_requested = True
-        logger.info("DiarizationClient stop requested")
-    
     def reset(self):
         """Reset all accumulated state."""
         if self._speaker_memory is not None:
             self._speaker_memory.reset()
-        self.stop_requested = False
+        self.in_flight_requests.clear()
+        self.reset_process()
         logger.info("DiarizationClient state reset")
+    
+    def add_in_flight_request(self, request_id: str):
+        """Add request ID to in-flight tracking."""
+        self.in_flight_requests.add(request_id)
+    
+    def remove_in_flight_request(self, request_id: str):
+        """Remove request ID from in-flight tracking."""
+        self.in_flight_requests.discard(request_id)
+    
+    def get_pending_count(self) -> int:
+        """Get count of pending diarization requests."""
+        return len(self.in_flight_requests)
+    
+    def send_shutdown_signal(self):
+        """Send shutdown signal to worker process."""
+        if self._request_queue is not None:
+            self._request_queue.put(None)
+            logger.info("DiarizationClient sent shutdown signal to worker")
+    
+    def is_idle(self) -> bool:
+        """Check if worker is idle (no pending work and queue empty)."""
+        if not self._running:
+            return True
+        if self._request_queue is None:
+            return True
+        try:
+            return self._request_queue.empty() and len(self.in_flight_requests) == 0
+        except Exception:
+            return False
     
     async def stop_process(self):
         """Stop the diarization process gracefully."""

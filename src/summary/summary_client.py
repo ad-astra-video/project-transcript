@@ -28,11 +28,12 @@ class SummarySegment:
 @dataclass
 class WindowInsight:
     """Insight extracted from a summary window."""
-    insight_type: str  
+    insight_type: str
     insight_text: str
     window_id: int
     timestamp_start: float
     timestamp_end: float
+    classification: str = "[~]"
 
 class InsightType(str, Enum):
     """Enumeration of possible insight types."""
@@ -44,11 +45,18 @@ class InsightType(str, Enum):
     SENTIMENT = "SENTIMENT"
     NOTES = "NOTES"
 
+class ClassificationField(str, Enum):
+    """Classification markers for insights - general and reusable across all insight types."""
+    POSITIVE = "[+]"
+    NEUTRAL = "[~]"
+    NEGATIVE = "[-]"
+
 class InsightResponseItemSchema(BaseModel):
     """Schema for a single insight item."""
     insight_type: InsightType
     insight_text: str
     confidence: float
+    classification: ClassificationField = ClassificationField.NEUTRAL
 
 class InsightsResponseSchema(BaseModel):
     """Schema for insights response from LLM."""
@@ -200,15 +208,22 @@ You are a high-performance conversation intelligence engine optimized for REAL-T
   * KEY POINT for important data that doesn't fit above categories
   * SENTIMENT only for explicit tone/emotional shifts. Sentiment should have a [+] if positive, [-] if negative, [~] if neutral.
   * NOTES as the catch-all for general context that doesn't fit elsewhere
+  * NOTES should be used to keep a log of general context and can be used along with other insight types, but no other insight type should be duplicated in the same window
 - Example: "We need to buy the software by Friday" → ACTION only (not also KEY POINT for the date or NOTES)
 - Example: "The CEO approved the $50K budget" → DECISION only (not also KEY POINT for the amount)
 - Example: "What's the delivery timeline? We need it by Q2" → QUESTION for the blocker, ACTION for the deadline requirement (two separate insights)
 
 **Output Protocol:**
 - Valid types are ACTION, DECISION, QUESTION, KEY POINT, RISK, SENTIMENT, NOTES
-- Always return VALID JSON with single object: `{"insights": [{"insight_type":"TYPE","insight_text":"concise insight text","confidence":0.xx}, ...]}`  
-- If no material changes since last response, return `{"insights": []}` with minimal weight for system health metrics only when absolutely necessary (max 1 insight)  
-- Max insights per update: 3 most critical items to maintain processing efficiency. NOTES insights do not count towards this limit.  
+- Always return VALID JSON with single object: `{"insights": [{"insight_type":"TYPE","insight_text":"concise insight text","confidence":0.xx,"classification":"[+]"}, ...]}`
+- If no material changes since last response, return `{"insights": []}` with minimal weight for system health metrics only when absolutely necessary (max 1 insight)
+- Include a `classification` field with values "[+]", "[~]", or "[-]" for all insights:
+  * [+] = positive sentiment/high priority/important
+  * [~] = neutral/informational/default
+  * [-] = negative sentiment/concern/risk
+- Classification applies to ALL insight types, not just SENTIMENT
+- If classification is not explicitly provided, it will default to [~]
+- Max insights per update: 3 most critical items to maintain processing efficiency. NOTES insights do not count towards this limit.
 - Never output empty JSON or partial fields - ensure full structure always valid
 - think very briefly to gather thoughts, no long chain of thought, then output the JSON ONLY
 """.strip()
@@ -257,8 +272,8 @@ You are a high-performance conversation intelligence engine optimized for REAL-T
         self.max_concurrent_summaries: int = max(1, max_concurrent)
         self._semaphore: asyncio.Semaphore = asyncio.Semaphore(self.max_concurrent_summaries)
         
-        # Stop request flag for graceful shutdown
-        self.stop_requested: bool = False  # Flag to prevent new LLM requests
+        # In-flight tracking for graceful shutdown
+        self.in_flight_windows: set[int] = set()  # Track window IDs being processed
     
     async def initialize(self):
         """
@@ -566,6 +581,34 @@ You are a high-performance conversation intelligence engine optimized for REAL-T
         
         return [summary_segment]
     
+    def _parse_classification(self, item: Dict[str, Any], insight_text: str) -> str:
+        """
+        Parse classification from item dict or extract from text prefix.
+        
+        Args:
+            item: Dictionary containing insight data
+            insight_text: The insight text to check for prefix
+        
+        Returns:
+            Classification string ([+], [~], [-]) or default [~]
+        """
+        # Check for explicit classification field first
+        if item.get("classification"):
+            classification = item.get("classification")
+            if classification in ["[+]", "[~]", "[-]"]:
+                return classification
+        
+        # Fallback: extract from text prefix
+        if insight_text.startswith("[+]"):
+            return "[+]"
+        elif insight_text.startswith("[~]"):
+            return "[~]"
+        elif insight_text.startswith("[-]"):
+            return "[-]"
+        
+        # Default to neutral
+        return "[~]"
+    
     def _extract_insights(
         self,
         summary_text: str,
@@ -598,13 +641,18 @@ You are a high-performance conversation intelligence engine optimized for REAL-T
                     if isinstance(item, dict):
                         insight_type = item.get("insight_type", "NOTES")
                         insight_text = item.get("insight_text", "") or item.get("insight", "") or item.get("text", "")
+                        
+                        # Parse classification from explicit field or text prefix
+                        classification = self._parse_classification(item, insight_text)
+                        
                         if insight_text:
                             insights.append(WindowInsight(
                                 insight_type=insight_type,
                                 insight_text=insight_text,
                                 window_id=window_id,
                                 timestamp_start=window_start,
-                                timestamp_end=window_end
+                                timestamp_end=window_end,
+                                classification=classification
                             ))
             elif isinstance(data, dict):
                 # Single object with insight types
@@ -614,13 +662,18 @@ You are a high-performance conversation intelligence engine optimized for REAL-T
                             if isinstance(item, dict):
                                 insight_type = item.get("type", "NOTES")
                                 insight_text = item.get("text", "") or item.get("insight", "")
+                                
+                                # Parse classification from explicit field or text prefix
+                                classification = self._parse_classification(item, insight_text)
+                                
                                 if insight_text:
                                     insights.append(WindowInsight(
                                         insight_type=insight_type,
                                         insight_text=insight_text,
                                         window_id=window_id,
                                         timestamp_start=window_start,
-                                        timestamp_end=window_end
+                                        timestamp_end=window_end,
+                                        classification=classification
                                     ))
         except json.JSONDecodeError:
             # Fallback: try to extract bullet points from text
@@ -635,20 +688,25 @@ You are a high-performance conversation intelligence engine optimized for REAL-T
                             insight_text=text,
                             window_id=window_id,
                             timestamp_start=window_start,
-                            timestamp_end=window_end
+                            timestamp_end=window_end,
+                            classification="[~]"
                         ))
         
         return insights
     
-    def stop(self):
-        """Signal stop to prevent new LLM requests."""
-        self.stop_requested = True
-        logger.info("SummaryClient stop requested - no new LLM requests will be sent")
-    
     def reset(self):
         """Reset all accumulated state."""
         self._window_manager.clear()
-        self._window_last_timestamp.clear()
-        self._has_performed_summary = False
-        self.stop_requested = False  # Reset stop flag
-        logger.info("SummaryClient state reset")
+        self.in_flight_windows.clear()
+    
+    def add_in_flight_window(self, window_id: int):
+        """Add window ID to in-flight tracking."""
+        self.in_flight_windows.add(window_id)
+    
+    def remove_in_flight_window(self, window_id: int):
+        """Remove window ID from in-flight tracking."""
+        self.in_flight_windows.discard(window_id)
+    
+    def get_pending_count(self) -> int:
+        """Get count of pending summary requests."""
+        return len(self.in_flight_windows)
