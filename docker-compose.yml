@@ -28,6 +28,8 @@ services:
       #- ./src:/app/src
     ports:
       - ${AI_RUNNER_PORT}:8000
+    depends_on:
+      - vllm
   vllm:
     image: vllm/vllm-openai:latest
     container_name: byoc-transcription-vllm
@@ -43,10 +45,16 @@ services:
     command: >
       --model ${LOCAL_SUMMARY_MODEL}
       --port 5000
-      --gpu-memory-utilization 0.75
+      --gpu-memory-utilization 0.70
       --kv-cache-dtype fp8
       --max-num-batched-tokens 512
       --max-num-seqs ${MAX_CONCURRENT_SUMMARIES}
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:5000/v1/models"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 60s
 networks:
   default:
     name: byoc-runners
