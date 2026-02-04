@@ -84,6 +84,8 @@ class TranscriberState:
         
         # Summary window tracking
         self.summary_window_counter: int = 0  # Counter for unique window IDs
+        self.summary_skip_every_n: int = 2  # Process every Nth window (default: 2)
+        self.summary_window_count: int = 0  # Counter for tracking windows for skip logic
         
         # Stop request flag for graceful shutdown
         self.stop_requested: bool = False  # Flag to signal workers to stop
@@ -355,9 +357,14 @@ async def _summary_worker():
                 # Add window to in-flight tracking in summary client
                 STATE.summary_client.add_in_flight_window(window_id)
                 
-                # Convert segments to dict format for summary client
-                segments_dict = _build_segments_payload(segments, window_start_ts)
-                logger.info(f"Built payload with {len(segments_dict)} segments")
+                # Segments may already be dicts (from merged skip logic) or TranscriptionSegment objects
+                # Only convert if they're not already dicts
+                if segments and isinstance(segments[0], dict):
+                    segments_dict = segments
+                    logger.info(f"Using pre-built payload with {len(segments_dict)} segments")
+                else:
+                    segments_dict = _build_segments_payload(segments, window_start_ts)
+                    logger.info(f"Built payload with {len(segments_dict)} segments")
                 
                 try:
                     start = time.perf_counter()
@@ -601,13 +608,43 @@ async def _transcribe_current_window(now_ts: float):
             logger.debug(f"Skipping summary work - all segments blank for window [{int(window_start_ts*1000)}ms - {int(end_ts*1000)}ms]")
         else:
             try:
-                # Generate unique window_id for this summary window
-                window_id = STATE.summary_window_counter
-                STATE.summary_window_counter += 1
+                # Increment window count for skip logic
+                STATE.summary_window_count += 1
                 
-                # Put work on queue for background processing
-                STATE.summary_queue.put_nowait((segments, window_id, window_start_ts, end_ts))
-                logger.info(f"Queued summary work for window {window_id} [{window_start_ts:.3f}s - {end_ts:.3f}s] with {len(segments)} segments")
+                # Check if this window should be processed (every Nth window)
+                should_process = (STATE.summary_window_count % STATE.summary_skip_every_n == 0)
+                
+                # Build segments payload
+                segments_payload = _build_segments_payload(segments, window_start_ts)
+                
+                if should_process:
+                    # Process this window through LLM
+                    window_id = STATE.summary_window_counter
+                    STATE.summary_window_counter += 1
+                    
+                    # Merge with skipped segments if any
+                    if STATE.summary_client.has_skipped_segments():
+                        skipped_data = STATE.summary_client.get_skipped_segments()
+                        # Combine skipped segments with current segments
+                        merged_segments = skipped_data["segments"] + segments_payload
+                        logger.info(f"Merged skipped window {skipped_data['window_id']} with current window {window_id}")
+                    else:
+                        merged_segments = segments_payload
+                    
+                    # Put work on queue for background processing
+                    STATE.summary_queue.put_nowait((merged_segments, window_id, window_start_ts, end_ts))
+                    logger.info(f"Queued summary work for window {window_id} [{window_start_ts:.3f}s - {end_ts:.3f}s] with {len(merged_segments)} segments (merged)")
+                else:
+                    # Skip LLM processing, store for merging with next window
+                    skipped_window_id = STATE.summary_window_counter
+                    STATE.summary_window_counter += 1
+                    await STATE.summary_client.store_skipped_segments(
+                        segments_payload,
+                        skipped_window_id,
+                        window_start_ts,
+                        end_ts
+                    )
+                    logger.info(f"Skipped summary processing, stored window {STATE.summary_window_count} for merging")
             except Exception as e:
                 logger.error(f"Failed to queue summary work: {e}")
 
@@ -830,6 +867,12 @@ async def update_params(params: dict):
                 history_length=params.get("summary_history_length"),
                 model=params.get("summary_model"),
             )
+    
+    # Summary skip rate parameter
+    if "summary_skip_every_n" in params:
+        old_value = STATE.summary_skip_every_n
+        STATE.summary_skip_every_n = int(params["summary_skip_every_n"])
+        logger.info(f"Updated summary_skip_every_n: {old_value} -> {STATE.summary_skip_every_n}")
 
 async def on_stream_start(params: dict):
     global STATE
@@ -856,6 +899,7 @@ async def on_stream_start(params: dict):
             
             # Reset summary window counter
             STATE.summary_window_counter = 0
+            STATE.summary_window_count = 0
             
             # Reset shutdown state for new stream
             STATE.shutdown_requested = False
