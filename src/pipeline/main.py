@@ -105,6 +105,11 @@ def _frame_time_seconds(timestamp: int, time_base) -> float:
         return float(timestamp)
 
 
+def _has_any_meaningful_segments(segments: list[TranscriptionSegment]) -> bool:
+    """Check if any segment contains meaningful text (non-empty, non-whitespace)."""
+    return any(bool(seg.text.strip()) for seg in segments)
+
+
 async def load_model(**kwargs):
     """Initialize Whisper, SRT generator, fonts, and buffers from params."""
     global STATE
@@ -591,22 +596,31 @@ async def _transcribe_current_window(now_ts: float):
 
     # Queue summary work for async processing (non-blocking)
     if STATE.summary_client is not None:
-        try:
-            # Generate unique window_id for this summary window
-            window_id = STATE.summary_window_counter
-            STATE.summary_window_counter += 1
-            
-            # Put work on queue for background processing
-            STATE.summary_queue.put_nowait((segments, window_id, window_start_ts, end_ts))
-            logger.info(f"Queued summary work for window {window_id} [{window_start_ts:.3f}s - {end_ts:.3f}s] with {len(segments)} segments")
-        except Exception as e:
-            logger.error(f"Failed to queue summary work: {e}")
+        # Skip if all segments are blank
+        if not _has_any_meaningful_segments(segments):
+            logger.debug(f"Skipping summary work - all segments blank for window [{int(window_start_ts*1000)}ms - {int(end_ts*1000)}ms]")
+        else:
+            try:
+                # Generate unique window_id for this summary window
+                window_id = STATE.summary_window_counter
+                STATE.summary_window_counter += 1
+                
+                # Put work on queue for background processing
+                STATE.summary_queue.put_nowait((segments, window_id, window_start_ts, end_ts))
+                logger.info(f"Queued summary work for window {window_id} [{window_start_ts:.3f}s - {end_ts:.3f}s] with {len(segments)} segments")
+            except Exception as e:
+                logger.error(f"Failed to queue summary work: {e}")
 
     keep_len = int(max(0, STATE.overlap_seconds * sr))
     STATE.audio_buffer = STATE.audio_buffer[-keep_len:] if keep_len > 0 else np.zeros((0,), dtype=np.float32)
     STATE.buffer_start_ts = end_ts - (keep_len / float(sr))
 
     if PROCESSOR is not None:
+        # Skip sending if all segments are blank
+        if not _has_any_meaningful_segments(segments):
+            logger.debug(f"Skipping transcript - all segments blank for window [{int(window_start_ts*1000)}ms - {int(end_ts*1000)}ms]")
+            return
+
         try:
             # Build structured segments payload for Streamplaces
             segments_payload = _build_segments_payload(segments, window_start_ts)
