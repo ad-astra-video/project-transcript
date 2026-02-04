@@ -8,6 +8,7 @@ with proper lifecycle management similar to SummaryClient.
 import asyncio
 import logging
 import multiprocessing
+import threading
 import os
 from dataclasses import dataclass
 from typing import List, Optional, Tuple, Dict
@@ -399,7 +400,7 @@ class DiarizationClient:
         self.min_samples_for_match = min_samples_for_match
         
         # State management
-        self._lock: Optional[asyncio.Lock] = None
+        self._lock: Optional[threading.Lock] = None
         self._speaker_memory: Optional[SpeakerMemory] = None
         self._process: Optional[multiprocessing.Process] = None
         self._request_queue: Optional[multiprocessing.Queue] = None
@@ -414,7 +415,7 @@ class DiarizationClient:
         logger.info("DiarizationClient.initialize called")
         
         if self._lock is None:
-            self._lock = asyncio.Lock()
+            self._lock = threading.Lock()
         
         self._speaker_memory = SpeakerMemory(
             threshold=self.threshold,
@@ -428,7 +429,7 @@ class DiarizationClient:
     async def start(self):
         """Start the diarization process."""
         logger.debug("DiarizationClient.start() called")
-        async with self._lock:
+        with self._lock:
             if self._running:
                 logger.info("Diarization process already running")
                 return
@@ -515,7 +516,7 @@ class DiarizationClient:
     async def stop_process(self):
         """Stop the diarization process gracefully."""
         logger.info("DiarizationClient.stop_process() called")
-        async with self._lock:
+        with self._lock:
             if not self._running:
                 return
             
@@ -537,13 +538,13 @@ class DiarizationClient:
             self._result_queue = None
             logger.info("Diarization process stopped")
     
-    async def reset_process(self):
+    def reset_process(self):
         """Reset internal state without stopping the process.
         
         This clears queues and resets state for a new stream while
         keeping the diarization worker process running.
         """
-        async with self._lock:
+        with self._lock:
             # Clear queues to discard pending requests from previous stream
             if self._request_queue is not None:
                 try:
