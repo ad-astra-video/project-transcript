@@ -51,6 +51,11 @@ class ClassificationField(str, Enum):
     NEUTRAL = "[~]"
     NEGATIVE = "[-]"
 
+class MessageFormatMode(str, Enum):
+    """Message format modes for different LLM providers."""
+    SYSTEM_PROMPT = "system"  # Use system role for system prompt
+    USER_PREFIX = "user"      # Convert system prompt to user message with prefix
+
 class InsightResponseItemSchema(BaseModel):
     """Schema for a single insight item."""
     insight_type: InsightType
@@ -239,6 +244,7 @@ You are a high-performance conversation intelligence engine optimized for REAL-T
             max_tokens: Maximum tokens to generate
             temperature: Temperature for generation
             system_prompt: System prompt for the LLM
+            message_format_mode: Message format mode (system or user prefix)
         """
         self.base_url = base_url.rstrip("/")
         self.api_key = api_key
@@ -248,6 +254,15 @@ You are a high-performance conversation intelligence engine optimized for REAL-T
         self.temperature = temperature
         self.system_prompt = system_prompt
         self.response_json_schema = InsightsResponseSchema.model_json_schema()
+        
+        # Load message format mode from environment, fallback to default
+        env_value = os.getenv("LOCAL_SUMMARY_MODEL_USES_SYSTEM_PROMPT", "yes").lower()
+        if env_value in ["no"]:
+            self.message_format_mode: MessageFormatMode = MessageFormatMode.USER_PREFIX
+            logger.info("Using USER_PREFIX message format for summaries")
+        else:
+            self.message_format_mode: MessageFormatMode = MessageFormatMode.SYSTEM_PROMPT
+            logger.info("Using SYSTEM_PROMPT message format for summaries")
 
         # Initialize OpenAI async client
         self.client = AsyncOpenAI(api_key=api_key, base_url=base_url)
@@ -299,13 +314,11 @@ You are a high-performance conversation intelligence engine optimized for REAL-T
         logger.info("SummaryClient.startup_summary - sending warm-up request with system prompt only")
         
         async def _do_startup_request() -> bool:
-            messages = []
-            
-            # System prompt only - no user messages
-            messages.append({
-                "role": "system",
-                "content": self.system_prompt
-            })
+            user_content = "This is a startup warm-up request."
+            messages = self._build_messages(
+                system_prompt=self.system_prompt,
+                user_content=user_content
+            )
             
             try:
                 logger.info(f"Sending startup warm-up request to model: {self.model}")
@@ -344,7 +357,8 @@ You are a high-performance conversation intelligence engine optimized for REAL-T
         model: Optional[str] = None,
         max_tokens: Optional[int] = None,
         temperature: Optional[float] = None,
-        system_prompt: Optional[str] = None
+        system_prompt: Optional[str] = None,
+        message_format_mode: Optional[MessageFormatMode] = None
     ):
         """
         Update client parameters dynamically.
@@ -357,6 +371,7 @@ You are a high-performance conversation intelligence engine optimized for REAL-T
             max_tokens: New max tokens
             temperature: New temperature
             system_prompt: New system prompt
+            message_format_mode: New message format mode
         """
         if base_url is not None:
             self.base_url = base_url.rstrip("/")
@@ -376,6 +391,8 @@ You are a high-performance conversation intelligence engine optimized for REAL-T
             self.temperature = temperature
         if system_prompt is not None:
             self.system_prompt = system_prompt
+        if message_format_mode is not None:
+            self.message_format_mode = message_format_mode
         
         logger.info(f"SummaryClient params updated: base_url={self.base_url}, history_length={self.history_length}, model={self.model}")
     
@@ -438,6 +455,50 @@ You are a high-performance conversation intelligence engine optimized for REAL-T
             return f"\nRecent Transcript:\n{accumulated_text}"
         return ""
     
+    def _build_messages(
+        self,
+        system_prompt: str,
+        context: str = "",
+        user_content: str = ""
+    ) -> List[Dict[str, str]]:
+        """
+        Build messages list with configurable format.
+        
+        Args:
+            system_prompt: The system prompt text
+            context: Optional context from previous segments
+            user_content: The user message content
+            
+        Returns:
+            List of message dictionaries in the correct format
+        """
+        messages = []
+        
+        if self.message_format_mode == MessageFormatMode.SYSTEM_PROMPT:
+            # Standard format with system role
+            messages.append({"role": "system", "content": system_prompt})
+            
+            if context:
+                messages.append({
+                    "role": "system",
+                    "content": f"Previous context (for understanding references only, do not extract insights from this unless current window transcript provides new information):\n{context}"
+                })
+            
+            messages.append({"role": "user", "content": user_content})
+        
+        else:  # USER_PREFIX mode
+            # Combine system prompt, context, and user content into a single user message
+            # This is required for models like Google Gemma that don't support the system role
+            combined_content = f"[SYSTEM PROMPT]\n{system_prompt}\n\n[USER CONTENT]\n{user_content}"
+            
+            if context:
+                combined_content = f"[SYSTEM PROMPT]\n{system_prompt}\n\n[CONTEXT]\n{context}\n\n[USER CONTENT]\n{user_content}"
+            
+            messages.append({"role": "user", "content": combined_content})
+            messages.append({"role": "assistant", "content": ""})  # Placeholder for assistant response
+        
+        return messages
+    
     async def summarize_text(self, text: str, context: str = "") -> tuple[str, str]:
         """
         Send text to LLM for cleaning and summarization.
@@ -452,26 +513,12 @@ You are a high-performance conversation intelligence engine optimized for REAL-T
         logger.info(f"summarize_text called with text length={len(text)}, context length={len(context)}")
         
         async def _do_request() -> tuple[str, str]:
-            messages = []
-            
-            # System prompt
-            messages.append({
-                "role": "system",
-                "content": self.system_prompt
-            })
-            
-            # Context from history
-            if context:
-                messages.append({
-                    "role": "system",
-                    "content": f"Previous context (for understanding references only, do not extract insights from this unless current window transcript provides new information):\n{context}"
-                })
-            
-            # User message with text to clean
-            messages.append({
-                "role": "user",
-                "content": f"Analyze the following current window transcript text and report only new or changed insights since the previous context.:\n\n{text}"
-            })
+            user_content = f"Analyze the following current window transcript text and report only new or changed insights since the previous context.:\n\n{text}"
+            messages = self._build_messages(
+                system_prompt=self.system_prompt,
+                context=context,
+                user_content=user_content
+            )
             
             try:
                 logger.info(f"Sending to LLM for analysis")

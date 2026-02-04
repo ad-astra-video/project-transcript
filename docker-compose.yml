@@ -23,6 +23,7 @@ services:
       - CUDA_VISIBLE_DEVICES=${TRANSCIPTION_CUDA_VISIBLE_DEVICES}
       - HF_TOKEN=${HF_TOKEN}
       - MAX_CONCURRENT_SUMMARIES=${MAX_CONCURRENT_SUMMARIES}
+      - LOCAL_SUMMARY_MODEL_USES_SYSTEM_PROMPT=${LOCAL_SUMMARY_MODEL_USES_SYSTEM_PROMPT}
     volumes:
       - ./models:/models
       #- ./src:/app/src
@@ -37,7 +38,7 @@ services:
     environment:
       - CUDA_VISIBLE_DEVICES=${VLLM_CUDA_VISIBLE_DEVICES}
       - CUDA_DEVICE_ORDER=PCI_BUS_ID
-      - HUGGING_FACE_HUB_TOKEN=${HF_TOKEN}
+      - HUGGING_FACE_HUB_TOKEN=${HF_TOKEN}      
     volumes:
       - ./models:/root/.cache/huggingface
     ports:
