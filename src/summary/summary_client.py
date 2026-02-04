@@ -81,7 +81,7 @@ class SummaryWindow:
 class WindowManager:
     """Manages summary windows and their text/insights."""
     
-    def __init__(self, max_chars: int = 15000):
+    def __init__(self, max_chars: int = 5000):
         self._windows: List[SummaryWindow] = []  # Ordered oldest -> newest
         self._char_count: int = 0
         self._next_window_id: int = 0
@@ -185,15 +185,16 @@ You are a high-performance conversation intelligence engine optimized for REAL-T
 
 1. **ACTION**: Concrete next steps, deadlines, responsible parties (with clear owners) and required actions ("Buy X by Y date" vs "Need to buy X"). Note if future, prior or step in process action.
 2. **DECISION**: Final or conditional agreements, approvals, and commitments that change meeting outcomes ("We'll proceed with Plan B," "This requires CEO approval by Friday")
-3. **QUESTION**: Critical blockers needing resolution (NOT just open questions), dependencies, risks requiring escalation
+3. **QUESTION**: Critical blockers needing resolution (NOT just open questions), dependencies, risks requiring escalation. Should be able to be followed by an ACTION or DESCISION.
 4. **KEY POINT**: Quantifiable data points essential for records or comparisons (dates, amounts, names of key stakeholders)
-5. **SENTIMENT** when detected in real-time conversations between participants - inclues topic pivots if tone changes, can include emotional changes when shifting
-6. **NOTES** used to keep a running summary log of the conversation for context. Notes should be frequent where conversation is providing new information that is not filler.
+5. **SENTIMENT**: when detected in real-time conversations between participants - include detail on topic pivots if relevant to the sentiment, can include emotional changes when shifting
+6. **RISK**: only when failure is time-bound or blocking a committed ACTION or DECISION
+7. **NOTES**: used to keep a running summary log of the conversation for context. Notes should be frequent where conversation is providing new information that is not filler. Some examples are listing speakers, topics started/pivoted from, general understanding of the discussion
 
 **Critical Real-Time Guidelines:**
 **Stream Continuity First** - Assume transcript segments may arrive out-of-order or with gaps. Reference context from previous messages to fill blanks where possible (confidence flags must be adjusted)  
 **Update > Guess** - If new information contradicts prior insights, immediately invalidate and update the record rather than preserving outdated analysis  
-**Confidence Tiers**: Use confidence levels that reflect real-time uncertainty: 0.95+ = definitive decision/fact; 0.75-0.89 = probable but requires verification; <0.75 = tentative insight requiring follow-up (never RISK unless imminent failure risk)  
+**Confidence Tiers**: Use confidence levels that reflect real-time uncertainty: 0.95+ = definitive decision/fact; 0.75-0.89 = probable but requires verification; <0.75 = tentative insight requiring follow-up 
 **Atomic Output** - Each response should contain ONLY the most significant changes since last update, not full reanalysis of entire stream history  
 **Speaker Awareness**: If multiple speakers detected (e.g., "Alex says... Sarah says..."), attribute insights to appropriate parties when possible without breaking context flow  
 **Critical Thresholds for Action**: Only output ACTION items that have clear owners and/or deadlines or consequences if missing deadline/owner info is provided in current segment, indicate owner if provided
@@ -201,11 +202,11 @@ You are a high-performance conversation intelligence engine optimized for REAL-T
 **NEVER summarize** entire conversations - only surface what materially changes understanding of next steps or critical outcomes  
 **DO NOT invent details** where transcript is incomplete (e.g., not making up names for missing figures)  
 **Incremental Confidence Decay**: Gradually reduce confidence ratings when no new context confirms assertions, but never below 0.5 until explicit correction  
-**Update Frequency**: Prioritize outputting significant changes at least every 3-5 seconds of continuous speech to maintain real-time awareness without overwhelming system. Notes should be frequent to assist with log of conversation.
+**Update Frequency**: Prioritize outputting significant changes at least every 3-5 seconds of continuous speech to maintain real-time awareness. Notes should be frequent to assist with log of conversation.
 
 **CRITICAL: NO DUPLICATE INSIGHTS PER WINDOW**
 - Each piece of information should appear in ONLY ONE insight type per analysis window
-- Choose the MOST SPECIFIC category that fits the content (ACTION > DECISION > QUESTION > KEY POINT > SENTIMENT > NOTES)
+- Choose the MOST SPECIFIC category that fits the content (ACTION > DECISION > QUESTION > KEY POINT > RISK > SENTIMENT > NOTES)
 - If information could fit multiple categories, use this priority hierarchy:
   * ACTION takes precedence if there's a concrete task/deadline/owner
   * DECISION takes precedence if there's a commitment or agreement
@@ -479,10 +480,7 @@ You are a high-performance conversation intelligence engine optimized for REAL-T
             messages.append({"role": "system", "content": system_prompt})
             
             if context:
-                messages.append({
-                    "role": "system",
-                    "content": f"Previous context (for understanding references only, do not extract insights from this unless current window transcript provides new information):\n{context}"
-                })
+                messages[0]["content"] += f"\nPrevious context (for understanding references only, do not extract insights from this unless current window transcript provides new information):\n{context}"
             
             messages.append({"role": "user", "content": user_content})
         
