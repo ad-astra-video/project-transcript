@@ -82,11 +82,6 @@ class TranscriberState:
         self.summary_worker_tasks: list[asyncio.Task] = []
         self.summary_sender_task: Optional[asyncio.Task] = None  # Background sender task
         
-        # Summary window tracking
-        self.summary_window_counter: int = 0  # Counter for unique window IDs
-        self.summary_skip_every_n: int = 2  # Process every Nth window (default: 2)
-        self.summary_window_count: int = 0  # Counter for tracking windows for skip logic
-        
         # Stop request flag for graceful shutdown
         self.stop_requested: bool = False  # Flag to signal workers to stop
 
@@ -151,6 +146,7 @@ async def load_model(**kwargs):
         api_key=summary_api_key,
         history_length=summary_history_length,
         model=summary_model,
+        windows_to_accumulate=2,  # Default value, will be updated via update_params if needed
     )
     await STATE.summary_client.initialize()
     logger.info("Summary client initialized")
@@ -217,60 +213,6 @@ def _diarization_buffer_duration_seconds() -> float:
     if STATE.buffer_rate is None or STATE.diarization_buffer_start_ts is None:
         return 0.0
     return len(STATE.diarization_audio_buffer) / float(STATE.buffer_rate)
-
-
-async def _run_diarization_on_window():
-    """Run diarization on accumulated 6-second audio window."""
-    assert STATE is not None and STATE.diarization_client is not None
-    if STATE.buffer_rate is None or STATE.diarization_buffer_start_ts is None:
-        logger.debug("Diarization skipped - buffer_rate or diarization_buffer_start_ts is None")
-        return
-    
-    sr = STATE.buffer_rate
-    diarization_window_seconds = 6.0
-    win_len = int(diarization_window_seconds * sr)
-    total_len = len(STATE.diarization_audio_buffer)
-    
-    if total_len < win_len:
-        logger.debug(f"Diarization skipped - buffer too short: {total_len} < {win_len}")
-        return
-    
-    # Take the first 6 seconds from the buffer
-    window_samples = STATE.diarization_audio_buffer[:win_len]
-    window_start_ts = STATE.diarization_buffer_start_ts
-    window_end_ts = window_start_ts + diarization_window_seconds
-    
-    temp_path = _write_wav(window_samples, sr)
-    diarization_request_id = str(uuid.uuid4())
-    
-    logger.info(f"Diarization: preparing window [{window_start_ts:.3f}s - {window_end_ts:.3f}s], audio_len={total_len}, temp_path={temp_path}")
-    
-    try:
-        # Track temp file for cleanup
-        STATE.pending_temp_files[temp_path] = {
-            'transcribed': False,
-            'diarized': False
-        }
-        
-        # Store timestamps for this request
-        STATE.diarization_window_timestamps[diarization_request_id] = (window_start_ts, window_end_ts)
-        
-        # Add request to in-flight tracking in diarization client
-        STATE.diarization_client.add_in_flight_request(diarization_request_id)
-        
-        # Send to diarization process (FIX: use diarization_client, not diarization_process)
-        logger.debug(f"Diarization: calling process_audio with request_id={diarization_request_id}")
-        await STATE.diarization_client.process_audio(temp_path, diarization_request_id)
-        logger.info(f"Diarization: successfully sent window [{window_start_ts:.3f}s - {window_end_ts:.3f}s] for processing")
-        
-        # Remove processed audio from buffer
-        STATE.diarization_audio_buffer = STATE.diarization_audio_buffer[win_len:]
-        STATE.diarization_buffer_start_ts = window_end_ts
-        
-    except Exception as e:
-        logger.error(f"Diarization error in _run_diarization_on_window: {type(e).__name__}: {e}")
-        logger.error(f"Diarization error details - temp_path={temp_path}, request_id={diarization_request_id}")
-        _mark_diarized(temp_path)
 
 
 def _write_wav(samples: np.ndarray, sample_rate: int) -> str:
@@ -346,70 +288,129 @@ async def _summary_worker():
                 break
             
             segments, window_id, window_start_ts, window_end_ts = work_item
-            logger.info(f"Summary worker received work for window {window_id} [{window_start_ts:.3f}s - {window_end_ts:.3f}s]")
             
             # Check if stop is requested before processing
             if STATE is not None and STATE.stop_requested:
                 logger.info(f"Summary worker skipping window {window_id} - stop requested")
                 continue
             
-            try:
-                # Add window to in-flight tracking in summary client
-                STATE.summary_client.add_in_flight_window(window_id)
-                
-                # Segments may already be dicts (from merged skip logic) or TranscriptionSegment objects
-                # Only convert if they're not already dicts
+            # Increment window count for skip logic
+            STATE.summary_client.summary_window_count += 1
+            
+            # Check if this window should be processed (every Nth window)
+            should_process = (STATE.summary_client.summary_window_count % STATE.summary_client.summary_skip_every_n == 0)
+            
+            if should_process:
+                # Process this window through LLM
+                try:
+                    # Add window to in-flight tracking in summary client
+                    STATE.summary_client.add_in_flight_window(window_id)
+                    
+                    # Segments may already be dicts or TranscriptionSegment objects
+                    # Only convert if they're not already dicts
+                    if segments and isinstance(segments[0], dict):
+                        segments_dict = segments
+                        logger.info(f"Using pre-built payload with {len(segments_dict)} segments")
+                    else:
+                        segments_dict = _build_segments_payload(segments, window_start_ts)
+                        logger.info(f"Built payload with {len(segments_dict)} segments")
+                    
+                    # Merge with skipped segments if any
+                    if STATE.summary_client.has_skipped_segments():
+                        skipped_data = STATE.summary_client.get_skipped_segments()
+                        # Combine skipped segments with current segments
+                        merged_segments = skipped_data["segments"] + segments_dict
+                        logger.info(f"Merged skipped window {skipped_data['window_id']} with current window {window_id}")
+                        # Use the merged segments for processing
+                        segments_dict = merged_segments
+                    
+                    try:
+                        start = time.perf_counter()
+                        summary_segments = await asyncio.wait_for(
+                            STATE.summary_client.process_segments("context_summary", segments_dict, window_id, window_start_ts, window_end_ts),
+                            timeout=50.0
+                        )
+                        end = time.perf_counter()
+                        if not PROCESSOR is None:
+                            await PROCESSOR.send_monitoring_event({"duration_seconds": end - start, "window_id": window_id, "window_start_ms": window_start_ts * 1000, "window_end_ms": window_end_ts * 1000}, "llm_summary_request_stats")
+                    except asyncio.TimeoutError:
+                        logger.warning(f"Summarization timed out for window {window_id} [{window_start_ts:.3f}s - {window_end_ts:.3f}s]")
+                        continue
+                    except Exception as e:
+                        logger.error(f"Error in summarization task: {e}")
+                        continue
+                    
+                    if summary_segments:
+                        logger.info(f"Summary processed {len(summary_segments)} segments")
+                        # Store summary data in deque for background sender
+                        summary_payload = {
+                            "type": "context_summary",
+                            "timestamp_utc": datetime.now(timezone.utc).isoformat(),
+                            "timing": {
+                                "window_id": window_id,
+                                "media_window_start_ms": int(window_start_ts * 1000),
+                                "media_window_end_ms": int(window_end_ts * 1000)
+                            },
+                            "segments": [
+                                {
+                                    "id": f"{window_id}-{i}",
+                                    "summary_type": seg.summary_type,
+                                    "background_context": seg.background_context,
+                                    "summary": seg.summary,
+                                }
+                                for i, seg in enumerate(summary_segments)
+                            ]
+                        }
+                        STATE.summary_results.append(summary_payload)
+                        logger.debug(f"Staged summary data for window {window_id} [{int(window_start_ts*1000)}ms - {int(window_end_ts*1000)}ms]")
+                except Exception as e:
+                    logger.error(f"Summary processing error: {e}")
+                finally:
+                    # Remove from in-flight tracking regardless of success or failure
+                    STATE.summary_client.remove_in_flight_window(window_id)
+            else:
+                # Skip LLM processing, store for merging with next window
+                # Segments may already be dicts or TranscriptionSegment objects
                 if segments and isinstance(segments[0], dict):
                     segments_dict = segments
-                    logger.info(f"Using pre-built payload with {len(segments_dict)} segments")
                 else:
                     segments_dict = _build_segments_payload(segments, window_start_ts)
-                    logger.info(f"Built payload with {len(segments_dict)} segments")
                 
+                await STATE.summary_client.store_skipped_segments(
+                    segments_dict,
+                    window_id,
+                    window_start_ts,
+                    window_end_ts
+                )
+                
+                # Run content type detection on skipped window
                 try:
-                    start = time.perf_counter()
-                    summary_segments = await asyncio.wait_for(
-                        STATE.summary_client.process_segments("context_summary", segments_dict, window_id, window_start_ts, window_end_ts),
-                        timeout=50.0
+                    logger.info(f"Running content type detection for window {window_id}")
+                    previous_content_type = STATE.summary_client._content_type_state.content_type
+                    result = await STATE.summary_client.process_content_type_detection(
+                        window_id, window_start_ts, window_end_ts
                     )
-                    end = time.perf_counter()
-                    if not PROCESSOR is None:
-                        PROCESSOR.send_monitoring_event({"duration_seconds": end - start, "window_id": window_id, "window_start_ms": window_start_ts * 1000, "window_end_ms": window_end_ts * 1000}, "llm_summary_request_stats")
-                except asyncio.TimeoutError:
-                    logger.warning(f"Summarization timed out for window {window_id} [{window_start_ts:.3f}s - {window_end_ts:.3f}s]")
-                    continue
+                    logger.info(f"Content type detection result: {result}")
+                    if result:
+                        # Content type detected - add to results for sending
+                        logger.info(f"Previous content type: '{previous_content_type}', New: '{result.content_type}'")
+                        if result.content_type != previous_content_type:
+                            logger.info(f"Content type CHANGED - sending message: '{previous_content_type}' -> '{result.content_type}'")
+                            add_content_type_detection_to_results(
+                                content_type=result.content_type,
+                                confidence=result.confidence,
+                                source="AUTO_DETECTED",
+                                previous_content_type=previous_content_type
+                            )
+                        else:
+                            logger.info(f"Content type UNCHANGED - not sending message")
+                    else:
+                        logger.info(f"No content type result - user override active or detection skipped")
+                    logger.info(f"Content type detection completed for skipped window {STATE.summary_client.summary_window_count}")
                 except Exception as e:
-                    logger.error(f"Error in summarization task: {e}")
-                    continue
+                    logger.error(f"Content type detection failed on skipped window: {e}")
                 
-                if summary_segments:
-                    logger.info(f"Summary processed {len(summary_segments)} segments")
-                    # Store summary data in deque for background sender
-                    summary_payload = {
-                        "type": "context_summary",
-                        "timestamp_utc": datetime.now(timezone.utc).isoformat(),
-                        "timing": {
-                            "window_id": window_id,
-                            "media_window_start_ms": int(window_start_ts * 1000),
-                            "media_window_end_ms": int(window_end_ts * 1000)
-                        },
-                        "segments": [
-                            {
-                                "id": f"{window_id}-{i}",
-                                "summary_type": seg.summary_type,
-                                "background_context": seg.background_context,
-                                "summary": seg.summary,
-                            }
-                            for i, seg in enumerate(summary_segments)
-                        ]
-                    }
-                    STATE.summary_results.append(summary_payload)
-                    logger.debug(f"Staged summary data for window {window_id} [{int(window_start_ts*1000)}ms - {int(window_end_ts*1000)}ms]")
-            except Exception as e:
-                logger.error(f"Summary processing error: {e}")
-            finally:
-                # Remove from in-flight tracking regardless of success or failure
-                STATE.summary_client.remove_in_flight_window(window_id)
+                logger.info(f"Skipped summary processing, stored window {STATE.summary_client.summary_window_count} for merging (ran content type detection)")
         except asyncio.TimeoutError:
             continue
         except asyncio.CancelledError:
@@ -451,6 +452,10 @@ async def _summary_sender():
             # Drain all results and send
             while len(STATE.summary_results) > 0:
                 result = STATE.summary_results.popleft()
+                result_type = result.get("type", "unknown")
+                logger.info(f"SENDING from summary_results: type='{result_type}'")
+                if result_type == "content_type_detection":
+                    logger.info(f"  content_type='{result.get('content_type')}', confidence={result.get('confidence')}, previous='{result.get('previous_content_type')}'")
                 try:
                     if PROCESSOR is not None:
                         await PROCESSOR.send_data(json.dumps(result))
@@ -465,6 +470,32 @@ async def _summary_sender():
         except Exception as e:
             logger.error(f"Summary sender error: {e}")
     logger.info("Summary sender stopped")
+
+
+def add_content_type_detection_to_results(content_type: str, confidence: float, source: str, previous_content_type: str = None):
+    """Add content type detection result to summary_results deque for sending.
+    
+    Args:
+        content_type: Detected content type (e.g., "GENERAL_MEETING", "TECHNICAL_TALK")
+        confidence: Confidence level (0.0-1.0)
+        source: Source of detection ("AUTO_DETECTED", "USER_OVERRIDE")
+        previous_content_type: Previous content type if it changed
+    """
+    if STATE is None:
+        logger.warning("Cannot add content type detection - STATE is None")
+        return
+    
+    payload = {
+        "type": "content_type_detection",
+        "timestamp_utc": datetime.now(timezone.utc).isoformat(),
+        "content_type": content_type,
+        "confidence": confidence,
+        "source": source,
+        "previous_content_type": previous_content_type
+    }
+    STATE.summary_results.append(payload)
+    logger.info(f"ADDED to summary_results: content_type_detection - type='{content_type}', confidence={confidence:.2f}, previous='{previous_content_type}'")
+    logger.debug(f"Added content_type_detection to results: {content_type}")
 
 
 async def _send_speakers_message(segments: list[SpeakerSegment], window_start_ts: float, window_end_ts: float):
@@ -507,6 +538,10 @@ async def _handle_diarization_result(result: DiarizationResult):
     # Mark temp file as diarized
     _mark_diarized(result.audio_path)
     
+    # Remove from in-flight tracking in diarization client
+    if not STATE is None:
+        STATE.diarization_client.remove_in_flight_request(result.request_id)
+
     if result.error:
         logger.error(f"Diarization error: {result.error}")
         return
@@ -525,9 +560,6 @@ async def _handle_diarization_result(result: DiarizationResult):
             start_idx = max(0, total_len - win_len)
             window_start_ts = STATE.buffer_start_ts + (start_idx / float(sr)) if STATE.buffer_start_ts else 0
             window_end_ts = window_start_ts + (win_len / float(sr))
-        
-        # Remove from in-flight tracking in diarization client
-        STATE.diarization_client.remove_in_flight_request(result.request_id)
         
         await _send_speakers_message(result.segments, window_start_ts, window_end_ts)
 
@@ -555,23 +587,42 @@ async def _poll_diarization_results():
     logger.info("Stopping diarization result polling")
 
 
-async def _transcribe_current_window(now_ts: float):
-    """Transcribe the current audio window."""
+def _pull_transcription_samples(now_ts: float) -> Optional[tuple]:
+    """Pull samples from audio buffer for transcription. Thread-safe synchronous operation.
+    
+    Returns:
+        Tuple of (window_samples, window_start_ts, window_end_ts) or None if buffer too short.
+    """
     assert STATE is not None and STATE.whisper_client is not None
     if STATE.buffer_rate is None or STATE.buffer_start_ts is None:
-        return
-
+        return None
+    
     sr = STATE.buffer_rate
     total_len = len(STATE.audio_buffer)
     win_len = int(max(1, STATE.window_seconds * sr))
     if total_len < win_len:
-        return
-
+        return None
+    
     start_idx = total_len - win_len
     window_samples = STATE.audio_buffer[start_idx:]
     window_start_ts = STATE.buffer_start_ts + (start_idx / float(sr))
     window_end_ts = window_start_ts + STATE.window_seconds
+    
+    # Update buffer - remove processed samples BEFORE spawning async task
+    keep_len = int(max(0, STATE.overlap_seconds * sr))
+    STATE.audio_buffer = STATE.audio_buffer[-keep_len:] if keep_len > 0 else np.zeros((0,), dtype=np.float32)
+    STATE.buffer_start_ts = window_end_ts - (keep_len / float(sr))
+    
+    return (window_samples, window_start_ts, window_end_ts)
 
+
+async def _process_transcription_async(window_samples: np.ndarray, window_start_ts: float, window_end_ts: float):
+    """Process transcription asynchronously. Receives samples already pulled from buffer."""
+    assert STATE is not None and STATE.whisper_client is not None
+    
+    sr = STATE.buffer_rate
+    win_len = int(STATE.window_seconds * sr)
+    
     temp_path = _write_wav(window_samples, sr)
     
     try:
@@ -602,55 +653,25 @@ async def _transcribe_current_window(now_ts: float):
     end_ts = window_start_ts + (win_len / float(sr))
 
     # Queue summary work for async processing (non-blocking)
+    # Skip logic is handled by the summary worker, not here
     if STATE.summary_client is not None:
         # Skip if all segments are blank
         if not _has_any_meaningful_segments(segments):
             logger.debug(f"Skipping summary work - all segments blank for window [{int(window_start_ts*1000)}ms - {int(end_ts*1000)}ms]")
         else:
             try:
-                # Increment window count for skip logic
-                STATE.summary_window_count += 1
-                
-                # Check if this window should be processed (every Nth window)
-                should_process = (STATE.summary_window_count % STATE.summary_skip_every_n == 0)
-                
                 # Build segments payload
                 segments_payload = _build_segments_payload(segments, window_start_ts)
                 
-                if should_process:
-                    # Process this window through LLM
-                    window_id = STATE.summary_window_counter
-                    STATE.summary_window_counter += 1
-                    
-                    # Merge with skipped segments if any
-                    if STATE.summary_client.has_skipped_segments():
-                        skipped_data = STATE.summary_client.get_skipped_segments()
-                        # Combine skipped segments with current segments
-                        merged_segments = skipped_data["segments"] + segments_payload
-                        logger.info(f"Merged skipped window {skipped_data['window_id']} with current window {window_id}")
-                    else:
-                        merged_segments = segments_payload
-                    
-                    # Put work on queue for background processing
-                    STATE.summary_queue.put_nowait((merged_segments, window_id, window_start_ts, end_ts))
-                    logger.info(f"Queued summary work for window {window_id} [{window_start_ts:.3f}s - {end_ts:.3f}s] with {len(merged_segments)} segments (merged)")
-                else:
-                    # Skip LLM processing, store for merging with next window
-                    skipped_window_id = STATE.summary_window_counter
-                    STATE.summary_window_counter += 1
-                    await STATE.summary_client.store_skipped_segments(
-                        segments_payload,
-                        skipped_window_id,
-                        window_start_ts,
-                        end_ts
-                    )
-                    logger.info(f"Skipped summary processing, stored window {STATE.summary_window_count} for merging")
+                # Get next window ID from SummaryClient
+                window_id = STATE.summary_client.summary_window_counter
+                STATE.summary_client.summary_window_counter += 1
+                
+                # Put work on queue for background processing
+                # Worker will handle skip logic and content type detection
+                STATE.summary_queue.put_nowait((segments_payload, window_id, window_start_ts, end_ts))
             except Exception as e:
                 logger.error(f"Failed to queue summary work: {e}")
-
-    keep_len = int(max(0, STATE.overlap_seconds * sr))
-    STATE.audio_buffer = STATE.audio_buffer[-keep_len:] if keep_len > 0 else np.zeros((0,), dtype=np.float32)
-    STATE.buffer_start_ts = end_ts - (keep_len / float(sr))
 
     if PROCESSOR is not None:
         # Skip sending if all segments are blank
@@ -675,9 +696,79 @@ async def _transcribe_current_window(now_ts: float):
                 }
             }
             await PROCESSOR.send_data(json.dumps(payload))
-            logger.info(f"Sent transcript with {len(segments_payload)} segments for window [{int(window_start_ts*1000)}ms - {int(end_ts*1000)}ms]")
         except Exception as e:
             logger.warning(f"Failed to send data payload: {e}")
+
+
+def _pull_diarization_samples(allow_partial: bool = False) -> Optional[tuple]:
+    """Pull samples from diarization audio buffer. Thread-safe synchronous operation.
+    
+    Args:
+        allow_partial: If True, process partial windows (< 6 seconds). Used during shutdown.
+    
+    Returns:
+        Tuple of (window_samples, window_start_ts, window_end_ts) or None if buffer too short.
+    """
+    assert STATE is not None
+    if STATE.buffer_rate is None or STATE.diarization_buffer_start_ts is None:
+        return None
+    
+    sr = STATE.buffer_rate
+    diarization_window_seconds = 6.0
+    win_len = int(diarization_window_seconds * sr)
+    total_len = len(STATE.diarization_audio_buffer)
+    
+    if total_len < win_len:
+        if allow_partial and total_len > 0:
+            logger.info(f"Processing partial diarization window: {total_len} samples ({total_len/sr:.2f}s)")
+        else:
+            return None
+    
+    # Take the first 6 seconds from the buffer
+    window_samples = STATE.diarization_audio_buffer[:win_len]
+    window_start_ts = STATE.diarization_buffer_start_ts
+    window_end_ts = window_start_ts + diarization_window_seconds
+    
+    # Update buffer - remove processed audio BEFORE spawning async task
+    STATE.diarization_audio_buffer = STATE.diarization_audio_buffer[win_len:]
+    STATE.diarization_buffer_start_ts = window_end_ts
+    
+    return (window_samples, window_start_ts, window_end_ts)
+
+
+async def _process_diarization_async(window_samples: np.ndarray, window_start_ts: float, window_end_ts: float, allow_partial: bool = False):
+    """Process diarization asynchronously. Receives samples already pulled from buffer."""
+    assert STATE is not None and STATE.diarization_client is not None
+    
+    sr = STATE.buffer_rate
+    
+    temp_path = _write_wav(window_samples, sr)
+    diarization_request_id = str(uuid.uuid4())
+    
+    logger.info(f"Diarization: preparing window [{window_start_ts:.3f}s - {window_end_ts:.3f}s], temp_path={temp_path}")
+    
+    try:
+        # Track temp file for cleanup
+        STATE.pending_temp_files[temp_path] = {
+            'transcribed': False,
+            'diarized': False
+        }
+        
+        # Store timestamps for this request
+        STATE.diarization_window_timestamps[diarization_request_id] = (window_start_ts, window_end_ts)
+        
+        # Add request to in-flight tracking in diarization client
+        STATE.diarization_client.add_in_flight_request(diarization_request_id)
+        
+        # Send to diarization process
+        logger.debug(f"Diarization: calling process_audio with request_id={diarization_request_id}")
+        await STATE.diarization_client.process_audio(temp_path, diarization_request_id)
+        logger.info(f"Diarization: successfully sent window [{window_start_ts:.3f}s - {window_end_ts:.3f}s] for processing")
+        
+    except Exception as e:
+        logger.error(f"Diarization error in _process_diarization_async: {type(e).__name__}: {e}")
+        logger.error(f"Diarization error details - temp_path={temp_path}, request_id={diarization_request_id}")
+        _mark_diarized(temp_path)
 
 
 def _build_segments_payload(segments: list[TranscriptionSegment], window_start_ts: float) -> list[dict]:
@@ -731,6 +822,9 @@ async def process_audio_async(frame: AudioFrame):
     
     logger.debug(f"process_audio_async: timestamp={frame.timestamp}, time_base={frame.time_base}, samples_shape={frame.samples.shape}")
     
+    if STATE.shutdown_requested:
+        return None  # Ignore new audio during shutdown
+
     _append_audio(frame)
     
     buffer_dur = _buffer_duration_seconds()
@@ -738,22 +832,42 @@ async def process_audio_async(frame: AudioFrame):
     
     if buffer_dur >= STATE.window_seconds:
         now_ts = _frame_time_seconds(frame.timestamp, frame.time_base)
-        logger.debug(f"process_audio_async: triggering transcription for window")
-        await _transcribe_current_window(now_ts)
+        logger.debug(f"process_audio_async: pulling transcription samples")
+        # Pull samples synchronously (awaited for thread-safe buffer access)
+        pulled = _pull_transcription_samples(now_ts)
+        if pulled is not None:
+            window_samples, window_start_ts, window_end_ts = pulled
+            # Process asynchronously in background
+            asyncio.create_task(_process_transcription_async(window_samples, window_start_ts, window_end_ts))
     
-    # Run diarization on 6-second chunks
+    # Run diarization on 6-second chunks (non-blocking)
     diarization_dur = _diarization_buffer_duration_seconds()
     logger.debug(f"process_audio_async: diarization_dur={diarization_dur:.3f}s")
     
     if diarization_dur >= 6.0:
-        logger.debug(f"process_audio_async: triggering diarization")
-        await _run_diarization_on_window()
+        logger.debug(f"process_audio_async: pulling diarization samples")
+        # Pull samples synchronously (awaited for thread-safe buffer access)
+        pulled = _pull_diarization_samples()
+        if pulled is not None:
+            window_samples, window_start_ts, window_end_ts = pulled
+            # Process asynchronously in background
+            asyncio.create_task(_process_diarization_async(window_samples, window_start_ts, window_end_ts))
     
     return None
 
 
 async def _handle_graceful_shutdown():
-    """Handle graceful shutdown via update_params."""
+    """
+    Handle graceful shutdown via update_params.
+
+    This is run in a async task so should run each step and wait for completion.
+    1. Signal stop - no new audio to buffers
+    2. Flush remaining buffered audio
+    3. Send shutdown signals to workers
+    4. Wait for completion with timeout
+    5. Send shutdown complete or timeout signal to client
+
+    """
     logger.info("Starting graceful shutdown process")
     
     # Phase 1: Signal stop - no new audio to buffers
@@ -807,13 +921,18 @@ async def _flush_audio_buffers():
     
     # Flush transcription buffer if has data
     if len(STATE.audio_buffer) > 0 and STATE.buffer_rate is not None:
-        await _transcribe_current_window(
-            STATE.buffer_start_ts + _buffer_duration_seconds()
-        )
+        now_ts = STATE.buffer_start_ts + _buffer_duration_seconds()
+        pulled = _pull_transcription_samples(now_ts)
+        if pulled is not None:
+            window_samples, window_start_ts, window_end_ts = pulled
+            await _process_transcription_async(window_samples, window_start_ts, window_end_ts)
     
-    # Flush diarization buffer if has data
+    # Flush diarization buffer if has data - allow partial windows during shutdown
     if len(STATE.diarization_audio_buffer) > 0:
-        await _run_diarization_on_window()
+        pulled = _pull_diarization_samples(allow_partial=True)
+        if pulled is not None:
+            window_samples, window_start_ts, window_end_ts = pulled
+            await _process_diarization_async(window_samples, window_start_ts, window_end_ts, allow_partial=True)
 
 
 async def update_params(params: dict):
@@ -870,9 +989,37 @@ async def update_params(params: dict):
     
     # Summary skip rate parameter
     if "summary_skip_every_n" in params:
-        old_value = STATE.summary_skip_every_n
-        STATE.summary_skip_every_n = int(params["summary_skip_every_n"])
-        logger.info(f"Updated summary_skip_every_n: {old_value} -> {STATE.summary_skip_every_n}")
+        new_value = int(params["summary_skip_every_n"])
+        if STATE.summary_client is not None:
+            old_value = STATE.summary_client.summary_skip_every_n
+            STATE.summary_client.update_summary_skip_every_n(new_value)
+            logger.info(f"Updated summary_skip_every_n: {old_value} -> {new_value}")
+    
+    # Initial summary delay parameter
+    if "initial_summary_delay_seconds" in params:
+        delay = float(params["initial_summary_delay_seconds"])
+        if STATE.summary_client is not None:
+            STATE.summary_client.initial_summary_delay_seconds = delay
+            logger.info(f"Updated initial_summary_delay_seconds to {delay}s")
+    
+    # Content type override parameter (user control)
+    if "content_type_override" in params:
+        override = params["content_type_override"]
+        if STATE.summary_client is not None:
+            if override is None or override == "":
+                STATE.summary_client.set_content_type_override(None)
+                logger.info("Content type user override cleared")
+            else:
+                STATE.summary_client.set_content_type_override(override)
+                logger.info(f"Content type user override set to: {override}")
+    
+    # Content type auto-detection parameter (for initial detection)
+    if "content_type" in params and "content_type_confidence" in params:
+        ct = params["content_type"]
+        conf = params.get("content_type_confidence", 0.0)
+        if STATE.summary_client is not None:
+            STATE.summary_client.set_content_type(ct, conf, "AUTO_DETECTED")
+            logger.info(f"Content type auto-detected: {ct} (confidence: {conf:.2f})")
 
 async def on_stream_start(params: dict):
     global STATE
@@ -893,13 +1040,9 @@ async def on_stream_start(params: dict):
             STATE.diarization_audio_buffer = np.zeros((0,), dtype=np.float32)  # Reset diarization buffer
             STATE.diarization_buffer_start_ts = None
             
-            # Reset summary client state
+            # Reset summary client state (includes window tracking state)
             if STATE.summary_client is not None:
                 STATE.summary_client.reset()
-            
-            # Reset summary window counter
-            STATE.summary_window_counter = 0
-            STATE.summary_window_count = 0
             
             # Reset shutdown state for new stream
             STATE.shutdown_requested = False
