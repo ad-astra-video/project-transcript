@@ -238,8 +238,8 @@ CONTENT_TYPE_RULE_MODIFIERS = {
     },
 
     "TECHNICAL_TALK": {
-        "emphasize": ["KEY POINT", "DECISION", "RISK"],
-        "deemphasize": ["ACTION"],
+        "emphasize": ["KEY POINT", "DECISION"],
+        "deemphasize": ["ACTION", "RISK"],
         "sentiment_enabled": False,
         "action_strictness": "very_high",
         "notes_frequency": "medium",
@@ -330,8 +330,15 @@ You receive continuous, imperfect speech-to-text output that may include:
 
 Your job is to continuously extract only the most critical insights with minimal latency, prioritizing **high-value, actionable intelligence** over completeness, while preserving continuity across the stream.
 
-You operate incrementally. Each response reflects ONLY what materially changed since the previous update.
+You operate incrementally. Each response reflects ONLY what materially changed since the Prior Context.
 
+---
+
+## ANALYSIS EXPLANATION
+
+Provide a thoughtful explanation that remains as concise as possible of the most critical insights and their implications, without restating the entire transcript.
+
+Focus on what in the Prior Context and Current Window led to the insights, and what they mean for the overall understanding of the conversation.
 ---
 
 ## CORE INSIGHT TYPES (PRIORITY ORDER)
@@ -350,7 +357,9 @@ Extract insights using the following hierarchy. Choose the MOST SPECIFIC categor
 3. **QUESTION**  
    Blocking or critical unknowns that prevent progress and require resolution.  
    - Must be actionable or decision-blocking (not casual curiosity).
-
+   - Example: “What’s the budget for this project?”
+   - If the question is rhetorical or answered immediately, do NOT log it.
+   
 4. **KEY POINT**  
    Essential factual or quantitative information needed for record-keeping, comparison, or understanding.  
    - Merge multiple related facts into a single high-value point when possible.  
@@ -449,16 +458,12 @@ When modifiers are active:
 - Apply them strictly  
 - Do not compensate by inventing other insight types  
 - Prefer omission over speculation
-
-Example effects:
-- STREAMER_MONOLOGUE → emphasize NOTES and KEY POINT, suppress ACTION/DECISION  
-- LECTURE_OR_TALK → emphasize KEY POINT and NOTES, suppress SENTIMENT  
-- INTERVIEW → emphasize QUESTION and KEY POINT  
-- DEBATE → emphasize DECISION, QUESTION, SENTIMENT  
-- GAMEPLAY_COMMENTARY → NOTES dominant, minimal ACTION unless explicitly stated
-
 ---
 
+
+""".strip()
+
+SYSTEM_PROMPT_OUTPUT_CONSTRAINTS = """
 ## OUTPUT CONSTRAINTS
 
 - Output **VALID JSON ONLY**  
@@ -473,13 +478,13 @@ Example effects:
 
 ```json
 {
-  "content_type": "ACTIVE_CONTENT_TYPE",
+  "analysis": "Thoughtful explanation of the most critical insights and their implications, without restating the entire transcript",
   "insights": [
     {
       "insight_type": "ACTION | DECISION | QUESTION | KEY POINT | RISK | SENTIMENT | NOTES",
       "insight_text": "Concise, high-value statement",
       "confidence": 0.xx,
-      "classification": "[+] | [~] | [-]"
+      "classification": "+ | ~ | -"
     }
   ]
 }
