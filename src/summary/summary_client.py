@@ -211,6 +211,7 @@ class WindowManager:
             Tuple of (accumulated_text_string, list_of_insights)
         """
         if len(self._windows) <= self.windows_to_accumulate:
+            logger.debug(f"Not enough windows for accumulation: {len(self._windows)} <= {self.windows_to_accumulate}")
             return "", []
         
         # Single loop through accumulated windows
@@ -218,16 +219,24 @@ class WindowManager:
         text_parts = []
         insights = []
         
+        # Diagnostic: track insights per window
+        insights_per_window = []
+        
         for window in accumulated_windows:
             # Collect text
             if window.text:
                 text_parts.append(window.text)
             # Collect insights
+            window_insight_count = len(window.insights)
+            insights_per_window.append(f"w{window.window_id}:{window_insight_count}")
             if window.insights:
                 insights.extend(window.insights)
         
         accumulated_text = " ".join(text_parts)
-        logger.info("Returning accumulated text from %d windows with %d insights", len(accumulated_windows), len(insights))
+        logger.info(
+            f"Returning accumulated text from {len(accumulated_windows)} windows with {len(insights)} total insights. "
+            f"Per-window breakdown: [{', '.join(insights_per_window)}]"
+        )
         return accumulated_text, insights
     
     def get_all_windows_text(self) -> str:
@@ -277,7 +286,15 @@ class WindowManager:
         for window in reversed(self._windows):
             if window.window_id == window_id:
                 window.insights.append(insight)
+                logger.debug(f"Added insight {insight.insight_id} to window {window_id}")
                 return insight.insight_id
+        
+        # Window not found - log error with diagnostic info
+        available_ids = [w.window_id for w in self._windows]
+        logger.error(
+            f"Failed to add insight {insight.insight_id} to window {window_id} - window not found. "
+            f"Available window IDs: {available_ids}, Total windows: {len(self._windows)}"
+        )
         return -1  # Window not found
     
     def clear(self):
@@ -857,7 +874,9 @@ class SummaryClient:
         logger.info(f"Got {len(new_text)} chars of new text for window {window_id}")
         
         # Add window to WindowManager (sets _first_window_timestamp if first window)
-        self._window_manager.add_window(new_text, window_start, window_end)
+        # Capture the actual window ID assigned by WindowManager
+        actual_window_id = self._window_manager.add_window(new_text, window_start, window_end)
+        logger.debug(f"Pipeline window_id={window_id}, WindowManager assigned actual_window_id={actual_window_id}")
         
         # Check initial delay (self-contained, no STATE import)
         if not self._has_performed_summary:
@@ -891,7 +910,7 @@ class SummaryClient:
         logger.info(f"Sending {len(content_to_analyze)} chars to analyze + {len(context)} chars context (with {len(prior_insights)} prior insights) to LLM")
         summary_text, reasoning_content = await self.summarize_text(content_to_analyze, context)
         
-        logger.info(f"Processed window {window_id}, summary length={len(summary_text)}")
+        logger.info(f"Processed window (pipeline_id={window_id}, actual_id={actual_window_id}), summary length={len(summary_text)}")
         
         # Parse JSON and extract analysis for background_context
         background_context = ""
@@ -914,9 +933,11 @@ class SummaryClient:
         # Extract insights and get updated parsed_data with assigned insight_ids
         insights = []
         if parsed_data:
-            parsed_data = self._extract_insights(parsed_data, window_id, window_start, window_end)
+            # Use actual_window_id from WindowManager, not pipeline's window_id
+            parsed_data = self._extract_insights(parsed_data, actual_window_id, window_start, window_end)
             # Get insights from the window (they were added during _extract_insights)
-            insights = self._window_manager.get_window_insights(window_id)
+            insights = self._window_manager.get_window_insights(actual_window_id)
+            logger.info(f"Extracted {len(insights)} insights for window {actual_window_id}")
         
         # Update summary_text with assigned insight_ids
         updated_summary_text = json.dumps(parsed_data) if parsed_data else summary_text
@@ -989,7 +1010,12 @@ class SummaryClient:
             )
             
             # Add insight to window via WindowManager
-            self._window_manager.add_insight_to_window(window_id, insight)
+            result = self._window_manager.add_insight_to_window(window_id, insight)
+            if result == -1:
+                logger.error(
+                    f"Failed to add insight {insight_id} (type={insight.insight_type}) to window {window_id}. "
+                    f"Insight text: {insight.insight_text[:100]}..."
+                )
             
             # Use as_dict() for clean export to summary
             insights_for_summary.append(insight.as_dict())
