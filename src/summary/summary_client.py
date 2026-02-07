@@ -31,12 +31,31 @@ class SummarySegment:
 @dataclass
 class WindowInsight:
     """Insight extracted from a summary window."""
-    insight_type: str
-    insight_text: str
-    window_id: int
-    timestamp_start: float
-    timestamp_end: float
+    insight_id: int = 0  # Unique identifier assigned by system (not LLM)
+    insight_type: str = ""
+    insight_text: str = ""
+    confidence: float = 0.0  # Confidence score from LLM (0.0-1.0)
+    window_id: int = 0
+    timestamp_start: float = 0.0
+    timestamp_end: float = 0.0
     classification: str = "~"
+    continuation_of: Optional[int] = None  # Previous insight ID this continues
+    correction_of: Optional[int] = None  # Previous insight ID this corrects
+    
+    # Excludes timestamp_start and timestamp_end
+    #   this is used for sending over json data channel which includes timing for all insights sent
+    def as_dict(self) -> Dict[str, Any]:
+        """Export as dictionary for JSON serialization."""
+        return {
+            "insight_id": self.insight_id,
+            "insight_type": self.insight_type,
+            "insight_text": self.insight_text,
+            "confidence": self.confidence,
+            "window_id": self.window_id,
+            "classification": self.classification,
+            "continuation_of": self.continuation_of,
+            "correction_of": self.correction_of,
+        }
 
 class InsightType(str, Enum):
     """Enumeration of possible insight types."""
@@ -131,6 +150,8 @@ class WindowManager:
         self.max_chars = max_chars
         self.windows_to_accumulate = windows_to_accumulate  # Number of windows to exclude from accumulated text
         self._first_window_timestamp: Optional[float] = None  # Track first window timestamp for self-contained delay logic
+        self._next_insight_id: int = 0  # Counter for unique insight IDs
+        self._insights_by_id: Dict[int, WindowInsight] = {}  # Fast lookup by ID
     
     def add_window(self, text: str, timestamp_start: float, timestamp_end: float) -> int:
         """
@@ -150,7 +171,7 @@ class WindowManager:
         # Track first window timestamp for initial delay (self-contained logic)
         if self._first_window_timestamp is None:
             self._first_window_timestamp = timestamp_start
-            logger.info(f"First transcript at {timestamp_start:.3f}s - will delay first summary by {self.initial_summary_delay_seconds}s")
+            logger.info(f"First transcript at {timestamp_start:.3f}s - initial delay logic active")
         
         # Check if adding would exceed limit
         new_char_count = self._char_count + len(text)
@@ -178,17 +199,36 @@ class WindowManager:
 
         return window_id
     
-    def get_accumulated_text(self) -> str:
+    def get_accumulated_text_and_insights(self) -> tuple[str, List[WindowInsight]]:
         """
-        Get accumulated window text concatenated, excluding the last N windows.
+        Get accumulated text and insights from the same windows in a single pass.
         
-        The excluded windows are those that will be processed in the next summary call,
-        so this returns only the historical context that should be used for understanding
-        references in the current window.
+        The accumulated text excludes the last N windows (windows_to_accumulate).
+        This method returns both text and insights from those same excluded windows,
+        looping through the windows only once.
+        
+        Returns:
+            Tuple of (accumulated_text_string, list_of_insights)
         """
         if len(self._windows) <= self.windows_to_accumulate:
-            return ""
-        return " ".join(w.text for w in self._windows[:-self.windows_to_accumulate])
+            return "", []
+        
+        # Single loop through accumulated windows
+        accumulated_windows = self._windows[:-self.windows_to_accumulate]
+        text_parts = []
+        insights = []
+        
+        for window in accumulated_windows:
+            # Collect text
+            if window.text:
+                text_parts.append(window.text)
+            # Collect insights
+            if window.insights:
+                insights.extend(window.insights)
+        
+        accumulated_text = " ".join(text_parts)
+        logger.info("Returning accumulated text from %d windows with %d insights", len(accumulated_windows), len(insights))
+        return accumulated_text, insights
     
     def get_all_windows_text(self) -> str:
         """
@@ -211,27 +251,34 @@ class WindowManager:
                 return window.insights
         return []
     
-    def add_insight_to_window(self, window_id: int, insight: WindowInsight):
-        """Add an insight to a specific window."""
-        for window in self._windows:
+    def _get_next_insight_id(self) -> int:
+        """
+        Increment and return the next unique insight ID.
+        First call returns 1, second returns 2, etc.
+        
+        Returns:
+            Unique integer ID for the next insight
+        """
+        self._next_insight_id += 1
+        return self._next_insight_id
+    
+    def add_insight_to_window(self, window_id: int, insight: WindowInsight) -> int:
+        """
+        Add a single insight to a window. Searches windows in reverse order
+        (newest first) for efficiency since recent windows are more likely targets.
+        
+        Args:
+            window_id: The window to add insight to
+            insight: The WindowInsight to add
+        
+        Returns:
+            The insight_id of the added insight, or -1 if window not found
+        """
+        for window in reversed(self._windows):
             if window.window_id == window_id:
                 window.insights.append(insight)
-                return
-    
-    def drop_window(self, window_id: int):
-        """Drop a window and its insights."""
-        for i, window in enumerate(self._windows):
-            if window.window_id == window_id:
-                self._char_count -= window.char_count
-                self._windows.pop(i)
-                return
-    
-    def get_all_insights(self) -> List[WindowInsight]:
-        """Get all insights from all windows."""
-        all_insights = []
-        for window in self._windows:
-            all_insights.extend(window.insights)
-        return all_insights
+                return insight.insight_id
+        return -1  # Window not found
     
     def clear(self):
         """Clear all windows."""
@@ -554,12 +601,55 @@ class SummaryClient:
         
         return " ".join(new_text_parts)
     
-    def _build_context(self) -> str:
-        """Build context string from WindowManager accumulated text."""
-        accumulated_text = self._window_manager.get_accumulated_text()
+    def _build_context(self, include_insights: bool = True) -> tuple[str, List[WindowInsight]]:
+        """
+        Build context string with text and optionally insights from accumulated windows.
+        Single-pass: loops through accumulated windows once to get both text and insights.
+        
+        Returns:
+            Tuple of (formatted_context_string, list_of_insights_from_accumulated_windows)
+        """
+        # Single-pass accumulation from same windows
+        accumulated_text, insights = self._window_manager.get_accumulated_text_and_insights()
+        
+        parts = []
+        
+        # Add accumulated text
         if accumulated_text:
-            return f"{accumulated_text}"
-        return ""
+            parts.append(f"## PRIOR TEXT\n{accumulated_text}")
+        
+        # Add insights from same accumulated windows
+        if include_insights and insights:
+            insights_text = self._format_insights_for_context(insights)
+            parts.append(f"## PRIOR INSIGHTS\n{insights_text}")
+        
+        context_string = "\n\n".join(parts) if parts else ""
+        return context_string, insights
+    
+    def _format_insights_for_context(self, insights: List[WindowInsight]) -> str:
+        """Format insights for inclusion in Prior Context with IDs and timing hints."""
+        formatted = []
+        for insight in insights:
+            # Format with ID and timing hints
+            # ID is included so LLM can reference it in continuation_of/correction_of
+            id_hint = f"[#{insight.insight_id}]"
+            timing_hint = f"[{insight.timestamp_start:.1f}s - {insight.timestamp_end:.1f}s]"
+            
+            # Add continuation/correction markers if present
+            markers = []
+            if insight.continuation_of:
+                markers.append(f"CONTINUATION of insight #{insight.continuation_of}")
+            if insight.correction_of:
+                markers.append(f"CORRECTION of insight #{insight.correction_of}")
+            
+            marker_text = f" ({', '.join(markers)})" if markers else ""
+            
+            formatted.append(
+                f"- **{insight.insight_type}** {id_hint} {timing_hint}: "
+                f"{insight.insight_text}{marker_text}"
+            )
+        
+        return "\n".join(formatted)
     
     def _format_content_type_rules(self, content_type: str) -> str:
         """
@@ -780,8 +870,9 @@ class SummaryClient:
                 else:
                     logger.info(f"Initial delay passed - proceeding with first summary after {elapsed:.1f}s")
         
-        # Get context from accumulated text (processed windows only)
-        context = self._build_context()
+        # Get context and prior insights from accumulated windows
+        # _build_context now returns tuple: (context_string, prior_insights)
+        context, prior_insights = self._build_context(include_insights=True)
         
         # Get unprocessed text from all windows (for first summary, this includes all accumulated text)
         unprocessed_text = self._window_manager.get_unprocessed_text()
@@ -796,8 +887,8 @@ class SummaryClient:
             content_to_analyze = new_text
             logger.info(f"Subsequent summary: analyzing {len(content_to_analyze)} chars new text")
         
-        # Send text + context to LLM
-        logger.info(f"Sending {len(content_to_analyze)} chars to analyze + {len(context)} chars context to LLM")
+        # Send text + context (with insights) to LLM
+        logger.info(f"Sending {len(content_to_analyze)} chars to analyze + {len(context)} chars context (with {len(prior_insights)} prior insights) to LLM")
         summary_text, reasoning_content = await self.summarize_text(content_to_analyze, context)
         
         logger.info(f"Processed window {window_id}, summary length={len(summary_text)}")
@@ -820,18 +911,21 @@ class SummaryClient:
                 background_context = reasoning_content
                 logger.debug("JSON parse failed, using reasoning_content as fallback")
         
-        # Extract insights using parsed data (no summary_text parameter)
+        # Extract insights and get updated parsed_data with assigned insight_ids
         insights = []
         if parsed_data:
-            insights = self._extract_insights(parsed_data, window_id, window_start, window_end)
-            for insight in insights:
-                self._window_manager.add_insight_to_window(window_id, insight)
+            parsed_data = self._extract_insights(parsed_data, window_id, window_start, window_end)
+            # Get insights from the window (they were added during _extract_insights)
+            insights = self._window_manager.get_window_insights(window_id)
+        
+        # Update summary_text with assigned insight_ids
+        updated_summary_text = json.dumps(parsed_data) if parsed_data else summary_text
         
         # Create summary segment
         summary_segment = SummarySegment(
             summary_type=summary_type,
             background_context=background_context,
-            summary=summary_text,
+            summary=updated_summary_text,
             timestamp_start=window_start,
             timestamp_end=window_end,
         )
@@ -853,9 +947,9 @@ class SummaryClient:
         window_id: int,
         window_start: float,
         window_end: float
-    ) -> List[WindowInsight]:
+    ) -> Dict:
         """
-        Extract insights from parsed JSON data and return as WindowInsight objects.
+        Extract insights from parsed JSON data, assign IDs, and insert into parsed_data.
         
         Args:
             parsed_data: Parsed JSON data from LLM response
@@ -864,58 +958,45 @@ class SummaryClient:
             window_end: End timestamp of the window
         
         Returns:
-            List of WindowInsight objects
+            Parsed data with insights array updated to include assigned insight_ids
         """
-        insights = []
-        
         if not parsed_data:
-            return insights
+            return parsed_data
         
-        # Work directly with parsed data - no JSON parsing needed
-        data = parsed_data
-        logger.debug("Using parsed JSON data for insights extraction")
+        # Get the insights list from parsed_data
+        insights_list = parsed_data.get("insights", [])
+        insights_for_summary = []
         
-        if isinstance(data, list):
-            for item in data:
-                if isinstance(item, dict):
-                    insight_type = item.get("insight_type", "NOTES")
-                    insight_text = item.get("insight_text", "") or item.get("insight", "") or item.get("text", "")
-                    
-                    # Use classification directly from schema (no parsing needed)
-                    classification = item.get("classification", "[~]")
-                    
-                    if insight_text:
-                        insights.append(WindowInsight(
-                            insight_type=insight_type,
-                            insight_text=insight_text,
-                            window_id=window_id,
-                            timestamp_start=window_start,
-                            timestamp_end=window_end,
-                            classification=classification
-                        ))
-        elif isinstance(data, dict):
-            # Single object with insight types
-            for key, value in data.items():
-                if key == "insights" and isinstance(value, list):
-                    for item in value:
-                        if isinstance(item, dict):
-                            insight_type = item.get("insight_type", item.get("type", "NOTES"))
-                            insight_text = item.get("insight_text", "") or item.get("insight", "") or item.get("text", "")
-                            
-                            # Use classification directly from schema (no parsing needed)
-                            classification = item.get("classification", "[~]")
-                            
-                            if insight_text:
-                                insights.append(WindowInsight(
-                                    insight_type=insight_type,
-                                    insight_text=insight_text,
-                                    window_id=window_id,
-                                    timestamp_start=window_start,
-                                    timestamp_end=window_end,
-                                    classification=classification
-                                ))
+        for item in insights_list:
+            if not isinstance(item, dict):
+                continue
+            
+            # Assign ID using system function
+            insight_id = self._window_manager._get_next_insight_id()
+            
+            # Create WindowInsight with system-assigned ID
+            insight = WindowInsight(
+                insight_id=insight_id,
+                insight_type=item.get("insight_type", "NOTES"),
+                insight_text=item.get("insight_text", ""),
+                confidence=item.get("confidence", 0.0),
+                window_id=window_id,
+                timestamp_start=window_start,
+                timestamp_end=window_end,
+                classification=item.get("classification", "~"),
+                continuation_of=item.get("continuation_of"),  # LLM references prior ID
+                correction_of=item.get("correction_of"),  # LLM references prior ID
+            )
+            
+            # Add insight to window via WindowManager
+            self._window_manager.add_insight_to_window(window_id, insight)
+            
+            # Use as_dict() for clean export to summary
+            insights_for_summary.append(insight.as_dict())
         
-        return insights
+        # Update parsed_data with assigned insight_ids
+        parsed_data["insights"] = insights_for_summary
+        return parsed_data
     
     def reset(self):
         """Reset all accumulated state."""
@@ -972,24 +1053,6 @@ class SummaryClient:
                 logger.info(f"Content type user override set to: {content_type}")
             else:
                 logger.warning(f"Invalid content type for override: {content_type}")
-    
-    def get_content_type_state(self) -> dict:
-        """
-        Get current content type state.
-        
-        Returns:
-            Dict with content_type, confidence, source, and user_override
-        """
-        effective_type = self._user_content_type_override or self._content_type_state.content_type
-        effective_source = "USER_OVERRIDE" if self._user_content_type_override else self._content_type_state.source
-        effective_confidence = 1.0 if self._user_content_type_override else self._content_type_state.confidence
-        
-        return {
-            "content_type": effective_type,
-            "confidence": effective_confidence,
-            "source": effective_source,
-            "user_override": self._user_content_type_override
-        }
     
     def get_effective_content_type(self) -> tuple[str, float, str]:
         """
@@ -1187,45 +1250,46 @@ Please analyze the transcript context above and output content type detection as
             logger.error(f"Content type detection error: {e}")
             return self._content_type_state
     
-    def _parse_content_type_response(self, content: str) -> ContentTypeState:
-        """Parse LLM response for content type detection."""
+    def _parse_content_type_response(self, content: str) -> ContentTypeDetectionSchema:
+        """
+        Parse the content type detection response from LLM.
+        
+        Args:
+            content: The raw response content from the LLM
+            
+        Returns:
+            ContentTypeDetectionSchema with parsed content type, confidence, and reasoning
+        """
         try:
             data = json.loads(content)
+            content_type_str = data.get("content_type", ContentType.UNKNOWN.value)
+            confidence = data.get("confidence", 0.0)
+            reasoning = data.get("reasoning", "No reasoning provided")
             
-            # CRITICAL: Check if data is a string (not a dict) - this would cause KeyError!
-            if isinstance(data, str):
-                # Return UNKNOWN since we can't parse this
-                return ContentTypeState(
-                    content_type=ContentType.UNKNOWN.value,
-                    confidence=0.0,
-                    source=ContentTypeSource.AUTO_DETECTED.value
-                )
-            
-            # Try direct key access first (this is where KeyError might occur)
+            # Validate content_type is a valid enum value
             try:
-                content_type = data["content_type"]
-            except KeyError:
-                content_type = ContentType.UNKNOWN.value
+                content_type = ContentType(content_type_str)
+            except ValueError:
+                logger.warning(f"Invalid content type '{content_type_str}', defaulting to UNKNOWN")
+                content_type = ContentType.UNKNOWN
             
-            confidence = float(data.get("confidence", 0.0))
-            
-        except json.JSONDecodeError:
-            content_type = ContentType.UNKNOWN.value
-            confidence = 0.0
-        except KeyError:
-            content_type = ContentType.UNKNOWN.value
-            confidence = 0.0
-        except Exception:
-            content_type = ContentType.UNKNOWN.value
-            confidence = 0.0
-        
-        # Validate content type
-        valid_types = [ct.value for ct in ContentType]
-        if content_type not in valid_types:
-            content_type = ContentType.UNKNOWN.value
-        
-        return ContentTypeState(
-            content_type=content_type,
-            confidence=confidence,
-            source=ContentTypeSource.AUTO_DETECTED.value
-        )
+            return ContentTypeDetectionSchema(
+                content_type=content_type,
+                confidence=confidence,
+                reasoning=reasoning
+            )
+        except json.JSONDecodeError as e:
+            logger.error(f"Failed to parse content type response as JSON: {e}")
+            return ContentTypeDetectionSchema(
+                content_type=ContentType.UNKNOWN,
+                confidence=0.0,
+                reasoning=f"JSON parse error: {str(e)}"
+            )
+        except Exception as e:
+            logger.error(f"Error parsing content type response: {e}")
+            return ContentTypeDetectionSchema(
+                content_type=ContentType.UNKNOWN,
+                confidence=0.0,
+                reasoning=f"Parse error: {str(e)}"
+            )
+    
