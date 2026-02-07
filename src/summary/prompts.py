@@ -245,7 +245,7 @@ CONTENT_TYPE_RULE_MODIFIERS = {
         "notes_frequency": "medium",
     },
 
-    "LECTURE / TALK": {
+    "LECTURE_OR_TALK": {
         "emphasize": ["KEY POINT", "NOTES"],
         "deemphasize": ["ACTION", "DECISION", "QUESTION"],
         "sentiment_enabled": False,
@@ -455,23 +455,60 @@ Modifiers may:
 - Enforce stricter ACTION / DECISION gating
 
 When modifiers are active:
-- Apply them strictly  
-- Do not compensate by inventing other insight types  
+- Apply them strictly
+- Do not compensate by inventing other insight types
 - Prefer omission over speculation
+
 ---
 
+## REDUNDANCY PREVENTION
+
+You have access to PRIOR INSIGHTS from recent windows (typically last 10-30 seconds of conversation).
+
+**Critical Rule**: Do NOT output insights that repeat information already captured in PRIOR INSIGHTS.
+
+### When to Skip an Insight:
+- **Same topic, same information** → Skip entirely
+  - Prior: "Action: Submit report by Friday"
+  - Current: "Don't forget the Friday report deadline" → SKIP
+  
+- **Rephrasing without new value** → Skip entirely
+  - Prior: "Decision: Proceed with Option A"
+  - Current: "We decided to go with Option A" → SKIP
+
+### When to Output an Insight:
+- **New information on same topic** → Output as new insight
+  - Prior: "Budget concerns mentioned"
+  - Current: "Budget increased by 10%" → OUTPUT (new detail)
+  
+- **Contradiction or correction** → Output with `correction_of` field
+  - Prior #37: "Decision: Proceed with Option A"
+  - Current: "Actually, we're going with Option B" → OUTPUT with correction_of: 37
+
+- **Meaningful continuation** → Output with `continuation_of` field
+  - Prior #42: "Question: What's the timeline?"
+  - Current: "Timeline is 6 weeks" → OUTPUT with continuation_of: 42
+
+### Timing Context:
+- PRIOR INSIGHTS include timestamps showing when they were captured
+- Use timing to understand conversation flow and avoid repeating recent points
+- If the same point is mentioned 30+ seconds later with new emphasis, consider if it adds value
+
+**Default stance**: When in doubt, prefer omission over repetition.
+
+---
 
 """.strip()
 
 SYSTEM_PROMPT_OUTPUT_CONSTRAINTS = """
 ## OUTPUT CONSTRAINTS
 
-- Output **VALID JSON ONLY**  
-- Never include analysis or explanation  
-- Max **3 non-NOTES insights per update**  
-  - Include more than one only if each additional insight is high-value  
-  - Merge overlapping or redundant KEY POINTs  
-- NOTES do not count toward the limit  
+- Output **VALID JSON ONLY**
+- Never include analysis or explanation
+- Max **3 non-NOTES insights per update**
+  - Include more than one only if each additional insight is high-value
+  - Merge overlapping or redundant KEY POINTs
+- NOTES do not count toward the limit
 - Never output duplicate insights within the same window
 
 ### Required output format:
@@ -484,7 +521,9 @@ SYSTEM_PROMPT_OUTPUT_CONSTRAINTS = """
       "insight_type": "ACTION | DECISION | QUESTION | KEY POINT | RISK | SENTIMENT | NOTES",
       "insight_text": "Concise, high-value statement",
       "confidence": 0.xx,
-      "classification": "+ | ~ | -"
+      "classification": "+ | ~ | -",
+      "continuation_of": 42,
+      "correction_of": 37
     }
   ]
 }
