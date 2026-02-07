@@ -231,30 +231,30 @@ If the context is insufficient, return UNKNOWN with confidence below 0.50 and ex
 CONTENT_TYPE_RULE_MODIFIERS = {
     "GENERAL_MEETING": {
         "emphasize": ["ACTION", "DECISION", "QUESTION", "RISK"],
-        "deemphasize": ["NOTES"],
+        "deemphasize": ["KEY POINT"],
         "sentiment_enabled": True,
         "action_strictness": "high",
-        "notes_frequency": "medium",
-    },
-
-    "TECHNICAL_TALK": {
-        "emphasize": ["KEY POINT", "DECISION"],
-        "deemphasize": ["ACTION", "RISK"],
-        "sentiment_enabled": False,
-        "action_strictness": "very_high",
-        "notes_frequency": "medium",
-    },
-
-    "LECTURE_OR_TALK": {
-        "emphasize": ["KEY POINT", "NOTES"],
-        "deemphasize": ["ACTION", "DECISION", "QUESTION"],
-        "sentiment_enabled": False,
-        "action_strictness": "extreme",
         "notes_frequency": "high",
     },
 
+    "TECHNICAL_TALK": {
+        "emphasize": ["DECISION", "QUESTION", "RISK"],
+        "deemphasize": ["ACTION", "RISK"],
+        "sentiment_enabled": False,
+        "action_strictness": "very_high",
+        "notes_frequency": "very_high",
+    },
+
+    "LECTURE_OR_TALK": {
+        "emphasize": ["KEY POINT"],
+        "deemphasize": ["ACTION", "DECISION", "QUESTION"],
+        "sentiment_enabled": False,
+        "action_strictness": "extreme",
+        "notes_frequency": "very_high",
+    },
+
     "INTERVIEW": {
-        "emphasize": ["KEY POINT", "QUESTION", "NOTES"],
+        "emphasize": ["KEY POINT", "QUESTION"],
         "deemphasize": ["ACTION", "DECISION"],
         "sentiment_enabled": False,
         "action_strictness": "extreme",
@@ -262,16 +262,16 @@ CONTENT_TYPE_RULE_MODIFIERS = {
     },
 
     "PODCAST": {
-        "emphasize": ["KEY POINT", "NOTES"],
+        "emphasize": ["KEY POINT"],
         "deemphasize": ["ACTION", "DECISION"],
         "sentiment_enabled": False,
         "action_strictness": "extreme",
-        "notes_frequency": "high",
+        "notes_frequency": "very_high",
     },
 
     "STREAMER_MONOLOGUE": {
-        "emphasize": ["NOTES", "KEY POINT"],
-        "deemphasize": ["ACTION", "DECISION", "QUESTION", "RISK"],
+        "emphasize": ["NOTES"],
+        "deemphasize": ["KEY POINT", "ACTION", "DECISION", "QUESTION", "RISK"],
         "sentiment_enabled": False,
         "action_strictness": "block",
         "notes_frequency": "very_high",
@@ -282,20 +282,20 @@ CONTENT_TYPE_RULE_MODIFIERS = {
         "deemphasize": ["ACTION", "DECISION", "QUESTION", "SENTIMENT"],
         "sentiment_enabled": False,
         "action_strictness": "block",
-        "notes_frequency": "low",
+        "notes_frequency": "medium",
     },
 
     "GAMEPLAY_COMMENTARY": {
         "emphasize": ["NOTES"],
-        "deemphasize": ["ACTION", "DECISION", "QUESTION", "RISK"],
+        "deemphasize": ["KEY POINT", "ACTION", "DECISION", "QUESTION", "RISK"],
         "sentiment_enabled": False,
         "action_strictness": "block",
-        "notes_frequency": "high",
+        "notes_frequency": "very_high",
     },
 
     "CUSTOMER_SUPPORT": {
         "emphasize": ["ACTION", "QUESTION", "DECISION", "RISK"],
-        "deemphasize": ["NOTES"],
+        "deemphasize": ["KEY POINT", "NOTES"],
         "sentiment_enabled": True,
         "action_strictness": "high",
         "notes_frequency": "low",
@@ -303,7 +303,7 @@ CONTENT_TYPE_RULE_MODIFIERS = {
 
     "DEBATE": {
         "emphasize": ["DECISION", "QUESTION", "RISK"],
-        "deemphasize": ["ACTION", "NOTES"],
+        "deemphasize": ["ACTION", "KEY POINT", "NOTES"],
         "sentiment_enabled": False,
         "action_strictness": "very_high",
         "notes_frequency": "low",
@@ -345,43 +345,68 @@ Focus on what in the Prior Context and Current Window led to the insights, and w
 
 Extract insights using the following hierarchy. Choose the MOST SPECIFIC category. Never duplicate the same information across types. Merge overlapping or related points into a single concise insight whenever possible.
 
-1. **ACTION**  
-   Concrete next steps with clear intent. Include deadlines, owners, dependencies, or consequences when stated.  
-   - Example: “Buy X by Friday”  
+1. **ACTION**
+   Concrete next steps with clear intent. Include deadlines, owners, dependencies, or consequences when stated.
+   - Example: "Buy X by Friday"
    - If owner or deadline is missing but implied, note uncertainty in confidence.
 
-2. **DECISION**  
-   Final or conditional commitments, approvals, or rejections that change outcomes.  
-   - Example: “We’ll proceed with Plan B.”
+2. **DECISION**
+   Final or conditional commitments, approvals, or rejections that change outcomes.
+   - Example: "We'll proceed with Plan B."
 
-3. **QUESTION**  
-   Blocking or critical unknowns that prevent progress and require resolution.  
+3. **QUESTION**
+   Blocking or critical unknowns that prevent progress and require resolution.
    - Must be actionable or decision-blocking (not casual curiosity).
-   - Example: “What’s the budget for this project?”
+   - Example: "What's the budget for this project?"
    - If the question is rhetorical or answered immediately, do NOT log it.
-   
-4. **KEY POINT**  
-   Essential factual or quantitative information needed for record-keeping, comparison, or understanding.  
-   - Merge multiple related facts into a single high-value point when possible.  
-   - Focus on insights that reflect implications, trends, or high-level meaning rather than every isolated statistic.  
-   - Example: Combine “AI deployment success rate is 5%” and “Company aims to solve high-value problems” into:  
-     “AI deployments are largely low-value (5% success); company targets high-value problems.”
 
-5. **RISK**  
+4. **KEY POINT**
+   Essential information that materially affects understanding, decisions, or outcomes.
+   - Critical facts needed for decision-making or record-keeping
+   - Concepts, findings, or conclusions that would change how someone understands or acts
+   - Examples: "The project deadline is next Friday", "Revenue increased 40% YoY", "Customer churn is the primary concern"
+   - NOT: minor statistics, isolated facts, contextual details, or information that doesn't advance understanding
+
+5. **RISK**
    Time-bound or blocking threats that could derail a committed ACTION or DECISION.
 
-6. **SENTIMENT**  
-   Detect only when participants’ emotional tone meaningfully shifts or impacts direction.  
+6. **SENTIMENT**
+   Detect only when participants' emotional tone meaningfully shifts or impacts direction.
    - Track pivots or escalation/de-escalation when relevant.
 
-7. **NOTES**  
-   A running contextual log to preserve continuity:  
-   - topic changes  
-   - speaker identification  
-   - background context  
-   - non-actionable but informative statements  
+7. **NOTES**
+   A running contextual log for continuity and minor details:
+   - topic changes
+   - speaker identification
+   - background context
+   - isolated facts, statistics, or details without standalone significance
+   - minor details that provide context but don't warrant KEY POINT classification
+   - non-actionable but informative statements
 
-NOTES may coexist with other insight types, but no other insight may be duplicated in the same window.
+   NOTES may coexist with other insight types, but no other insight may be duplicated in the same window.
+
+---
+
+### KEY POINT vs NOTES Decision Guide
+
+Use these examples to classify borderline cases:
+
+| Example | Classification | Reasoning |
+|---------|----------------|-----------|
+| "The team has 5 members" | NOTES | Isolated fact without context or implications |
+| "This is the 3rd meeting this week" | NOTES | Contextual detail, not decision-impacting |
+| "The deadline is next Friday" | KEY POINT | Critical for decision-making and action planning |
+| "Revenue increased 40% YoY" | KEY POINT | Significant metric that affects understanding |
+| "We have 5 team members working on this" | NOTES | Contextual detail unless team size is decision-relevant |
+| "The meeting lasted 45 minutes" | NOTES | Isolated fact, no implications |
+| "Customer churn dropped from 10% to 5%" | KEY POINT | Significant trend/change in metrics |
+| "This is the third time we've discussed this" | NOTES | Contextual continuity marker |
+| "Budget is $50,000" | KEY POINT | Critical fact for decision-making |
+| "There were 15 attendees" | NOTES | Isolated fact without significance |
+| "The system processes 10,000 requests/day" | KEY POINT | Significant operational metric |
+| "We started this project in Q1" | NOTES | Background context, not decision-impacting |
+| "The error rate is below 1%" | KEY POINT | Significant quality metric |
+| "Chat was active today" | NOTES | Contextual observation, no implications |
 
 ---
 
