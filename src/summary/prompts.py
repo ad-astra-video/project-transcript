@@ -21,7 +21,7 @@ Transcript Text (Last {context_length} characters):
 1. Speaker interaction is the strongest signal.
    - How speakers interact matters more than what they believe.
 2. Debate requires active opposition.
-   - Debate is ONLY valid when speakers directly challenge each other’s positions.
+   - Debate is ONLY valid when speakers directly challenge each other's positions.
 3. Explanatory or reflective speech is not adversarial.
    - Solo explanations, career stories, or opinionated monologues are informational.
 4. Interviews are non-adversarial by default.
@@ -44,7 +44,7 @@ Key Signals:
 - Action items, planning, or status updates
 
 Common Language:
-"Quick update", "Next steps", "Let’s circle back", "Before we wrap up"
+"Quick update", "Next steps", "Let's circle back", "Before we wrap up"
 
 ---
 
@@ -107,7 +107,7 @@ Key Signals:
 - Introductions, transitions, or segments
 
 Common Language:
-"Welcome back", "Our guest today", "Let’s dive into"
+"Welcome back", "Our guest today", "Let's dive into"
 
 ---
 
@@ -187,11 +187,11 @@ ALL of the following MUST be true:
 Automatic Disqualifiers:
 - Single speaker expressing opinions
 - Interview-style Q&A without adversarial pushback
-- Speakers generally agree or build on each other’s views
+- Speakers generally agree or build on each other's views
 - Informational, educational, or reflective content
 
 Valid Language (only with opposition):
-"I disagree", "That’s incorrect", "Your argument assumes…"
+"I disagree", "That's incorrect", "Your argument assumes…"
 
 ---
 
@@ -233,40 +233,44 @@ CONTENT_TYPE_RULE_MODIFIERS = {
         "emphasize": ["ACTION", "DECISION", "QUESTION", "RISK"],
         "deemphasize": ["KEY POINT"],
         "sentiment_enabled": True,
-        "action_strictness": "high",
-        "notes_frequency": "high",
+        "action_strictness": "very_high",
+        "notes_frequency": "medium",
     },
 
     "TECHNICAL_TALK": {
-        "emphasize": ["DECISION", "QUESTION", "RISK"],
-        "deemphasize": ["ACTION", "RISK"],
-        "sentiment_enabled": False,
-        "action_strictness": "very_high",
-        "notes_frequency": "very_high",
-    },
-
-    "LECTURE_OR_TALK": {
-        "emphasize": ["KEY POINT"],
-        "deemphasize": ["ACTION", "DECISION", "QUESTION"],
-        "sentiment_enabled": False,
-        "action_strictness": "extreme",
-        "notes_frequency": "very_high",
-    },
-
-    "INTERVIEW": {
-        "emphasize": ["KEY POINT", "QUESTION"],
-        "deemphasize": ["ACTION", "DECISION"],
+        "emphasize": ["NOTES", "QUESTION", "RISK"],
+        "deemphasize": ["ACTION", "KEY POINT"],
         "sentiment_enabled": False,
         "action_strictness": "extreme",
         "notes_frequency": "high",
+        "key_point_guidance": "Only for empirical results, specific thresholds, or counter-intuitive findings. Most technical explanations should be NOTES.",
+    },
+
+    "LECTURE_OR_TALK": {
+        "emphasize": ["NOTES"],
+        "deemphasize": ["ACTION", "DECISION", "QUESTION", "KEY POINT"],
+        "sentiment_enabled": False,
+        "action_strictness": "block",
+        "notes_frequency": "medium",
+        "key_point_guidance": "Only for empirical results, specific thresholds, or counter-intuitive findings. Lectures are primarily explanatory - most content should be NOTES.",
+    },
+
+    "INTERVIEW": {
+        "emphasize": ["NOTES", "QUESTION"],
+        "deemphasize": ["ACTION", "DECISION", "KEY POINT"],
+        "sentiment_enabled": False,
+        "action_strictness": "extreme",
+        "notes_frequency": "high",
+        "key_point_guidance": "Only for pivotal career moments, controversial insights, or significant revelations. Most interview content should be NOTES.",
     },
 
     "PODCAST": {
-        "emphasize": ["KEY POINT"],
-        "deemphasize": ["ACTION", "DECISION"],
+        "emphasize": ["NOTES"],
+        "deemphasize": ["ACTION", "DECISION", "KEY POINT"],
         "sentiment_enabled": False,
         "action_strictness": "extreme",
-        "notes_frequency": "very_high",
+        "notes_frequency": "high",
+        "key_point_guidance": "Only for surprising revelations, unexpected connections, or controversial takes. Most podcast discussion should be NOTES.",
     },
 
     "STREAMER_MONOLOGUE": {
@@ -274,7 +278,7 @@ CONTENT_TYPE_RULE_MODIFIERS = {
         "deemphasize": ["KEY POINT", "ACTION", "DECISION", "QUESTION", "RISK"],
         "sentiment_enabled": False,
         "action_strictness": "block",
-        "notes_frequency": "very_high",
+        "notes_frequency": "low",
     },
 
     "NEWS_UPDATE": {
@@ -330,6 +334,8 @@ You receive continuous, imperfect speech-to-text output that may include:
 
 Your job is to continuously extract only the most critical insights with minimal latency, prioritizing **high-value, actionable intelligence** over completeness, while preserving continuity across the stream.
 
+**CRITICAL**: If nothing meaningful is said in the current window, output an empty insights array. Prefer silence over noise. Only extract when there is genuine value to report.
+
 You operate incrementally. Each response reflects ONLY what materially changed since the Prior Context.
 
 ---
@@ -343,45 +349,123 @@ Focus on what in the Prior Context and Current Window led to the insights, and w
 
 ## CORE INSIGHT TYPES (PRIORITY ORDER)
 
-Extract insights using the following hierarchy. Choose the MOST SPECIFIC category. Never duplicate the same information across types. Merge overlapping or related points into a single concise insight whenever possible.
+Extract insights using the following hierarchy. Choose the MOST SPECIFIC category. **If nothing qualifies, output an empty insights array.** Never duplicate the same information across types. Merge overlapping or related points into a single concise insight whenever possible.
 
 1. **ACTION**
    Concrete next steps with clear intent. Include deadlines, owners, dependencies, or consequences when stated.
    - Example: "Buy X by Friday"
    - If owner or deadline is missing but implied, note uncertainty in confidence.
+   - **If no clear action is stated, output nothing.**
 
 2. **DECISION**
    Final or conditional commitments, approvals, or rejections that change outcomes.
    - Example: "We'll proceed with Plan B."
+   - **If no clear decision is stated, output nothing.**
 
 3. **QUESTION**
    Blocking or critical unknowns that prevent progress and require resolution.
    - Must be actionable or decision-blocking (not casual curiosity).
    - Example: "What's the budget for this project?"
    - If the question is rhetorical or answered immediately, do NOT log it.
+   - **If no blocking question is asked, output nothing.**
 
-4. **KEY POINT**
-   Essential information that materially affects understanding, decisions, or outcomes.
-   - Critical facts needed for decision-making or record-keeping
-   - Concepts, findings, or conclusions that would change how someone understands or acts
-   - Examples: "The project deadline is next Friday", "Revenue increased 40% YoY", "Customer churn is the primary concern"
-   - NOT: minor statistics, isolated facts, contextual details, or information that doesn't advance understanding
+4. **KEY POINT** - Breakthrough-Level Insights Only
+
+KEY POINT captures ONLY the most critical information that represents a fundamental breakthrough, paradigm shift, or high-stakes fact. This is the highest bar for classification.
+
+### PRIMARY FILTER: Explanation vs Discovery
+
+**Ask FIRST: "Is the speaker EXPLAINING their framework/thesis, or REPORTING a specific finding/result?"**
+
+**EXPLAINING (→ NOTES):**
+- "REPL architecture resolves context degradation" (thesis statement)
+- "Multi-hop reasoning is critical for legal contracts" (framework explanation)
+- "Context window size is only half the story" (conceptual claim)
+- "Task complexity is the primary driver" (theoretical claim)
+- "RAG retrieves documents via semantic similarity" (mechanism explanation)
+
+**REPORTING (→ KEY POINT):**
+- "We tested 1000 contracts and found 95% accuracy" (empirical result)
+- "The system fails above 10,000 requests/second" (specific threshold)
+- "Recursion depth above 5 causes catastrophic failure" (specific failure condition)
+- "The bug only manifests when all three conditions are true" (specific discovery)
+- "Context degradation increases 10x at 500K tokens" (quantitative finding)
+
+**Rule**: If the speaker is teaching/explaining their ideas, it's NOTES. If they're reporting measurements, thresholds, or unexpected findings, it's KEY POINT.
+
+### Threshold Criteria - TWO OR MORE must be true (AFTER passing PRIMARY FILTER):
+
+1. **Paradigm Impact**: Would change how experts think about this domain?
+2. **Decision Gravity**: Would this single fact determine a major decision?
+3. **Novelty Level**: Is this new, surprising, or counter-intuitive?
+4. **Stakes Clarity**: Is being wrong about this fact have significant consequences?
+
+### Synthesis Rule (Within-Window)
+
+When multiple insights express the same core idea **in the same window**, output ONE KEY POINT that synthesizes them, not multiple separate KEY POINTs.
+
+**Example of WRONG output:**
+- "Task complexity is the primary driver" (2:15)
+- "Task complexity is the primary driver" (2:57)
+- "Task complexity is the primary driver" (3:54)
+- "Task complexity is the primary driver" (4:12)
+
+**Example of CORRECT output:**
+- "Task complexity is the primary driver of context window limitations, not just context window size" (single synthesis)
+
+### Cross-Window Deduplication Rule
+
+Before outputting a KEY POINT, check if a semantically similar KEY POINT was output in PRIOR INSIGHTS (last 2-5 minutes).
+
+**If similar:**
+- Skip if pure repetition with no new information
+- Output as NOTES with `continuation_of` if adding minor detail
+- Only output as KEY POINT if fundamentally new aspect or quantitative finding
+
+**Example:**
+- Window 1: "REPL architecture resolves context degradation" → KEY POINT
+- Window 2: "REPL enables direct interaction" → NOTES (continuation_of Window 1)
+- Window 3: "REPL reduces context by 10x vs summarization" → KEY POINT (new quantitative aspect)
+
+### What NEVER Qualifies as KEY POINT:
+- Standard explanations or how things work
+- Speaker's thesis or framework being explained
+- Common knowledge in the field
+- Incremental improvements or routine updates
+- Contextual details that support understanding
+- Information that would be covered in a basic tutorial
+- Repetition of the same point across multiple windows
+
+### What QUALIFIES as KEY POINT:
+- "This approach fails above 10,000 requests/second"
+- "The bug only manifests when all three conditions are true"
+- "We discovered the memory leak is in the third-party library"
+- "The new algorithm reduces latency by 60%"
+- "This pattern indicates a security vulnerability"
+- "Task complexity is the primary driver of context window limitations"
+- "Context degradation is task-specific, occurring at specific saturation levels with severity increasing non-linearly"
 
 5. **RISK**
    Time-bound or blocking threats that could derail a committed ACTION or DECISION.
+   - **If no clear risk is identified, output nothing.**
 
 6. **SENTIMENT**
    Detect only when participants' emotional tone meaningfully shifts or impacts direction.
    - Track pivots or escalation/de-escalation when relevant.
+   - **If no meaningful sentiment shift occurs, output nothing.**
 
-7. **NOTES**
-   A running contextual log for continuity and minor details:
+7. **NOTES** - The Only Exception for Continuity
+   A running contextual log for continuity and minor details. This is the ONLY insight type that may be output when no other insights exist.
+
+   Use NOTES for:
    - topic changes
    - speaker identification
    - background context
    - isolated facts, statistics, or details without standalone significance
    - minor details that provide context but don't warrant KEY POINT classification
    - non-actionable but informative statements
+
+   **Output NOTES only when they provide genuine continuity value. Do not output NOTES just to have output.**
 
    NOTES may coexist with other insight types, but no other insight may be duplicated in the same window.
 
@@ -390,6 +474,8 @@ Extract insights using the following hierarchy. Choose the MOST SPECIFIC categor
 ### KEY POINT vs NOTES Decision Guide
 
 Use these examples to classify borderline cases:
+
+#### General Examples
 
 | Example | Classification | Reasoning |
 |---------|----------------|-----------|
@@ -408,31 +494,82 @@ Use these examples to classify borderline cases:
 | "The error rate is below 1%" | KEY POINT | Significant quality metric |
 | "Chat was active today" | NOTES | Contextual observation, no implications |
 
+#### Technical Content Examples
+
+| Example | Classification | Reasoning |
+|---------|----------------|-----------|
+| "REPL architecture resolves context degradation" | NOTES | Explains speaker's thesis |
+| "REPL uses read-evaluate-print loops" | NOTES | Explains mechanism |
+| "Context window size is only half the story" | NOTES | Explanation of concept |
+| "Task complexity is the primary driver" | NOTES | Explains speaker's framework |
+| "Multi-hop reasoning is critical for recursive tasks" | NOTES | Explains how something works |
+| "Clauses referencing other clauses create recursive complexity" | NOTES | Explains mechanism |
+| "Context degradation is task-specific" | NOTES | Explains characteristic |
+| "RAG retrieves documents via semantic similarity" | NOTES | Explains how RAG works |
+| "The API endpoint is /api/v1/users" | NOTES | Standard reference information |
+| "Authentication requires a Bearer token" | NOTES | Common configuration detail |
+| "We use a retry with exponential backoff" | NOTES | Standard pattern, no breakthrough |
+| "Setting pool_size to 20 is recommended" | NOTES | Configuration advice, not breakthrough |
+| "The library handles JSON serialization automatically" | NOTES | Standard functionality |
+| "The function takes a string parameter and returns a boolean" | NOTES | Basic API documentation |
+| "REPL reduces context by 10x vs summarization" | KEY POINT | Quantitative finding with comparison |
+| "We tested 1000 contracts and found 95% accuracy" | KEY POINT | Empirical result |
+| "The system fails above 10,000 concurrent connections" | KEY POINT | Critical threshold that limits the system |
+| "The memory leak was traced to an unclosed database connection" | KEY POINT | Critical bug discovery |
+| "At 500ms latency, user experience degrades significantly" | KEY POINT | Critical performance threshold |
+| "A race condition exists when two requests arrive simultaneously" | KEY POINT | Critical vulnerability identification |
+| "Recursion depth above 5 causes catastrophic failure" | KEY POINT | Specific failure condition |
+
+#### Repetition Detection Examples
+
+**Within-Window Repetition (WRONG):**
+- "Task complexity is the primary driver" (2:15)
+- "Task complexity is the primary driver" (2:57)
+- "Task complexity is the primary driver" (3:54)
+
+**Within-Window Synthesis (CORRECT):**
+- "Task complexity is the primary driver of context window limitations" (single NOTES)
+
+**Cross-Window Repetition (WRONG):**
+- Window 1: "REPL architecture resolves context degradation" → KEY POINT
+- Window 2: "REPL architecture resolves context degradation" → KEY POINT (DUPLICATE)
+- Window 3: "REPL fundamentally resolves context degradation" → KEY POINT (PARAPHRASE)
+- Window 4: "REPL resolves multidimensional context degradation" → KEY POINT (PARAPHRASE)
+
+**Cross-Window Deduplication (CORRECT):**
+- Window 1: "REPL architecture resolves context degradation" → NOTES (explains thesis)
+- Window 2: "REPL enables direct interaction" → NOTES (continuation_of Window 1)
+- Window 3: "REPL reduces context by 10x vs summarization" → KEY POINT (new quantitative finding)
+- Window 4: "We tested REPL on 1000 contracts, 95% accuracy" → KEY POINT (empirical result)
+
 ---
 
 ## REAL-TIME OPERATING RULES
 
-- **High-Value Focus**  
-  Produce **1–3 insights per window**. Include more than one only if each additional insight is materially valuable. Merge redundant or overlapping points into a single insight.
+- **Zero-Output is Valid**
+  If nothing meaningful is said, output an empty insights array. Do not manufacture insights to fill output. Silence is preferable to noise.
 
-- **Stream Continuity First**  
+- **High-Value Focus**
+  Produce **0–3 insights per window**. Only output when genuine value exists. One meaningful insight is better than three trivial ones.
+
+- **Stream Continuity First**
   Assume missing or reordered context. Reconcile with prior windows when possible.
 
-- **Update > Guess**  
-  If new information contradicts prior insights, invalidate and update immediately.  
+- **Update > Guess**
+  If new information contradicts prior insights, invalidate and update immediately.
   Never preserve outdated conclusions.
 
-- **Atomic Output**  
-  Output only net-new or materially changed insights.  
+- **Atomic Output**
+  Output only net-new or materially changed insights.
   Never summarize the entire conversation.
 
-- **Noise Handling**  
+- **Noise Handling**
   Ignore filler, repetition, or verbal ticks unless repetition signals urgency or emphasis.
 
-- **Speaker Awareness**  
+- **Speaker Awareness**
   Attribute insights to speakers when identifiable, without breaking flow.
 
-- **No Fabrication**  
+- **No Fabrication**
   Do NOT invent names, numbers, intent, or structure that is not present.
 
 ---
@@ -488,9 +625,14 @@ When modifiers are active:
 
 ## REDUNDANCY PREVENTION
 
-You have access to PRIOR INSIGHTS from recent windows (typically last 10-30 seconds of conversation).
+You have access to PRIOR INSIGHTS from recent windows (typically last 2-5 minutes of conversation).
 
 **Critical Rule**: Do NOT output insights that repeat information already captured in PRIOR INSIGHTS.
+
+**Zero-Output Validation**:
+Before outputting any insight, ask: "Is this genuinely new and valuable?"
+- If no → Output empty insights array
+- If yes → Proceed with extraction
 
 ### When to Skip an Insight:
 - **Same topic, same information** → Skip entirely
@@ -500,6 +642,11 @@ You have access to PRIOR INSIGHTS from recent windows (typically last 10-30 seco
 - **Rephrasing without new value** → Skip entirely
   - Prior: "Decision: Proceed with Option A"
   - Current: "We decided to go with Option A" → SKIP
+
+- **Repetition of speaker's thesis/framework** → Skip entirely
+  - Prior: "REPL architecture resolves context degradation"
+  - Current: "REPL fundamentally resolves context degradation" → SKIP (paraphrase)
+  - Current: "REPL resolves multidimensional context degradation" → SKIP (paraphrase)
 
 ### When to Output an Insight:
 - **New information on same topic** → Output as new insight
@@ -514,12 +661,24 @@ You have access to PRIOR INSIGHTS from recent windows (typically last 10-30 seco
   - Prior #42: "Question: What's the timeline?"
   - Current: "Timeline is 6 weeks" → OUTPUT with continuation_of: 42
 
+- **Quantitative or empirical finding on same topic** → Output as KEY POINT
+  - Prior: "REPL architecture resolves context degradation" (NOTES)
+  - Current: "REPL reduces context by 10x vs summarization" → OUTPUT (quantitative finding)
+  - Current: "We tested REPL on 1000 contracts, 95% accuracy" → OUTPUT (empirical result)
+
+### Semantic Similarity Check:
+- Before outputting a KEY POINT, check if PRIOR INSIGHTS contain semantically similar KEY POINTs
+- Paraphrasing the same idea does NOT make it a new KEY POINT
+- Require 70%+ semantic difference for a new KEY POINT on the same topic
+- If adding minor detail to existing KEY POINT, use NOTES with `continuation_of`
+
 ### Timing Context:
 - PRIOR INSIGHTS include timestamps showing when they were captured
 - Use timing to understand conversation flow and avoid repeating recent points
-- If the same point is mentioned 30+ seconds later with new emphasis, consider if it adds value
+- If the same point is mentioned 30+ seconds later with new emphasis, it's still repetition unless new information is added
+- In lectures/talks, speakers often repeat their thesis multiple times - this should be NOTES or skipped, not multiple KEY POINTs
 
-**Default stance**: When in doubt, prefer omission over repetition.
+**Default stance**: When in doubt, prefer omission over repetition. Lectures and talks are explanatory by nature - most content should be NOTES.
 
 ---
 
@@ -530,6 +689,7 @@ SYSTEM_PROMPT_OUTPUT_CONSTRAINTS = """
 
 - Output **VALID JSON ONLY**
 - Never include analysis or explanation
+- **Empty insights array is valid and expected** when nothing meaningful is said
 - Max **3 non-NOTES insights per update**
   - Include more than one only if each additional insight is high-value
   - Merge overlapping or redundant KEY POINTs
