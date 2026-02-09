@@ -385,15 +385,15 @@ async def _summary_worker():
                 
                 # Run content type detection on skipped window
                 try:
-                    logger.info(f"Running content type detection for window {window_id}")
+                    logger.debug(f"Running content type detection for window {window_id}")
                     previous_content_type = STATE.summary_client._content_type_state.content_type
                     result = await STATE.summary_client.process_content_type_detection(
                         window_id, window_start_ts, window_end_ts
                     )
-                    logger.info(f"Content type detection result: {result}")
+                    logger.debug(f"Content type detection result: {result}")
                     if result:
                         # Content type detected - add to results for sending
-                        logger.info(f"Previous content type: '{previous_content_type}', New: '{result.content_type}'")
+                        logger.debug(f"Previous content type: '{previous_content_type}', New: '{result.content_type}'")
                         if result.content_type != previous_content_type:
                             logger.info(f"Content type CHANGED - sending message: '{previous_content_type}' -> '{result.content_type}'")
                             add_content_type_detection_to_results(
@@ -403,10 +403,10 @@ async def _summary_worker():
                                 previous_content_type=previous_content_type
                             )
                         else:
-                            logger.info(f"Content type UNCHANGED - not sending message")
+                            logger.debug(f"Content type UNCHANGED - not sending message")
                     else:
-                        logger.info(f"No content type result - user override active or detection skipped")
-                    logger.info(f"Content type detection completed for skipped window {STATE.summary_client.summary_window_count}")
+                        logger.debug(f"No content type result - user override active or detection skipped")
+                    logger.debug(f"Content type detection completed for skipped window {STATE.summary_client.summary_window_count}")
                 except Exception as e:
                     logger.error(f"Content type detection failed on skipped window: {e}")
                 
