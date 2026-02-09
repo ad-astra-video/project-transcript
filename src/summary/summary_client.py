@@ -46,8 +46,10 @@ class WindowInsight:
     #   this is used for sending over json data channel which includes timing for all insights sent
     def as_dict(self) -> Dict[str, Any]:
         """Export as dictionary for JSON serialization."""
+        # Format insight_id as summary_window_id_insight_id for clear traceability
+        formatted_insight_id = f"{self.window_id}_{self.insight_id}"
         return {
-            "insight_id": self.insight_id,
+            "insight_id": formatted_insight_id,
             "insight_type": self.insight_type,
             "insight_text": self.insight_text,
             "confidence": self.confidence,
