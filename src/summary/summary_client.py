@@ -109,6 +109,7 @@ class ContentTypeState:
     source: str = ContentTypeSource.INITIAL.value
     last_detection_text: str = ""  # Last N chars used for detection
     context_length: int = 2000  # Current context length for detection
+    sentiment_enabled: bool = False  # Whether sentiment tracking is enabled for this content type
 
 class ContentTypeDetectionSchema(BaseModel):
     """Schema for content type detection response."""
@@ -143,7 +144,7 @@ class SummaryWindow:
 class WindowManager:
     """Manages summary windows and their text/insights."""
     
-    def __init__(self, max_chars: int = 5000, windows_to_accumulate: int = 2):
+    def __init__(self, max_chars: int = 50000, windows_to_accumulate: int = 2):
         self._windows: List[SummaryWindow] = []  # Ordered oldest -> newest
         self._char_count: int = 0
         self._next_window_id: int = 0
@@ -343,7 +344,7 @@ class SummaryClient:
         temperature: float = 0.1,
         system_prompt: str = SYSTEM_PROMPT,
         windows_to_accumulate: int = 2,
-        initial_summary_delay_seconds: float = 30.0
+        initial_summary_delay_seconds: float = 10.0
     ):
         """
         Initialize the summary client.
@@ -357,7 +358,7 @@ class SummaryClient:
             temperature: Temperature for generation
             system_prompt: System prompt for the LLM
             windows_to_accumulate: Number of windows to exclude from accumulated text (default: 2)
-            initial_summary_delay_seconds: Seconds to wait before first summary (default: 30.0)
+            initial_summary_delay_seconds: Seconds to wait before first summary (default: 10.0)
         """
         self.base_url = base_url.rstrip("/")
         self.api_key = api_key
@@ -536,7 +537,7 @@ class SummaryClient:
             system_prompt: New system prompt
             message_format_mode: New message format mode
             windows_to_accumulate: New number of windows to accumulate for context
-            initial_summary_delay_seconds: New delay before first summary (default: 30.0)
+            initial_summary_delay_seconds: New delay before first summary (default: 10.0)
         """
         if base_url is not None:
             self.base_url = base_url.rstrip("/")
@@ -683,6 +684,22 @@ class SummaryClient:
         
         rules = CONTENT_TYPE_RULE_MODIFIERS[content_type]
         
+        # Build RISK guidance section if present
+        risk_guidance = rules.get("risk_guidance", "")
+        risk_section = ""
+        if risk_guidance:
+            risk_section = f"""
+### RISK Definition (Content-Type-Specific):
+{risk_guidance}"""
+        
+        # Build KEY POINT guidance section if present
+        key_point_guidance = rules.get("key_point_guidance", "")
+        key_point_section = ""
+        if key_point_guidance:
+            key_point_section = f"""
+### KEY POINT Guidance:
+{key_point_guidance}"""
+        
         # Format the rules into a clear, actionable prompt section
         formatted = f"""
 
@@ -693,6 +710,10 @@ class SummaryClient:
 
 ### Suppressed Insight Types (Deemphasize):
 {chr(10).join(f'- {t}' for t in rules["deemphasize"])}
+
+{risk_section}
+
+{key_point_section}
 
 ### Processing Guidelines:
 - Sentiment Tracking: {"ENABLED" if rules["sentiment_enabled"] else "DISABLED"}
@@ -747,7 +768,6 @@ class SummaryClient:
                 combined_system += f"\n\n## PRIOR CONTEXT\nThe following context is from previous transcript windows. Use it for understanding references only. Do not extract new insights from this context unless the current window transcript provides new information that builds on or contradicts it.\n\n{context}"
             
             combined_system += "\n\nAnalyze the following current window transcript text and report only new or changed insights since the previous context.:"
-
             messages.append({"role": "system", "content": combined_system})
             messages.append({"role": "user", "content": user_content})
         
@@ -971,9 +991,10 @@ class SummaryClient:
     ) -> Dict:
         """
         Extract insights from parsed JSON data, assign IDs, and insert into parsed_data.
+        Filters out SENTIMENT insights when sentiment_enabled is False for the content type.
         
         Args:
-            parsed_data: Parsed JSON data from LLM response
+            parsed_data: Parsed JSON data from LLM response (dict with "insights" key or list)
             window_id: The window these insights belong to
             window_start: Start timestamp of the window
             window_end: End timestamp of the window
@@ -984,13 +1005,33 @@ class SummaryClient:
         if not parsed_data:
             return parsed_data
         
-        # Get the insights list from parsed_data
-        insights_list = parsed_data.get("insights", [])
+        # Handle both dict with "insights" key and list format
+        if isinstance(parsed_data, list):
+            # List format: insights are the list items themselves
+            insights_list = parsed_data
+            is_list_format = True
+        else:
+            # Dict format: insights are in "insights" key
+            insights_list = parsed_data.get("insights", [])
+            is_list_format = False
+        
+        # Check if sentiment is enabled for current content type
+        sentiment_enabled = self.is_sentiment_enabled()
+        
         insights_for_summary = []
         
         for item in insights_list:
             if not isinstance(item, dict):
                 continue
+            
+            # Check if this is a SENTIMENT insight that should be filtered
+            insight_type = item.get("insight_type", "")
+            if insight_type == InsightType.SENTIMENT.value and not sentiment_enabled:
+                logger.debug(
+                    f"Filtering SENTIMENT insight for content type with sentiment_enabled=False: "
+                    f"{item.get('insight_text', '')[:50]}..."
+                )
+                continue  # Skip this insight
             
             # Assign ID using system function
             insight_id = self._window_manager._get_next_insight_id()
@@ -1021,8 +1062,13 @@ class SummaryClient:
             insights_for_summary.append(insight.as_dict())
         
         # Update parsed_data with assigned insight_ids
-        parsed_data["insights"] = insights_for_summary
-        return parsed_data
+        if is_list_format:
+            # Return list format
+            return insights_for_summary
+        else:
+            # Return dict format
+            parsed_data["insights"] = insights_for_summary
+            return parsed_data
     
     def reset(self):
         """Reset all accumulated state."""
@@ -1052,12 +1098,18 @@ class SummaryClient:
             logger.warning(f"Invalid content type: {content_type}")
             return
         
+        # Get sentiment_enabled from rules
+        sentiment_enabled = False
+        if content_type in CONTENT_TYPE_RULE_MODIFIERS:
+            sentiment_enabled = CONTENT_TYPE_RULE_MODIFIERS[content_type].get("sentiment_enabled", False)
+        
         self._content_type_state = ContentTypeState(
             content_type=content_type,
             confidence=confidence,
-            source=source
+            source=source,
+            sentiment_enabled=sentiment_enabled
         )
-        logger.info(f"Content type set to: {content_type} (source: {source}, confidence: {confidence:.2f})")
+        logger.info(f"Content type set to: {content_type} (source: {source}, confidence: {confidence:.2f}, sentiment_enabled={sentiment_enabled})")
     
     def set_content_type_override(self, content_type: Optional[str]):
         """
@@ -1094,6 +1146,15 @@ class SummaryClient:
             self._content_type_state.confidence,
             self._content_type_state.source
         )
+    
+    def is_sentiment_enabled(self) -> bool:
+        """
+        Check if sentiment tracking is enabled for the current content type.
+        
+        Returns:
+            True if sentiment insights should be included, False otherwise
+        """
+        return self._content_type_state.sentiment_enabled
     
     def add_in_flight_window(self, window_id: int):
         """Add window ID to in-flight tracking."""
@@ -1256,16 +1317,22 @@ Please analyze the transcript context above and output content type detection as
                         logger.info(f"Increasing context length to {new_context_length} for next run")
                     context_length = new_context_length
                 
-                # Update state with new context length
+                # Get sentiment_enabled from rules
+                sentiment_enabled = False
+                if result.content_type in CONTENT_TYPE_RULE_MODIFIERS:
+                    sentiment_enabled = CONTENT_TYPE_RULE_MODIFIERS[result.content_type].get("sentiment_enabled", False)
+                
+                # Update state with new context length and sentiment_enabled
                 self._content_type_state = ContentTypeState(
                     content_type=result.content_type,
                     confidence=result.confidence,
                     source=ContentTypeSource.AUTO_DETECTED.value,
                     last_detection_text=context_to_use,
-                    context_length=context_length
+                    context_length=context_length,
+                    sentiment_enabled=sentiment_enabled
                 )
                 
-                logger.info(f"Content type detected: {result.content_type} (confidence: {result.confidence:.2f})")
+                logger.info(f"Content type detected: {result.content_type} (confidence: {result.confidence:.2f}, sentiment_enabled={sentiment_enabled})")
                 
                 return self._content_type_state
             

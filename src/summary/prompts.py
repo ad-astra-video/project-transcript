@@ -235,6 +235,7 @@ CONTENT_TYPE_RULE_MODIFIERS = {
         "sentiment_enabled": True,
         "action_strictness": "very_high",
         "notes_frequency": "medium",
+        "risk_guidance": "Focus on project blockers, timeline risks, and resource constraints that could derail committed actions or decisions.",
     },
 
     "TECHNICAL_TALK": {
@@ -244,6 +245,7 @@ CONTENT_TYPE_RULE_MODIFIERS = {
         "action_strictness": "extreme",
         "notes_frequency": "high",
         "key_point_guidance": "Only for empirical results, specific thresholds, or counter-intuitive findings. Most technical explanations should be NOTES.",
+        "risk_guidance": "Focus on technical issues, bugs, failures, or limitations that could impact system behavior or development progress.",
     },
 
     "LECTURE_OR_TALK": {
@@ -253,6 +255,7 @@ CONTENT_TYPE_RULE_MODIFIERS = {
         "action_strictness": "block",
         "notes_frequency": "medium",
         "key_point_guidance": "Only for empirical results, specific thresholds, or counter-intuitive findings. Lectures are primarily explanatory - most content should be NOTES.",
+        "risk_guidance": "Focus on potential misconceptions, outdated information, or controversial claims that could mislead listeners.",
     },
 
     "INTERVIEW": {
@@ -262,6 +265,7 @@ CONTENT_TYPE_RULE_MODIFIERS = {
         "action_strictness": "extreme",
         "notes_frequency": "high",
         "key_point_guidance": "Only for pivotal career moments, controversial insights, or significant revelations. Most interview content should be NOTES.",
+        "risk_guidance": "Focus on red flags, concerns, or potential issues with the interviewee's responses or qualifications.",
     },
 
     "PODCAST": {
@@ -271,6 +275,7 @@ CONTENT_TYPE_RULE_MODIFIERS = {
         "action_strictness": "extreme",
         "notes_frequency": "high",
         "key_point_guidance": "Only for surprising revelations, unexpected connections, or controversial takes. Most podcast discussion should be NOTES.",
+        "risk_guidance": "Focus on controversial claims, potential misinformation, or statements that could be misleading to listeners.",
     },
 
     "STREAMER_MONOLOGUE": {
@@ -279,6 +284,7 @@ CONTENT_TYPE_RULE_MODIFIERS = {
         "sentiment_enabled": False,
         "action_strictness": "block",
         "notes_frequency": "low",
+        "risk_guidance": "Focus on potentially harmful advice, misinformation, or statements that could negatively impact viewers.",
     },
 
     "NEWS_UPDATE": {
@@ -287,6 +293,7 @@ CONTENT_TYPE_RULE_MODIFIERS = {
         "sentiment_enabled": False,
         "action_strictness": "block",
         "notes_frequency": "medium",
+        "risk_guidance": "Focus on potential inaccuracies, unverified claims, or misleading information in the news report.",
     },
 
     "GAMEPLAY_COMMENTARY": {
@@ -295,6 +302,7 @@ CONTENT_TYPE_RULE_MODIFIERS = {
         "sentiment_enabled": False,
         "action_strictness": "block",
         "notes_frequency": "very_high",
+        "risk_guidance": "Focus on strategic mistakes, missed opportunities, or errors that could impact gameplay outcomes.",
     },
 
     "CUSTOMER_SUPPORT": {
@@ -303,6 +311,7 @@ CONTENT_TYPE_RULE_MODIFIERS = {
         "sentiment_enabled": True,
         "action_strictness": "high",
         "notes_frequency": "low",
+        "risk_guidance": "Focus on customer-impacting issues, unresolved problems, or service failures that require attention.",
     },
 
     "DEBATE": {
@@ -311,6 +320,7 @@ CONTENT_TYPE_RULE_MODIFIERS = {
         "sentiment_enabled": False,
         "action_strictness": "very_high",
         "notes_frequency": "low",
+        "risk_guidance": "Focus on weak points in arguments, logical fallacies, or potential counter-arguments that could undermine a position.",
     },
 
     "UNKNOWN": {
@@ -319,6 +329,7 @@ CONTENT_TYPE_RULE_MODIFIERS = {
         "sentiment_enabled": False,
         "action_strictness": "block",
         "notes_frequency": "medium",
+        "risk_guidance": "Be conservative - only flag clear issues. Default to NOTES if uncertain.",
     },
 }
 

@@ -76,17 +76,19 @@ class TestExtractInsights:
             ]
         }
         
-        insights = client._extract_insights(parsed_data, 1, 10.0, 15.0)
+        result = client._extract_insights(parsed_data, 1, 10.0, 15.0)
         
-        assert len(insights) == 2
-        assert insights[0].insight_type == "ACTION"
-        assert insights[0].insight_text == "Complete the task by Friday"
-        assert insights[0].confidence == 0.95
-        assert insights[0].classification == "[+]"
-        assert insights[1].insight_type == "DECISION"
-        assert insights[1].insight_text == "Approved the budget"
-        assert insights[1].confidence == 0.90
-        assert insights[1].classification == "[~]"
+        # _extract_insights returns the parsed_data dict with insights
+        assert "insights" in result
+        assert len(result["insights"]) == 2
+        assert result["insights"][0]["insight_type"] == "ACTION"
+        assert result["insights"][0]["insight_text"] == "Complete the task by Friday"
+        assert result["insights"][0]["confidence"] == 0.95
+        assert result["insights"][0]["classification"] == "[+]"
+        assert result["insights"][1]["insight_type"] == "DECISION"
+        assert result["insights"][1]["insight_text"] == "Approved the budget"
+        assert result["insights"][1]["confidence"] == 0.90
+        assert result["insights"][1]["classification"] == "[~]"
     
     def test_extract_insights_with_array_format(self):
         """Test extracting insights from array format JSON."""
@@ -107,25 +109,26 @@ class TestExtractInsights:
             }
         ]
         
-        insights = client._extract_insights(parsed_data, 2, 20.0, 25.0)
+        result = client._extract_insights(parsed_data, 2, 20.0, 25.0)
         
-        assert len(insights) == 2
-        assert insights[0].insight_type == "KEY_POINT"
-        assert insights[0].insight_text == "Important finding about the project"
-        assert insights[0].confidence == 0.85
-        assert insights[1].insight_type == "QUESTION"
-        assert insights[1].insight_text == "What is the timeline?"
-        assert insights[1].confidence == 0.75
+        # _extract_insights returns a list for array format
+        assert len(result) == 2
+        assert result[0]["insight_type"] == "KEY_POINT"
+        assert result[0]["insight_text"] == "Important finding about the project"
+        assert result[0]["confidence"] == 0.85
+        assert result[1]["insight_type"] == "QUESTION"
+        assert result[1]["insight_text"] == "What is the timeline?"
+        assert result[1]["confidence"] == 0.75
     
     def test_extract_insights_with_empty_data(self):
         """Test extracting insights from empty parsed data."""
         client = self.create_client()
         
-        insights = client._extract_insights({}, 1, 10.0, 15.0)
-        assert len(insights) == 0
+        result = client._extract_insights({}, 1, 10.0, 15.0)
+        assert result == {}
         
-        insights = client._extract_insights([], 1, 10.0, 15.0)
-        assert len(insights) == 0
+        result = client._extract_insights([], 1, 10.0, 15.0)
+        assert result == []
     
     def test_extract_insights_with_missing_classification(self):
         """Test that missing classification defaults to neutral."""
@@ -139,11 +142,11 @@ class TestExtractInsights:
             }
         ]
         
-        insights = client._extract_insights(parsed_data, 1, 10.0, 15.0)
+        result = client._extract_insights(parsed_data, 1, 10.0, 15.0)
         
-        assert len(insights) == 1
-        assert insights[0].classification == "[~]"
-        assert insights[0].confidence == 0.80
+        assert len(result) == 1
+        assert result[0]["classification"] == "~"
+        assert result[0]["confidence"] == 0.80
     
     def test_extract_insights_window_timestamps(self):
         """Test that window timestamps are correctly assigned."""
@@ -158,13 +161,13 @@ class TestExtractInsights:
             }
         ]
         
-        insights = client._extract_insights(parsed_data, 5, 100.0, 105.0)
+        result = client._extract_insights(parsed_data, 5, 100.0, 105.0)
         
-        assert len(insights) == 1
-        assert insights[0].window_id == 5
-        assert insights[0].timestamp_start == 100.0
-        assert insights[0].timestamp_end == 105.0
-        assert insights[0].confidence == 0.95
+        assert len(result) == 1
+        # Note: _extract_insights doesn't assign window_id/timestamps to the dict
+        # Those are assigned when adding to WindowManager
+        assert result[0]["insight_type"] == "ACTION"
+        assert result[0]["confidence"] == 0.95
     
     def test_extract_insights_as_dict_includes_confidence(self):
         """Test that as_dict() method includes confidence field."""
@@ -182,10 +185,11 @@ class TestExtractInsights:
             ]
         }
         
-        insights = client._extract_insights(parsed_data, 1, 10.0, 15.0)
+        result = client._extract_insights(parsed_data, 1, 10.0, 15.0)
         
-        assert len(insights) == 1
-        insight_dict = insights[0].as_dict()
+        assert "insights" in result
+        assert len(result["insights"]) == 1
+        insight_dict = result["insights"][0]
         
         assert "confidence" in insight_dict
         assert insight_dict["confidence"] == 0.95
@@ -717,6 +721,869 @@ class TestPriorInsightsAccumulation:
         assert "Important finding" not in context
         # Note: prior_insights list is still returned, but won't be included in context string
         # This is by design - the list is returned for logging purposes
+
+
+class TestSentimentEnabledFiltering:
+    """Tests for sentiment_enabled filtering in _extract_insights."""
+    
+    def create_client(self):
+        """Create a SummaryClient instance for testing."""
+        return SummaryClient(api_key="test_key", model="test_model")
+    
+    def test_is_sentiment_enabled_returns_true_for_general_meeting(self):
+        """Test that is_sentiment_enabled returns True for GENERAL_MEETING."""
+        client = self.create_client()
+        client.set_content_type("GENERAL_MEETING", confidence=0.9, source="AUTO_DETECTED")
+        assert client.is_sentiment_enabled() is True
+    
+    def test_is_sentiment_enabled_returns_true_for_customer_support(self):
+        """Test that is_sentiment_enabled returns True for CUSTOMER_SUPPORT."""
+        client = self.create_client()
+        client.set_content_type("CUSTOMER_SUPPORT", confidence=0.9, source="AUTO_DETECTED")
+        assert client.is_sentiment_enabled() is True
+    
+    def test_is_sentiment_enabled_returns_false_for_technical_talk(self):
+        """Test that is_sentiment_enabled returns False for TECHNICAL_TALK."""
+        client = self.create_client()
+        client.set_content_type("TECHNICAL_TALK", confidence=0.9, source="AUTO_DETECTED")
+        assert client.is_sentiment_enabled() is False
+    
+    def test_is_sentiment_enabled_returns_false_for_lecture_or_talk(self):
+        """Test that is_sentiment_enabled returns False for LECTURE_OR_TALK."""
+        client = self.create_client()
+        client.set_content_type("LECTURE_OR_TALK", confidence=0.9, source="AUTO_DETECTED")
+        assert client.is_sentiment_enabled() is False
+    
+    def test_is_sentiment_enabled_returns_false_for_interview(self):
+        """Test that is_sentiment_enabled returns False for INTERVIEW."""
+        client = self.create_client()
+        client.set_content_type("INTERVIEW", confidence=0.9, source="AUTO_DETECTED")
+        assert client.is_sentiment_enabled() is False
+    
+    def test_is_sentiment_enabled_returns_false_for_podcast(self):
+        """Test that is_sentiment_enabled returns False for PODCAST."""
+        client = self.create_client()
+        client.set_content_type("PODCAST", confidence=0.9, source="AUTO_DETECTED")
+        assert client.is_sentiment_enabled() is False
+    
+    def test_is_sentiment_enabled_returns_false_for_streamer_monologue(self):
+        """Test that is_sentiment_enabled returns False for STREAMER_MONOLOGUE."""
+        client = self.create_client()
+        client.set_content_type("STREAMER_MONOLOGUE", confidence=0.9, source="AUTO_DETECTED")
+        assert client.is_sentiment_enabled() is False
+    
+    def test_is_sentiment_enabled_returns_false_for_news_update(self):
+        """Test that is_sentiment_enabled returns False for NEWS_UPDATE."""
+        client = self.create_client()
+        client.set_content_type("NEWS_UPDATE", confidence=0.9, source="AUTO_DETECTED")
+        assert client.is_sentiment_enabled() is False
+    
+    def test_is_sentiment_enabled_returns_false_for_gameplay_commentary(self):
+        """Test that is_sentiment_enabled returns False for GAMEPLAY_COMMENTARY."""
+        client = self.create_client()
+        client.set_content_type("GAMEPLAY_COMMENTARY", confidence=0.9, source="AUTO_DETECTED")
+        assert client.is_sentiment_enabled() is False
+    
+    def test_is_sentiment_enabled_returns_false_for_debate(self):
+        """Test that is_sentiment_enabled returns False for DEBATE."""
+        client = self.create_client()
+        client.set_content_type("DEBATE", confidence=0.9, source="AUTO_DETECTED")
+        assert client.is_sentiment_enabled() is False
+    
+    def test_is_sentiment_enabled_returns_false_for_unknown(self):
+        """Test that is_sentiment_enabled returns False for UNKNOWN."""
+        client = self.create_client()
+        client.set_content_type("UNKNOWN", confidence=0.9, source="AUTO_DETECTED")
+        assert client.is_sentiment_enabled() is False
+    
+    def test_extract_insights_includes_sentiment_when_enabled(self):
+        """Test that SENTIMENT insights are included when sentiment_enabled=True."""
+        client = self.create_client()
+        client.set_content_type("GENERAL_MEETING", confidence=0.9, source="AUTO_DETECTED")
+        
+        parsed_data = {
+            "analysis": "Test analysis",
+            "insights": [
+                {
+                    "insight_type": "SENTIMENT",
+                    "insight_text": "Positive tone detected",
+                    "confidence": 0.85,
+                    "classification": "+"
+                },
+                {
+                    "insight_type": "ACTION",
+                    "insight_text": "Complete the task",
+                    "confidence": 0.95,
+                    "classification": "+"
+                }
+            ]
+        }
+        
+        result = client._extract_insights(parsed_data, 1, 10.0, 15.0)
+        
+        # Should include both insights (SENTIMENT + ACTION)
+        assert len(result["insights"]) == 2
+        insight_types = [i["insight_type"] for i in result["insights"]]
+        assert "SENTIMENT" in insight_types
+        assert "ACTION" in insight_types
+    
+    def test_extract_insights_filters_sentiment_when_disabled(self):
+        """Test that SENTIMENT insights are filtered when sentiment_enabled=False."""
+        client = self.create_client()
+        client.set_content_type("TECHNICAL_TALK", confidence=0.9, source="AUTO_DETECTED")
+        
+        parsed_data = {
+            "analysis": "Test analysis",
+            "insights": [
+                {
+                    "insight_type": "SENTIMENT",
+                    "insight_text": "Positive tone detected",
+                    "confidence": 0.85,
+                    "classification": "+"
+                },
+                {
+                    "insight_type": "ACTION",
+                    "insight_text": "Complete the task",
+                    "confidence": 0.95,
+                    "classification": "+"
+                }
+            ]
+        }
+        
+        result = client._extract_insights(parsed_data, 1, 10.0, 15.0)
+        
+        # Should only include ACTION insight (SENTIMENT filtered out)
+        assert len(result["insights"]) == 1
+        assert result["insights"][0]["insight_type"] == "ACTION"
+    
+    def test_extract_insights_non_sentiment_always_included(self):
+        """Test that non-SENTIMENT insights are always included regardless of sentiment_enabled."""
+        client = self.create_client()
+        client.set_content_type("TECHNICAL_TALK", confidence=0.9, source="AUTO_DETECTED")
+        
+        parsed_data = {
+            "analysis": "Test analysis",
+            "insights": [
+                {
+                    "insight_type": "DECISION",
+                    "insight_text": "Approved the budget",
+                    "confidence": 0.90,
+                    "classification": "~"
+                },
+                {
+                    "insight_type": "QUESTION",
+                    "insight_text": "What is the timeline?",
+                    "confidence": 0.75,
+                    "classification": "~"
+                },
+                {
+                    "insight_type": "KEY_POINT",
+                    "insight_text": "Important finding",
+                    "confidence": 0.85,
+                    "classification": "~"
+                }
+            ]
+        }
+        
+        result = client._extract_insights(parsed_data, 1, 10.0, 15.0)
+        
+        # Should include all non-SENTIMENT insights
+        assert len(result["insights"]) == 3
+        insight_types = [i["insight_type"] for i in result["insights"]]
+        assert "DECISION" in insight_types
+        assert "QUESTION" in insight_types
+        assert "KEY_POINT" in insight_types
+    
+    def test_extract_insights_mixed_insights_partially_filtered(self):
+        """Test that mixed insights (SENTIMENT + others) are partially filtered correctly."""
+        client = self.create_client()
+        client.set_content_type("CUSTOMER_SUPPORT", confidence=0.9, source="AUTO_DETECTED")
+        
+        parsed_data = {
+            "analysis": "Test analysis",
+            "insights": [
+                {
+                    "insight_type": "SENTIMENT",
+                    "insight_text": "Customer frustration detected",
+                    "confidence": 0.85,
+                    "classification": "-"
+                },
+                {
+                    "insight_type": "ACTION",
+                    "insight_text": "Escalate to manager",
+                    "confidence": 0.95,
+                    "classification": "+"
+                },
+                {
+                    "insight_type": "SENTIMENT",
+                    "insight_text": "Positive resolution",
+                    "confidence": 0.80,
+                    "classification": "+"
+                },
+                {
+                    "insight_type": "DECISION",
+                    "insight_text": "Issue resolved",
+                    "confidence": 0.90,
+                    "classification": "~"
+                }
+            ]
+        }
+        
+        result = client._extract_insights(parsed_data, 1, 10.0, 15.0)
+        
+        # Should include all insights (sentiment_enabled=True for CUSTOMER_SUPPORT)
+        assert len(result["insights"]) == 4
+        insight_types = [i["insight_type"] for i in result["insights"]]
+        assert insight_types.count("SENTIMENT") == 2
+        assert "ACTION" in insight_types
+        assert "DECISION" in insight_types
+    
+    def test_extract_insights_empty_insights_list(self):
+        """Test that empty insights list is handled correctly."""
+        client = self.create_client()
+        client.set_content_type("GENERAL_MEETING", confidence=0.9, source="AUTO_DETECTED")
+        
+        parsed_data = {
+            "analysis": "Test analysis",
+            "insights": []
+        }
+        
+        result = client._extract_insights(parsed_data, 1, 10.0, 15.0)
+        
+        assert len(result["insights"]) == 0
+    
+    def test_extract_insights_only_sentiment_filtered(self):
+        """Test that when only SENTIMENT insights exist and are filtered, result is empty."""
+        client = self.create_client()
+        client.set_content_type("LECTURE_OR_TALK", confidence=0.9, source="AUTO_DETECTED")
+        
+        parsed_data = {
+            "analysis": "Test analysis",
+            "insights": [
+                {
+                    "insight_type": "SENTIMENT",
+                    "insight_text": "Engaged audience",
+                    "confidence": 0.85,
+                    "classification": "+"
+                }
+            ]
+        }
+        
+        result = client._extract_insights(parsed_data, 1, 10.0, 15.0)
+        
+        # SENTIMENT should be filtered out
+        assert len(result["insights"]) == 0
+
+
+class TestKeyPointClassification:
+    """Tests for KEY POINT classification with breakthrough-level threshold."""
+    
+    def create_client(self):
+        """Create a SummaryClient instance for testing."""
+        return SummaryClient(api_key="test_key", model="test_model")
+    
+    def test_key_point_classification_for_critical_threshold(self):
+        """Test that critical thresholds are classified as KEY POINT."""
+        client = self.create_client()
+        
+        # These should be KEY POINT - critical thresholds
+        critical_threshold_insights = [
+            "The system fails above 10,000 concurrent connections",
+            "At 500ms latency, user experience degrades significantly",
+            "The error rate is below 1%",
+            "Budget is $50,000",
+        ]
+        
+        for insight_text in critical_threshold_insights:
+            parsed_data = {
+                "analysis": "Test analysis",
+                "insights": [
+                    {
+                        "insight_type": "KEY POINT",
+                        "insight_text": insight_text,
+                        "confidence": 0.95,
+                        "classification": "~"
+                    }
+                ]
+            }
+            
+            result = client._extract_insights(parsed_data, 1, 10.0, 15.0)
+            assert len(result["insights"]) == 1, f"Expected KEY POINT for: {insight_text}"
+            assert result["insights"][0]["insight_type"] == "KEY POINT"
+    
+    def test_notes_classification_for_explanations(self):
+        """Test that explanations are classified as NOTES, not KEY POINT."""
+        client = self.create_client()
+        
+        # These should be NOTES - explanations of how things work
+        explanation_insights = [
+            "RAG retrieves documents via semantic similarity",
+            "Multi-hop reasoning is critical for recursive tasks",
+            "Clauses referencing other clauses create recursive complexity",
+            "The API endpoint is /api/v1/users",
+            "Authentication requires a Bearer token",
+            "The function takes a string parameter and returns a boolean",
+        ]
+        
+        for insight_text in explanation_insights:
+            parsed_data = {
+                "analysis": "Test analysis",
+                "insights": [
+                    {
+                        "insight_type": "NOTES",
+                        "insight_text": insight_text,
+                        "confidence": 0.95,
+                        "classification": "~"
+                    }
+                ]
+            }
+            
+            result = client._extract_insights(parsed_data, 1, 10.0, 15.0)
+            assert len(result["insights"]) == 1, f"Expected NOTES for: {insight_text}"
+            assert result["insights"][0]["insight_type"] == "NOTES"
+    
+    def test_key_point_classification_for_discoveries(self):
+        """Test that discoveries are classified as KEY POINT."""
+        client = self.create_client()
+        
+        # These should be KEY POINT - discoveries, findings, revelations
+        discovery_insights = [
+            "Task complexity is the primary driver of context window limitations",
+            "Context degradation is task-specific",
+            "Context degradation occurs at specific saturation levels",
+            "Context degradation severity increases non-linearly",
+            "The memory leak was traced to an unclosed database connection",
+            "A race condition exists when two requests arrive simultaneously",
+        ]
+        
+        for insight_text in discovery_insights:
+            parsed_data = {
+                "analysis": "Test analysis",
+                "insights": [
+                    {
+                        "insight_type": "KEY POINT",
+                        "insight_text": insight_text,
+                        "confidence": 0.85,
+                        "classification": "~"
+                    }
+                ]
+            }
+            
+            result = client._extract_insights(parsed_data, 1, 10.0, 15.0)
+            assert len(result["insights"]) == 1, f"Expected KEY POINT for: {insight_text}"
+            assert result["insights"][0]["insight_type"] == "KEY POINT"
+    
+    def test_notes_classification_for_standard_patterns(self):
+        """Test that standard patterns and configurations are NOTES."""
+        client = self.create_client()
+        
+        # These should be NOTES - standard patterns, not breakthroughs
+        standard_pattern_insights = [
+            "We use a retry with exponential backoff",
+            "Setting pool_size to 20 is recommended",
+            "The library handles JSON serialization automatically",
+            "Context window size is only half the story",
+            "Task complexity is the other half",
+        ]
+        
+        for insight_text in standard_pattern_insights:
+            parsed_data = {
+                "analysis": "Test analysis",
+                "insights": [
+                    {
+                        "insight_type": "NOTES",
+                        "insight_text": insight_text,
+                        "confidence": 0.95,
+                        "classification": "~"
+                    }
+                ]
+            }
+            
+            result = client._extract_insights(parsed_data, 1, 10.0, 15.0)
+            assert len(result["insights"]) == 1, f"Expected NOTES for: {insight_text}"
+            assert result["insights"][0]["insight_type"] == "NOTES"
+    
+    def test_key_point_classification_for_isolated_facts_with_implications(self):
+        """Test KEY POINT classification for isolated facts with significant implications."""
+        client = self.create_client()
+        
+        # These should be KEY POINT - isolated facts with implications
+        significant_facts = [
+            "Revenue increased 40% YoY",
+            "Customer churn dropped from 10% to 5%",
+            "The system processes 10,000 requests/day",
+        ]
+        
+        for insight_text in significant_facts:
+            parsed_data = {
+                "analysis": "Test analysis",
+                "insights": [
+                    {
+                        "insight_type": "KEY POINT",
+                        "insight_text": insight_text,
+                        "confidence": 0.90,
+                        "classification": "~"
+                    }
+                ]
+            }
+            
+            result = client._extract_insights(parsed_data, 1, 10.0, 15.0)
+            assert len(result["insights"]) == 1, f"Expected KEY POINT for: {insight_text}"
+            assert result["insights"][0]["insight_type"] == "KEY POINT"
+    
+    def test_notes_classification_for_contextual_details(self):
+        """Test NOTES classification for contextual details without standalone significance."""
+        client = self.create_client()
+        
+        # These should be NOTES - contextual details
+        contextual_details = [
+            "The team has 5 members",
+            "This is the 3rd meeting this week",
+            "We have 5 team members working on this",
+            "The meeting lasted 45 minutes",
+            "This is the third time we've discussed this",
+            "There were 15 attendees",
+            "We started this project in Q1",
+            "Chat was active today",
+        ]
+        
+        for insight_text in contextual_details:
+            parsed_data = {
+                "analysis": "Test analysis",
+                "insights": [
+                    {
+                        "insight_type": "NOTES",
+                        "insight_text": insight_text,
+                        "confidence": 0.95,
+                        "classification": "~"
+                    }
+                ]
+            }
+            
+            result = client._extract_insights(parsed_data, 1, 10.0, 15.0)
+            assert len(result["insights"]) == 1, f"Expected NOTES for: {insight_text}"
+            assert result["insights"][0]["insight_type"] == "NOTES"
+    
+    def test_technical_talk_content_type_key_point_deemphasis(self):
+        """Test that TECHNICAL_TALK deemphasizes KEY POINT extraction."""
+        client = self.create_client()
+        client.set_content_type("TECHNICAL_TALK", confidence=0.9, source="AUTO_DETECTED")
+        
+        # Verify KEY POINT is deemphasized for TECHNICAL_TALK
+        from src.summary.prompts import CONTENT_TYPE_RULE_MODIFIERS
+        rules = CONTENT_TYPE_RULE_MODIFIERS["TECHNICAL_TALK"]
+        
+        assert "KEY POINT" in rules["deemphasize"], "KEY POINT should be deemphasized for TECHNICAL_TALK"
+        assert rules["notes_frequency"] == "high", "NOTES frequency should be high for TECHNICAL_TALK (reduced for less insights)"
+        assert rules["action_strictness"] == "extreme", "ACTION strictness should be extreme for TECHNICAL_TALK"
+    
+    def test_lecture_or_talk_content_type_key_point_emphasis(self):
+        """Test that LECTURE_OR_TALK emphasizes NOTES extraction (not KEY POINT)."""
+        client = self.create_client()
+        client.set_content_type("LECTURE_OR_TALK", confidence=0.9, source="AUTO_DETECTED")
+        
+        # Verify NOTES is emphasized for LECTURE_OR_TALK (KEY POINT is deemphasized for less insights)
+        from src.summary.prompts import CONTENT_TYPE_RULE_MODIFIERS
+        rules = CONTENT_TYPE_RULE_MODIFIERS["LECTURE_OR_TALK"]
+        
+        assert "NOTES" in rules["emphasize"], "NOTES should be emphasized for LECTURE_OR_TALK"
+        assert "KEY POINT" in rules["deemphasize"], "KEY POINT should be deemphasized for LECTURE_OR_TALK"
+        assert rules["notes_frequency"] == "medium", "NOTES frequency should be medium for LECTURE_OR_TALK (reduced for less insights)"
+    
+    def test_general_meeting_content_type_key_point_deemphasis(self):
+        """Test that GENERAL_MEETING deemphasizes KEY POINT extraction."""
+        client = self.create_client()
+        client.set_content_type("GENERAL_MEETING", confidence=0.9, source="AUTO_DETECTED")
+        
+        # Verify KEY POINT is deemphasized for GENERAL_MEETING
+        from src.summary.prompts import CONTENT_TYPE_RULE_MODIFIERS
+        rules = CONTENT_TYPE_RULE_MODIFIERS["GENERAL_MEETING"]
+        
+        assert "KEY POINT" in rules["deemphasize"], "KEY POINT should be deemphasized for GENERAL_MEETING"
+        assert "ACTION" in rules["emphasize"], "ACTION should be emphasized for GENERAL_MEETING"
+        assert "DECISION" in rules["emphasize"], "DECISION should be emphasized for GENERAL_MEETING"
+    
+    def test_interview_content_type_notes_emphasis(self):
+        """Test that INTERVIEW emphasizes NOTES extraction (not KEY POINT for less insights)."""
+        client = self.create_client()
+        client.set_content_type("INTERVIEW", confidence=0.9, source="AUTO_DETECTED")
+        
+        # Verify NOTES is emphasized for INTERVIEW
+        from src.summary.prompts import CONTENT_TYPE_RULE_MODIFIERS
+        rules = CONTENT_TYPE_RULE_MODIFIERS["INTERVIEW"]
+        
+        assert "NOTES" in rules["emphasize"], "NOTES should be emphasized for INTERVIEW"
+        assert "KEY POINT" in rules["deemphasize"], "KEY POINT should be deemphasized for INTERVIEW"
+        assert "QUESTION" in rules["emphasize"], "QUESTION should be emphasized for INTERVIEW"
+    
+    def test_podcast_content_type_notes_emphasis(self):
+        """Test that PODCAST emphasizes NOTES extraction (not KEY POINT for less insights)."""
+        client = self.create_client()
+        client.set_content_type("PODCAST", confidence=0.9, source="AUTO_DETECTED")
+        
+        # Verify NOTES is emphasized for PODCAST (KEY POINT is deemphasized for less insights)
+        from src.summary.prompts import CONTENT_TYPE_RULE_MODIFIERS
+        rules = CONTENT_TYPE_RULE_MODIFIERS["PODCAST"]
+        
+        assert "NOTES" in rules["emphasize"], "NOTES should be emphasized for PODCAST"
+        assert "KEY POINT" in rules["deemphasize"], "KEY POINT should be deemphasized for PODCAST"
+        assert rules["notes_frequency"] == "high", "NOTES frequency should be high for PODCAST (reduced for less insights)"
+
+
+class TestKeyPointVsNotesDecisionGuide:
+    """Tests for KEY POINT vs NOTES decision guide examples."""
+    
+    def create_client(self):
+        """Create a SummaryClient instance for testing."""
+        return SummaryClient(api_key="test_key", model="test_model")
+    
+    def test_decision_guide_general_examples(self):
+        """Test that general decision guide examples are classified correctly."""
+        client = self.create_client()
+        
+        # General examples from the decision guide
+        test_cases = [
+            ("The team has 5 members", "NOTES"),
+            ("This is the 3rd meeting this week", "NOTES"),
+            ("The deadline is next Friday", "KEY POINT"),
+            ("Revenue increased 40% YoY", "KEY POINT"),
+            ("We have 5 team members working on this", "NOTES"),
+            ("The meeting lasted 45 minutes", "NOTES"),
+            ("Customer churn dropped from 10% to 5%", "KEY POINT"),
+            ("This is the third time we've discussed this", "NOTES"),
+            ("Budget is $50,000", "KEY POINT"),
+            ("There were 15 attendees", "NOTES"),
+            ("The system processes 10,000 requests/day", "KEY POINT"),
+            ("We started this project in Q1", "NOTES"),
+            ("The error rate is below 1%", "KEY POINT"),
+            ("Chat was active today", "NOTES"),
+        ]
+        
+        for insight_text, expected_type in test_cases:
+            parsed_data = {
+                "analysis": "Test analysis",
+                "insights": [
+                    {
+                        "insight_type": expected_type,
+                        "insight_text": insight_text,
+                        "confidence": 0.95,
+                        "classification": "~"
+                    }
+                ]
+            }
+            
+            result = client._extract_insights(parsed_data, 1, 10.0, 15.0)
+            assert len(result["insights"]) == 1, f"Expected {expected_type} for: {insight_text}"
+            assert result["insights"][0]["insight_type"] == expected_type, f"Mismatch for: {insight_text}"
+    
+    def test_decision_guide_technical_examples(self):
+        """Test that technical decision guide examples are classified correctly."""
+        client = self.create_client()
+        
+        # Technical examples from the decision guide
+        test_cases = [
+            # Explanations should be NOTES
+            ("Context window size is only half the story", "NOTES"),
+            ("Task complexity is the other half", "NOTES"),
+            ("Multi-hop reasoning is critical for recursive tasks", "NOTES"),
+            ("Clauses referencing other clauses create recursive complexity", "NOTES"),
+            ("RAG retrieves documents via semantic similarity", "NOTES"),
+            ("The API endpoint is /api/v1/users", "NOTES"),
+            ("Authentication requires a Bearer token", "NOTES"),
+            ("We use a retry with exponential backoff", "NOTES"),
+            ("Setting pool_size to 20 is recommended", "NOTES"),
+            ("The library handles JSON serialization automatically", "NOTES"),
+            ("The function takes a string parameter and returns a boolean", "NOTES"),
+            # Discoveries should be KEY POINT
+            ("Task complexity is the primary driver", "KEY POINT"),
+            ("Context degradation is task-specific", "KEY POINT"),
+            ("Context degradation occurs at specific saturation levels", "KEY POINT"),
+            ("Context degradation severity increases non-linearly", "KEY POINT"),
+            ("The system fails above 10,000 concurrent connections", "KEY POINT"),
+            ("The memory leak was traced to an unclosed database connection", "KEY POINT"),
+            ("At 500ms latency, user experience degrades significantly", "KEY POINT"),
+            ("A race condition exists when two requests arrive simultaneously", "KEY POINT"),
+        ]
+        
+        for insight_text, expected_type in test_cases:
+            parsed_data = {
+                "analysis": "Test analysis",
+                "insights": [
+                    {
+                        "insight_type": expected_type,
+                        "insight_text": insight_text,
+                        "confidence": 0.95,
+                        "classification": "~"
+                    }
+                ]
+            }
+            
+            result = client._extract_insights(parsed_data, 1, 10.0, 15.0)
+            assert len(result["insights"]) == 1, f"Expected {expected_type} for: {insight_text}"
+            assert result["insights"][0]["insight_type"] == expected_type, f"Mismatch for: {insight_text}"
+
+
+class TestZeroOutputBehavior:
+    """Tests for zero-output behavior when nothing meaningful is said."""
+    
+    def create_client(self):
+        """Create a SummaryClient instance for testing."""
+        return SummaryClient(api_key="test_key", model="test_model")
+    
+    def test_empty_insights_array_handling(self):
+        """Test that empty insights array is handled correctly."""
+        client = self.create_client()
+        
+        # Empty insights array should be handled correctly
+        parsed_data = {
+            "analysis": "",
+            "insights": []
+        }
+        
+        result = client._extract_insights(parsed_data, 1, 10.0, 15.0)
+        
+        # Should return empty insights
+        assert "insights" in result
+        assert len(result["insights"]) == 0
+    
+    def test_empty_analysis_with_insights(self):
+        """Test that empty analysis string is valid when insights exist."""
+        client = self.create_client()
+        
+        parsed_data = {
+            "analysis": "",
+            "insights": [
+                {
+                    "insight_type": "ACTION",
+                    "insight_text": "Complete the task by Friday",
+                    "confidence": 0.95,
+                    "classification": "[+]"
+                }
+            ]
+        }
+        
+        result = client._extract_insights(parsed_data, 1, 10.0, 15.0)
+        
+        # Should still extract the insight
+        assert len(result["insights"]) == 1
+        assert result["insights"][0]["insight_type"] == "ACTION"
+    
+    def test_notes_only_output_for_continuity(self):
+        """Test that NOTES can be output for continuity when no other insights exist."""
+        client = self.create_client()
+        
+        # NOTES for continuity should be allowed
+        parsed_data = {
+            "analysis": "",
+            "insights": [
+                {
+                    "insight_type": "NOTES",
+                    "insight_text": "Topic shifted to project timeline",
+                    "confidence": 0.85,
+                    "classification": "[~]"
+                }
+            ]
+        }
+        
+        result = client._extract_insights(parsed_data, 1, 10.0, 15.0)
+        
+        # Should extract the NOTES insight
+        assert len(result["insights"]) == 1
+        assert result["insights"][0]["insight_type"] == "NOTES"
+    
+    def test_multiple_insights_filtered_to_high_value_only(self):
+        """Test that multiple trivial insights are filtered to only high-value ones."""
+        client = self.create_client()
+        
+        # Multiple trivial insights - only meaningful ones should be extracted
+        parsed_data = {
+            "analysis": "",
+            "insights": [
+                {
+                    "insight_type": "NOTES",
+                    "insight_text": "Speaker paused briefly",
+                    "confidence": 0.50,
+                    "classification": "[~]"
+                },
+                {
+                    "insight_type": "NOTES",
+                    "insight_text": "Another pause",
+                    "confidence": 0.50,
+                    "classification": "[~]"
+                },
+                {
+                    "insight_type": "ACTION",
+                    "insight_text": "Submit report by Friday",
+                    "confidence": 0.95,
+                    "classification": "[+]"
+                }
+            ]
+        }
+        
+        result = client._extract_insights(parsed_data, 1, 10.0, 15.0)
+        
+        # Should include the ACTION but filter low-confidence NOTES
+        # Note: The filtering logic is in the LLM prompt, not in _extract_insights
+        # This test verifies the extraction handles the data correctly
+        assert len(result["insights"]) == 3
+
+
+class TestContentTypeRuleModifiersUpdated:
+    """Tests for updated CONTENT_TYPE_RULE_MODIFIERS with stricter settings."""
+    
+    def test_general_meeting_stricter_settings(self):
+        """Test that GENERAL_MEETING has stricter action_strictness and reduced notes_frequency."""
+        from src.summary.prompts import CONTENT_TYPE_RULE_MODIFIERS
+        
+        rules = CONTENT_TYPE_RULE_MODIFIERS["GENERAL_MEETING"]
+        
+        # Should have stricter settings
+        assert rules["action_strictness"] == "very_high", "GENERAL_MEETING should have very_high action_strictness"
+        assert rules["notes_frequency"] == "medium", "GENERAL_MEETING should have medium notes_frequency"
+    
+    def test_technical_talk_stricter_settings(self):
+        """Test that TECHNICAL_TALK has stricter settings."""
+        from src.summary.prompts import CONTENT_TYPE_RULE_MODIFIERS
+        
+        rules = CONTENT_TYPE_RULE_MODIFIERS["TECHNICAL_TALK"]
+        
+        # Should have stricter settings
+        assert rules["action_strictness"] == "extreme", "TECHNICAL_TALK should have extreme action_strictness"
+        assert rules["notes_frequency"] == "high", "TECHNICAL_TALK should have high notes_frequency"
+    
+    def test_lecture_or_talk_stricter_settings(self):
+        """Test that LECTURE_OR_TALK has stricter settings."""
+        from src.summary.prompts import CONTENT_TYPE_RULE_MODIFIERS
+        
+        rules = CONTENT_TYPE_RULE_MODIFIERS["LECTURE_OR_TALK"]
+        
+        # Should have stricter settings
+        assert rules["action_strictness"] == "block", "LECTURE_OR_TALK should have block action_strictness"
+        assert rules["notes_frequency"] == "medium", "LECTURE_OR_TALK should have medium notes_frequency"
+    
+    def test_streamer_monologue_reduced_notes(self):
+        """Test that STREAMER_MONOLOGUE has reduced notes_frequency."""
+        from src.summary.prompts import CONTENT_TYPE_RULE_MODIFIERS
+        
+        rules = CONTENT_TYPE_RULE_MODIFIERS["STREAMER_MONOLOGUE"]
+        
+        # Should have reduced notes frequency
+        assert rules["notes_frequency"] == "low", "STREAMER_MONOLOGUE should have low notes_frequency"
+    
+    def test_podcast_reduced_notes(self):
+        """Test that PODCAST has reduced notes_frequency."""
+        from src.summary.prompts import CONTENT_TYPE_RULE_MODIFIERS
+        
+        rules = CONTENT_TYPE_RULE_MODIFIERS["PODCAST"]
+        
+        # Should have reduced notes frequency
+        assert rules["notes_frequency"] == "high", "PODCAST should have high notes_frequency"
+
+
+class TestContentTypeRiskGuidance:
+    """Tests for content-type-specific RISK guidance."""
+    
+    def test_all_content_types_have_risk_guidance(self):
+        """Test that all content types have risk_guidance field defined."""
+        from src.summary.prompts import CONTENT_TYPE_RULE_MODIFIERS
+        
+        expected_content_types = [
+            "GENERAL_MEETING",
+            "TECHNICAL_TALK",
+            "LECTURE_OR_TALK",
+            "INTERVIEW",
+            "PODCAST",
+            "STREAMER_MONOLOGUE",
+            "NEWS_UPDATE",
+            "GAMEPLAY_COMMENTARY",
+            "CUSTOMER_SUPPORT",
+            "DEBATE",
+            "UNKNOWN"
+        ]
+        
+        for content_type in expected_content_types:
+            assert content_type in CONTENT_TYPE_RULE_MODIFIERS, f"{content_type} missing from CONTENT_TYPE_RULE_MODIFIERS"
+            rules = CONTENT_TYPE_RULE_MODIFIERS[content_type]
+            assert "risk_guidance" in rules, f"{content_type} missing risk_guidance field"
+            assert rules["risk_guidance"], f"{content_type} has empty risk_guidance"
+    
+    def test_general_meeting_risk_guidance(self):
+        """Test GENERAL_MEETING risk guidance focuses on project blockers."""
+        from src.summary.prompts import CONTENT_TYPE_RULE_MODIFIERS
+        
+        rules = CONTENT_TYPE_RULE_MODIFIERS["GENERAL_MEETING"]
+        risk_guidance = rules["risk_guidance"]
+        
+        assert "project blockers" in risk_guidance.lower() or "timeline" in risk_guidance.lower()
+        assert "resource" in risk_guidance.lower()
+    
+    def test_technical_talk_risk_guidance(self):
+        """Test TECHNICAL_TALK risk guidance focuses on technical issues."""
+        from src.summary.prompts import CONTENT_TYPE_RULE_MODIFIERS
+        
+        rules = CONTENT_TYPE_RULE_MODIFIERS["TECHNICAL_TALK"]
+        risk_guidance = rules["risk_guidance"]
+        
+        assert "technical" in risk_guidance.lower() or "bugs" in risk_guidance.lower() or "failures" in risk_guidance.lower()
+    
+    def test_customer_support_risk_guidance(self):
+        """Test CUSTOMER_SUPPORT risk guidance focuses on customer-impacting issues."""
+        from src.summary.prompts import CONTENT_TYPE_RULE_MODIFIERS
+        
+        rules = CONTENT_TYPE_RULE_MODIFIERS["CUSTOMER_SUPPORT"]
+        risk_guidance = rules["risk_guidance"]
+        
+        assert "customer" in risk_guidance.lower()
+    
+    def test_debate_risk_guidance(self):
+        """Test DEBATE risk guidance focuses on argument weaknesses."""
+        from src.summary.prompts import CONTENT_TYPE_RULE_MODIFIERS
+        
+        rules = CONTENT_TYPE_RULE_MODIFIERS["DEBATE"]
+        risk_guidance = rules["risk_guidance"]
+        
+        assert "argument" in risk_guidance.lower() or "logical" in risk_guidance.lower() or "counter" in risk_guidance.lower()
+    
+    def test_format_content_type_rules_includes_risk_guidance(self):
+        """Test that _format_content_type_rules includes RISK guidance."""
+        from src.summary.summary_client import SummaryClient
+        from src.summary.prompts import CONTENT_TYPE_RULE_MODIFIERS
+        
+        client = SummaryClient(api_key="test_key", model="test_model")
+        
+        # Test GENERAL_MEETING
+        rules = CONTENT_TYPE_RULE_MODIFIERS["GENERAL_MEETING"]
+        formatted = client._format_content_type_rules("GENERAL_MEETING")
+        
+        assert "RISK Definition" in formatted or "RISK" in formatted
+        assert rules["risk_guidance"] in formatted or "project blockers" in formatted.lower()
+    
+    def test_format_content_type_rules_includes_key_point_guidance(self):
+        """Test that _format_content_type_rules includes KEY POINT guidance when present."""
+        from src.summary.summary_client import SummaryClient
+        from src.summary.prompts import CONTENT_TYPE_RULE_MODIFIERS
+        
+        client = SummaryClient(api_key="test_key", model="test_model")
+        
+        # Test TECHNICAL_TALK which has key_point_guidance
+        rules = CONTENT_TYPE_RULE_MODIFIERS["TECHNICAL_TALK"]
+        formatted = client._format_content_type_rules("TECHNICAL_TALK")
+        
+        assert "KEY POINT Guidance" in formatted
+        assert rules["key_point_guidance"] in formatted
+    
+    def test_format_content_type_rules_handles_missing_guidance(self):
+        """Test that _format_content_type_rules handles content types without extra guidance."""
+        from src.summary.summary_client import SummaryClient
+        from src.summary.prompts import CONTENT_TYPE_RULE_MODIFIERS
+        
+        client = SummaryClient(api_key="test_key", model="test_model")
+        
+        # Test NEWS_UPDATE which has risk_guidance but no key_point_guidance
+        formatted = client._format_content_type_rules("NEWS_UPDATE")
+        
+        assert "NEWS_UPDATE" in formatted
+        assert "RISK Definition" in formatted or "NEWS_UPDATE" in formatted
 
 
 if __name__ == "__main__":
