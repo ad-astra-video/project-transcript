@@ -287,11 +287,11 @@ async def _summary_worker():
                 logger.info("Summary worker received shutdown signal - exiting")
                 break
             
-            segments, window_id, window_start_ts, window_end_ts = work_item
+            segments, transcription_window_id, window_start_ts, window_end_ts = work_item
             
             # Check if stop is requested before processing
             if STATE is not None and STATE.stop_requested:
-                logger.info(f"Summary worker skipping window {window_id} - stop requested")
+                logger.info(f"Summary worker skipping window {transcription_window_id} - stop requested")
                 continue
             
             # Increment window count for skip logic
@@ -304,7 +304,7 @@ async def _summary_worker():
                 # Process this window through LLM
                 try:
                     # Add window to in-flight tracking in summary client
-                    STATE.summary_client.add_in_flight_window(window_id)
+                    STATE.summary_client.add_in_flight_window(transcription_window_id)
                     
                     # Segments may already be dicts or TranscriptionSegment objects
                     # Only convert if they're not already dicts
@@ -315,59 +315,52 @@ async def _summary_worker():
                         segments_dict = _build_segments_payload(segments, window_start_ts)
                         logger.info(f"Built payload with {len(segments_dict)} segments")
                     
-                    # Merge with skipped segments if any
-                    if STATE.summary_client.has_skipped_segments():
-                        skipped_data = STATE.summary_client.get_skipped_segments()
-                        # Combine skipped segments with current segments
-                        merged_segments = skipped_data["segments"] + segments_dict
-                        logger.info(f"Merged skipped window {skipped_data['window_id']} with current window {window_id}")
-                        # Use the merged segments for processing
-                        segments_dict = merged_segments
-                    
                     try:
                         start = time.perf_counter()
-                        summary_segments = await asyncio.wait_for(
-                            STATE.summary_client.process_segments("context_summary", segments_dict, window_id, window_start_ts, window_end_ts),
+                        result_payload = await asyncio.wait_for(
+                            STATE.summary_client.process_segments("context_summary", segments_dict, transcription_window_id, window_start_ts, window_end_ts),
                             timeout=50.0
                         )
                         end = time.perf_counter()
                         if not PROCESSOR is None:
-                            await PROCESSOR.send_monitoring_event({"duration_seconds": end - start, "window_id": window_id, "window_start_ms": window_start_ts * 1000, "window_end_ms": window_end_ts * 1000}, "llm_summary_request_stats")
+                            await PROCESSOR.send_monitoring_event({"duration_seconds": end - start, "window_id": result_payload.get("summary_window_id", transcription_window_id), "window_start_ms": window_start_ts * 1000, "window_end_ms": window_end_ts * 1000}, "llm_summary_request_stats")
                     except asyncio.TimeoutError:
-                        logger.warning(f"Summarization timed out for window {window_id} [{window_start_ts:.3f}s - {window_end_ts:.3f}s]")
+                        logger.warning(f"Summarization timed out for window {transcription_window_id} [{window_start_ts:.3f}s - {window_end_ts:.3f}s]")
                         continue
                     except Exception as e:
                         logger.error(f"Error in summarization task: {e}")
                         continue
                     
-                    if summary_segments:
+                    if result_payload:
+                        summary_segments = result_payload.get("segments", [])
                         logger.info(f"Summary processed {len(summary_segments)} segments")
                         # Store summary data in deque for background sender
                         summary_payload = {
                             "type": "context_summary",
                             "timestamp_utc": datetime.now(timezone.utc).isoformat(),
                             "timing": {
-                                "window_id": window_id,
-                                "media_window_start_ms": int(window_start_ts * 1000),
-                                "media_window_end_ms": int(window_end_ts * 1000)
+                                "window_id": result_payload.get("summary_window_id", transcription_window_id),
+                                "transcription_window_ids": result_payload.get("transcription_window_ids", [transcription_window_id]),
+                                "media_window_start_ms": int(result_payload.get("combined_window_start", window_start_ts) * 1000),
+                                "media_window_end_ms": int(result_payload.get("combined_window_end", window_end_ts) * 1000)
                             },
                             "segments": [
                                 {
-                                    "id": f"{window_id}-{i}",
-                                    "summary_type": seg.summary_type,
-                                    "background_context": seg.background_context,
-                                    "summary": seg.summary,
+                                    "id": f"{result_payload.get('summary_window_id', transcription_window_id)}-{i}",
+                                    "summary_type": seg.get("summary_type") if isinstance(seg, dict) else seg.summary_type,
+                                    "background_context": seg.get("background_context") if isinstance(seg, dict) else seg.background_context,
+                                    "summary": seg.get("summary") if isinstance(seg, dict) else seg.summary,
                                 }
                                 for i, seg in enumerate(summary_segments)
                             ]
                         }
                         STATE.summary_results.append(summary_payload)
-                        logger.debug(f"Staged summary data for window {window_id} [{int(window_start_ts*1000)}ms - {int(window_end_ts*1000)}ms]")
+                        logger.debug(f"Staged summary data for window {result_payload.get('summary_window_id', transcription_window_id)} with transcription_window_ids {result_payload.get('transcription_window_ids', [transcription_window_id])}")
                 except Exception as e:
                     logger.error(f"Summary processing error: {e}")
                 finally:
                     # Remove from in-flight tracking regardless of success or failure
-                    STATE.summary_client.remove_in_flight_window(window_id)
+                    STATE.summary_client.remove_in_flight_window(transcription_window_id)
             else:
                 # Skip LLM processing, store for merging with next window
                 # Segments may already be dicts or TranscriptionSegment objects
@@ -378,17 +371,17 @@ async def _summary_worker():
                 
                 await STATE.summary_client.store_skipped_segments(
                     segments_dict,
-                    window_id,
+                    transcription_window_id,
                     window_start_ts,
                     window_end_ts
                 )
                 
                 # Run content type detection on skipped window
                 try:
-                    logger.debug(f"Running content type detection for window {window_id}")
+                    logger.debug(f"Running content type detection for window {transcription_window_id}")
                     previous_content_type = STATE.summary_client._content_type_state.content_type
                     result = await STATE.summary_client.process_content_type_detection(
-                        window_id, window_start_ts, window_end_ts
+                        transcription_window_id, window_start_ts, window_end_ts
                     )
                     logger.debug(f"Content type detection result: {result}")
                     if result:
@@ -632,10 +625,10 @@ async def _process_transcription_async(window_samples: np.ndarray, window_start_
             'diarized': False
         }
         
-        # Transcribe audio window
+        # Transcribe audio window - get transcription_window_id from whisper's internal counter
         start = time.perf_counter()
-        segments = await STATE.whisper_client.transcribe_audio(temp_path, int(window_start_ts * 1000))
-        logger.info(f"Transcription of window [{window_start_ts:.3f}s - {window_end_ts:.3f}s] took {time.perf_counter() - start:.2f}s, got {len(segments)} segments")
+        transcription_window_id, segments = await STATE.whisper_client.transcribe_audio(temp_path)
+        logger.info(f"Transcription of window [{window_start_ts:.3f}s - {window_end_ts:.3f}s] took {time.perf_counter() - start:.2f}s, got {len(segments)} segments (transcription_window_id={transcription_window_id})")
         
         # Mark as transcribed
         _mark_transcribed(temp_path)
@@ -663,13 +656,10 @@ async def _process_transcription_async(window_samples: np.ndarray, window_start_
                 # Build segments payload
                 segments_payload = _build_segments_payload(segments, window_start_ts)
                 
-                # Get next window ID from SummaryClient
-                window_id = STATE.summary_client.summary_window_counter
-                STATE.summary_client.summary_window_counter += 1
-                
                 # Put work on queue for background processing
                 # Worker will handle skip logic and content type detection
-                STATE.summary_queue.put_nowait((segments_payload, window_id, window_start_ts, end_ts))
+                # transcription_window_id comes from whisper's internal counter
+                STATE.summary_queue.put_nowait((segments_payload, transcription_window_id, window_start_ts, end_ts))
             except Exception as e:
                 logger.error(f"Failed to queue summary work: {e}")
 

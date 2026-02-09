@@ -154,7 +154,8 @@ class WindowManager:
         self._next_insight_id: int = 0  # Counter for unique insight IDs
         self._insights_by_id: Dict[int, WindowInsight] = {}  # Fast lookup by ID
     
-    def add_window(self, text: str, timestamp_start: float, timestamp_end: float) -> int:
+    def add_window(self, text: str, timestamp_start: float, timestamp_end: float,
+                   window_id: Optional[int] = None) -> int:
         """
         Add a new window, dropping oldest if over char limit.
         Also tracks first window timestamp for self-contained delay logic.
@@ -163,11 +164,20 @@ class WindowManager:
             text: Text content for this window
             timestamp_start: Start timestamp in seconds
             timestamp_end: End timestamp in seconds
+            window_id: Optional external window ID. If provided, uses this as the
+                       authoritative ID. If None, generates next internal ID.
         
         Returns:
-            window_id of the added window
+            window_id of the added window (either provided or generated)
         """
-        window_id = self._next_window_id
+        if window_id is not None:
+            actual_window_id = window_id
+            # Update internal counter to stay in sync if needed
+            # The counter is for internal tracking, not exposed externally
+            self._next_window_id += 1
+        else:
+            actual_window_id = self._next_window_id
+            self._next_window_id += 1
         
         # Track first window timestamp for initial delay (self-contained logic)
         if self._first_window_timestamp is None:
@@ -185,7 +195,7 @@ class WindowManager:
         
         # Create and add window
         window = SummaryWindow(
-            window_id=window_id,
+            window_id=actual_window_id,
             text=text,
             insights=[],
             timestamp_start=timestamp_start,
@@ -194,11 +204,10 @@ class WindowManager:
         )
         self._windows.append(window)
         self._char_count += len(text)
-        self._next_window_id += 1
 
-        logger.debug(f"Added window {window_id}, char_count={self._char_count}, total_windows={len(self._windows)}")
+        logger.debug(f"Added window {actual_window_id}, char_count={self._char_count}, total_windows={len(self._windows)}")
 
-        return window_id
+        return actual_window_id
     
     def get_accumulated_text_and_insights(self) -> tuple[str, List[WindowInsight]]:
         """
@@ -407,6 +416,9 @@ class SummaryClient:
         
         # Skipped segments buffer for merging with next window
         self._skipped_segments_buffer: Optional[Dict[str, Any]] = None  # Store skipped segments for merging
+        
+        # Track accumulated skipped transcription_window_ids for traceability
+        self._skipped_transcription_ids: List[int] = []
         
         # Content type detection state
         self._content_type_state: ContentTypeState = ContentTypeState()
@@ -866,51 +878,94 @@ class SummaryClient:
         self,
         summary_type: str,
         segments: List[Dict[str, Any]],
-        window_id: int,
+        transcription_window_id: int,
         window_start: float,
         window_end: float
-    ) -> List[SummarySegment]:
+    ) -> Dict[str, Any]:
         """
-        Process transcription segments for a 5-second summary window.
+        Process transcription segments and return complete payload.
         
         Args:
             segments: List of transcription segments
-            window_id: Unique identifier for this summary window
-            window_start: Start timestamp of the window
-            window_end: End timestamp of the window
+            transcription_window_id: ID from whisper client
+            window_start: Start timestamp of the current window
+            window_end: End timestamp of the current window
         
         Returns:
-            List of SummarySegment objects with actionable summary information
+            Complete payload dictionary with summary_window_id and transcription_window_ids list
         """
-        logger.info(f"SummaryClient.process_segments called with {len(segments)} segments for window {window_id}")
+        logger.info(f"process_segments called with {len(segments)} segments for transcription_window_id={transcription_window_id}")
         
-        # Get non-overlapping text for this window
-        new_text = self.get_new_text_for_window(segments, window_id)
+        # Get accumulated skipped transcription_window_ids
+        accumulated_ids = self._skipped_transcription_ids.copy()
+        
+        # Build transcription_window_ids list: skipped IDs + current ID
+        transcription_window_ids = accumulated_ids + [transcription_window_id]
+        
+        # Clear the accumulator after use
+        self._skipped_transcription_ids.clear()
+        
+        logger.info(f"transcription_window_ids for summary: {transcription_window_ids}")
+        
+        # Merge skipped segments with current segments if any skipped
+        if self._skipped_segments_buffer:
+            skipped_data = self._skipped_segments_buffer
+            skipped_segments = skipped_data["segments"]
+            skipped_window_start = skipped_data["window_start"]
+            
+            # Combine segments: skipped + current
+            merged_segments = skipped_segments + segments
+            
+            # Calculate combined timing:
+            # - window_start from first skipped window
+            # - window_end from current window
+            combined_window_start = skipped_window_start
+            combined_window_end = window_end
+            
+            logger.info(f"Merged {len(skipped_segments)} skipped segments with {len(segments)} current segments")
+            logger.info(f"Combined timing: start={combined_window_start:.3f}s, end={combined_window_end:.3f}s")
+            
+            # Clear the skipped segments buffer
+            self._skipped_segments_buffer = None
+            
+            # Use merged segments and combined timing
+            segments_to_process = merged_segments
+            final_window_start = combined_window_start
+            final_window_end = combined_window_end
+        else:
+            # No skipped segments, use current segments and timing
+            segments_to_process = segments
+            final_window_start = window_start
+            final_window_end = window_end
+        
+        # Get non-overlapping text for the combined window
+        new_text = self.get_new_text_for_window(segments_to_process, transcription_window_id)
         
         if not new_text:
-            logger.info(f"No new text for window {window_id}")
-            return []
+            logger.info(f"No new text for transcription_window_id={transcription_window_id}")
+            return {"type": "context_summary", "segments": []}
         
-        logger.info(f"Got {len(new_text)} chars of new text for window {window_id}")
+        logger.info(f"Got {len(new_text)} chars of new text for transcription_window_id={transcription_window_id}")
         
-        # Add window to WindowManager (sets _first_window_timestamp if first window)
-        # Capture the actual window ID assigned by WindowManager
-        actual_window_id = self._window_manager.add_window(new_text, window_start, window_end)
-        logger.debug(f"Pipeline window_id={window_id}, WindowManager assigned actual_window_id={actual_window_id}")
+        # Add window to WindowManager using transcription_window_id
+        # WindowManager will use this as the authoritative ID
+        summary_window_id = self._window_manager.add_window(
+            new_text, final_window_start, final_window_end, transcription_window_id
+        )
+        logger.debug(f"transcription_window_id={transcription_window_id}, summary_window_id={summary_window_id}")
         
         # Check initial delay (self-contained, no STATE import)
         if not self._has_performed_summary:
             if self._window_manager._first_window_timestamp is not None:
-                elapsed = window_start - self._window_manager._first_window_timestamp
+                elapsed = final_window_start - self._window_manager._first_window_timestamp
                 logger.debug(f"Initial delay check: elapsed={elapsed:.1f}s, delay={self.initial_summary_delay_seconds}s")
                 if elapsed < self.initial_summary_delay_seconds:
                     logger.info(f"Delaying first summary - only {elapsed:.1f}s elapsed (need {self.initial_summary_delay_seconds}s)")
-                    return []  # Skip LLM call, accumulate more text
+                    return {"type": "context_summary", "segments": []}  # Skip LLM call, accumulate more text
                 else:
                     logger.info(f"Initial delay passed - proceeding with first summary after {elapsed:.1f}s")
         
         # Get context and prior insights from accumulated windows
-        # _build_context now returns tuple: (context_string, prior_insights)
         context, prior_insights = self._build_context(include_insights=True)
         
         # Get unprocessed text from all windows (for first summary, this includes all accumulated text)
@@ -930,7 +985,7 @@ class SummaryClient:
         logger.info(f"Sending {len(content_to_analyze)} chars to analyze + {len(context)} chars context (with {len(prior_insights)} prior insights) to LLM")
         summary_text, reasoning_content = await self.summarize_text(content_to_analyze, context)
         
-        logger.info(f"Processed window (pipeline_id={window_id}, actual_id={actual_window_id}), summary length={len(summary_text)}")
+        logger.info(f"Processed window (transcription_window_id={transcription_window_id}, summary_window_id={summary_window_id}), summary length={len(summary_text)}")
         
         # Parse JSON and extract analysis for background_context
         background_context = ""
@@ -953,11 +1008,11 @@ class SummaryClient:
         # Extract insights and get updated parsed_data with assigned insight_ids
         insights = []
         if parsed_data:
-            # Use actual_window_id from WindowManager, not pipeline's window_id
-            parsed_data = self._extract_insights(parsed_data, actual_window_id, window_start, window_end)
+            # Use summary_window_id from WindowManager
+            parsed_data = self._extract_insights(parsed_data, summary_window_id, final_window_start, final_window_end)
             # Get insights from the window (they were added during _extract_insights)
-            insights = self._window_manager.get_window_insights(actual_window_id)
-            logger.info(f"Extracted {len(insights)} insights for window {actual_window_id}")
+            insights = self._window_manager.get_window_insights(summary_window_id)
+            logger.info(f"Extracted {len(insights)} insights for window {summary_window_id}")
         
         # Update summary_text with assigned insight_ids
         updated_summary_text = json.dumps(parsed_data) if parsed_data else summary_text
@@ -967,8 +1022,8 @@ class SummaryClient:
             summary_type=summary_type,
             background_context=background_context,
             summary=updated_summary_text,
-            timestamp_start=window_start,
-            timestamp_end=window_end,
+            timestamp_start=final_window_start,
+            timestamp_end=final_window_end,
         )
         
         # Mark that we have performed at least one summary
@@ -978,9 +1033,29 @@ class SummaryClient:
         self._window_manager.mark_all_windows_processed()
         logger.info("Marked all windows as processed after first summary")
         
-        logger.info(f"Returning summary segment for window {window_id}")
+        # Build complete payload with summary_window_id and transcription_window_ids list
+        payload = {
+            "type": "context_summary",
+            "timestamp_utc": datetime.now(timezone.utc).isoformat(),
+            "timing": {
+                "summary_window_id": summary_window_id,
+                "transcription_window_ids": transcription_window_ids,
+                "media_window_start_ms": int(final_window_start * 1000),
+                "media_window_end_ms": int(final_window_end * 1000)
+            },
+            "segments": [
+                {
+                    "id": f"{summary_window_id}-0",
+                    "summary_type": summary_segment.summary_type,
+                    "background_context": summary_segment.background_context,
+                    "summary": summary_segment.summary,
+                }
+            ]
+        }
         
-        return [summary_segment]
+        logger.info(f"Returning complete payload with summary_window_id={summary_window_id}, transcription_window_ids={transcription_window_ids}")
+        
+        return payload
     
     def _extract_insights(
         self,
@@ -1181,35 +1256,39 @@ class SummaryClient:
     async def store_skipped_segments(
         self,
         segments: List[Dict[str, Any]],
-        window_id: int,
+        transcription_window_id: int,
         window_start: float,
         window_end: float
     ):
         """
         Store skipped segments for merging with next window.
+        Also accumulates the transcription_window_id for traceability.
         
         Args:
             segments: List of transcription segments
-            window_id: Unique identifier for this window
+            transcription_window_id: Unique identifier for this window
             window_start: Start timestamp
             window_end: End timestamp
         """
         # Get non-overlapping text
-        new_text = self.get_new_text_for_window(segments, window_id)
+        new_text = self.get_new_text_for_window(segments, transcription_window_id)
         
         if not new_text:
             return
         
+        # Accumulate skipped transcription_window_id for traceability
+        self._skipped_transcription_ids.append(transcription_window_id)
+        
         # Store for merging with next window
         self._skipped_segments_buffer = {
             "segments": segments,
-            "window_id": window_id,
+            "transcription_window_id": transcription_window_id,
             "window_start": window_start,
             "window_end": window_end,
             "text": new_text
         }
         
-        logger.info(f"Stored skipped window {window_id} for merging, {len(new_text)} chars")
+        logger.info(f"Stored skipped window {transcription_window_id} for merging, accumulated {len(self._skipped_transcription_ids)} skipped IDs, {len(new_text)} chars")
     
     async def process_content_type_detection(
         self,

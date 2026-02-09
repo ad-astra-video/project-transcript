@@ -234,14 +234,15 @@ class TestProcessSegmentsAnalysisOverride:
             result = await client.process_segments(
                 summary_type="test",
                 segments=segments,
-                window_id=1,
+                transcription_window_id=1,
                 window_start=10.0,
                 window_end=15.0
             )
             
-            # Check that analysis was used as background_context
-            assert len(result) == 1
-            assert result[0].background_context == analysis_text
+            # Check that analysis was used as background_context (now returns dict)
+            assert isinstance(result, dict)
+            assert len(result.get("segments", [])) == 1
+            assert result["segments"][0].get("background_context") == analysis_text
     
     @pytest.mark.asyncio
     async def test_reasoning_content_used_when_analysis_missing(self):
@@ -269,14 +270,15 @@ class TestProcessSegmentsAnalysisOverride:
             result = await client.process_segments(
                 summary_type="test",
                 segments=segments,
-                window_id=1,
+                transcription_window_id=1,
                 window_start=10.0,
                 window_end=15.0
             )
             
-            # Check that reasoning_content was used as fallback
-            assert len(result) == 1
-            assert result[0].background_context == reasoning_text
+            # Check that reasoning_content was used as fallback (now returns dict)
+            assert isinstance(result, dict)
+            assert len(result.get("segments", [])) == 1
+            assert result["segments"][0].get("background_context") == reasoning_text
     
     @pytest.mark.asyncio
     async def test_reasoning_content_used_when_analysis_empty(self):
@@ -305,14 +307,15 @@ class TestProcessSegmentsAnalysisOverride:
             result = await client.process_segments(
                 summary_type="test",
                 segments=segments,
-                window_id=1,
+                transcription_window_id=1,
                 window_start=10.0,
                 window_end=15.0
             )
             
-            # Check that reasoning_content was used as fallback
-            assert len(result) == 1
-            assert result[0].background_context == reasoning_text
+            # Check that reasoning_content was used as fallback (now returns dict)
+            assert isinstance(result, dict)
+            assert len(result.get("segments", [])) == 1
+            assert result["segments"][0].get("background_context") == reasoning_text
     
     @pytest.mark.asyncio
     async def test_reasoning_content_used_when_json_parse_fails(self):
@@ -338,14 +341,15 @@ class TestProcessSegmentsAnalysisOverride:
             result = await client.process_segments(
                 summary_type="test",
                 segments=segments,
-                window_id=1,
+                transcription_window_id=1,
                 window_start=10.0,
                 window_end=15.0
             )
             
-            # Check that reasoning_content was used as fallback
-            assert len(result) == 1
-            assert result[0].background_context == reasoning_text
+            # Check that reasoning_content was used as fallback (now returns dict)
+            assert isinstance(result, dict)
+            assert len(result.get("segments", [])) == 1
+            assert result["segments"][0].get("background_context") == reasoning_text
 
 
 class TestInitialDelayLogic:
@@ -372,13 +376,14 @@ class TestInitialDelayLogic:
         result = await client.process_segments(
             summary_type="test",
             segments=segments,
-            window_id=1,
+            transcription_window_id=1,
             window_start=10.0,  # Only 10 seconds elapsed
             window_end=15.0
         )
         
-        # Should return empty list (delay applied)
-        assert len(result) == 0
+        # Should return empty segments list (delay applied, now returns dict)
+        assert isinstance(result, dict)
+        assert len(result.get("segments", [])) == 0
     
     @pytest.mark.asyncio
     async def test_no_delay_when_elapsed_greater_than_delay(self):
@@ -405,13 +410,14 @@ class TestInitialDelayLogic:
             result = await client.process_segments(
                 summary_type="test",
                 segments=segments,
-                window_id=1,
+                transcription_window_id=1,
                 window_start=40.0,  # 40 seconds elapsed, exceeds 30s delay
                 window_end=45.0
             )
             
-            # Should return a result (no delay)
-            assert len(result) == 1
+            # Should return a result (no delay, now returns dict)
+            assert isinstance(result, dict)
+            assert len(result.get("segments", [])) == 1
     
     def test_update_params_changes_delay(self):
         """Test that update_params can change the delay setting."""
@@ -533,13 +539,14 @@ class TestPriorInsightsAccumulation:
             result = await client.process_segments(
                 summary_type="test",
                 segments=segments,
-                window_id=0,
+                transcription_window_id=0,
                 window_start=5.0,  # Small delay to allow processing
                 window_end=10.0
             )
             
-            # Should have result with insight
-            assert len(result) == 1
+            # Should have result with insight (now returns dict with segments key)
+            assert isinstance(result, dict)
+            assert len(result.get("segments", [])) == 1
             
             # Verify insight was stored in window 0
             window_0_insights = client._window_manager.get_window_insights(0)
@@ -588,12 +595,13 @@ class TestPriorInsightsAccumulation:
             result1 = await client.process_segments(
                 summary_type="test",
                 segments=segments1,
-                window_id=0,
+                transcription_window_id=0,
                 window_start=5.0,
                 window_end=10.0
             )
             
-            assert len(result1) == 1
+            assert isinstance(result1, dict)
+            assert len(result1.get("segments", [])) == 1
             
             # Verify insights from first window are stored
             window_0_insights = client._window_manager.get_window_insights(0)
@@ -604,12 +612,13 @@ class TestPriorInsightsAccumulation:
             result2 = await client.process_segments(
                 summary_type="test",
                 segments=segments2,
-                window_id=1,
+                transcription_window_id=1,
                 window_start=10.0,
                 window_end=15.0
             )
             
-            assert len(result2) == 1
+            assert isinstance(result2, dict)
+            assert len(result2.get("segments", [])) == 1
             
             # Verify insights from second window are stored
             window_1_insights = client._window_manager.get_window_insights(1)

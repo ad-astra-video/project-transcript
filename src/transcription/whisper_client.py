@@ -62,6 +62,7 @@ class WhisperClient:
         self.download_root = Path(os.environ.get("MODEL_DIR", "/models"))
         Path(self.download_root).mkdir(parents=True, exist_ok=True)
         self._lock = asyncio.Lock()
+        self._next_transcription_id: int = 0  # Internal counter for transcription IDs
         
     async def initialize(self):
         """Initialize the whisper model asynchronously."""
@@ -82,22 +83,29 @@ class WhisperClient:
                 )
                 logger.info("Whisper model loaded successfully")
     
-    async def transcribe_audio(self, audio_file_path: str, segment_idx: int) -> List[TranscriptionSegment]:
+    async def transcribe_audio(self, audio_file_path: str, segment_idx: int = 0) -> tuple[int, List[TranscriptionSegment]]:
         """
         Transcribe audio file to text with timing information.
         
         Args:
             audio_file_path: Path to the audio file
-            segment_idx: Segment index for logging
+            segment_idx: Optional segment index. If 0, uses internal counter.
             
         Returns:
-            List of transcription segments with timing
+            Tuple of (transcription_window_id, List of transcription segments with timing)
         """
+        # Use provided segment_idx if non-zero, otherwise use internal counter
+        if segment_idx != 0:
+            transcription_window_id = segment_idx
+        else:
+            transcription_window_id = self._next_transcription_id
+            self._next_transcription_id += 1
+        
         try:
             if self.model is None:
                 await self.initialize()
             
-            logger.debug(f"Transcribing audio for segment {segment_idx}")
+            logger.debug(f"Transcribing audio for transcription_window_id {transcription_window_id}")
             
             # Run transcription in thread pool
             loop = asyncio.get_event_loop()
@@ -150,12 +158,14 @@ class WhisperClient:
                         words=words
                     ))
             
-            logger.debug(f"Transcribed {len(transcription_segments)} segments for segment {segment_idx} (confidence: {language_confidence:.3f})")
-            return transcription_segments
+            logger.debug(f"Transcribed {len(transcription_segments)} segments for transcription_window_id {transcription_window_id} (confidence: {language_confidence:.3f})")
+            
+            # Return transcription_window_id along with segments
+            return transcription_window_id, transcription_segments
             
         except Exception as e:
-            logger.error(f"Error transcribing segment {segment_idx}: {e}")
-            return []
+            logger.error(f"Error transcribing for transcription_window_id {transcription_window_id}: {e}")
+            return transcription_window_id, []
     
     def get_model_info(self) -> Dict[str, Any]:
         """Get information about the loaded model."""
