@@ -53,7 +53,6 @@ class WindowInsight:
             "insight_type": self.insight_type,
             "insight_text": self.insight_text,
             "confidence": self.confidence,
-            "window_id": self.window_id,
             "classification": self.classification,
             "continuation_of": self.continuation_of,
             "correction_of": self.correction_of,
