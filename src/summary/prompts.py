@@ -239,42 +239,90 @@ CONTENT_TYPE_RULE_MODIFIERS = {
     },
 
     "TECHNICAL_TALK": {
-        "emphasize": ["NOTES", "QUESTION", "RISK"],
-        "deemphasize": ["ACTION", "KEY POINT"],
+        "emphasize": ["KEY POINT", "NOTES", "QUESTION"],
+        "deemphasize": ["ACTION"],
         "sentiment_enabled": False,
         "action_strictness": "extreme",
         "notes_frequency": "high",
-        "key_point_guidance": "Only for empirical results, specific thresholds, or counter-intuitive findings. Most technical explanations should be NOTES.",
+        "key_point_guidance": """
+KEY POINT for technical talks should capture:
+- Empirical results with specific numbers (accuracy, performance, thresholds)
+- Counter-intuitive findings that contradict expectations
+- Critical implications (explains why something fundamentally matters)
+- Paradigm shifts (challenges how experts think about the problem)
+- Critical limitations and boundary conditions (when approach fails)
+- Self-corrections by the speaker
+
+DO NOT use KEY POINT for:
+- Standard mechanism explanations (how something works)
+- Speaker's thesis or framework being introduced
+- Background context or setup
+
+The speaker's explanations are NOTES. The speaker's findings, results, and critical insights are KEY POINTs.
+        """.strip(),
         "risk_guidance": "Focus on technical issues, bugs, failures, or limitations that could impact system behavior or development progress.",
     },
 
     "LECTURE_OR_TALK": {
-        "emphasize": ["NOTES"],
-        "deemphasize": ["ACTION", "DECISION", "QUESTION", "KEY POINT"],
+        "emphasize": ["KEY POINT", "NOTES"],
+        "deemphasize": ["ACTION", "DECISION", "QUESTION"],
         "sentiment_enabled": False,
         "action_strictness": "block",
         "notes_frequency": "medium",
-        "key_point_guidance": "Only for empirical results, specific thresholds, or counter-intuitive findings. Lectures are primarily explanatory - most content should be NOTES.",
+        "key_point_guidance": """
+KEY POINT for lectures should capture:
+- Empirical results with specific numbers
+- Counter-intuitive findings or surprising results
+- Critical implications of concepts (why they fundamentally matter)
+- Paradigm shifts in thinking
+- Critical limitations or failure modes
+- Self-corrections by the speaker
+
+DO NOT use KEY POINT for:
+- Explanations of concepts or frameworks
+- Background information or context
+- Standard academic content
+
+Lectures are explanatory, but the breakthrough insights within them should be KEY POINTs.
+        """.strip(),
         "risk_guidance": "Focus on potential misconceptions, outdated information, or controversial claims that could mislead listeners.",
     },
 
     "INTERVIEW": {
-        "emphasize": ["NOTES", "QUESTION"],
-        "deemphasize": ["ACTION", "DECISION", "KEY POINT"],
+        "emphasize": ["NOTES", "QUESTION", "KEY POINT"],
+        "deemphasize": ["ACTION", "DECISION"],
         "sentiment_enabled": False,
         "action_strictness": "extreme",
         "notes_frequency": "high",
-        "key_point_guidance": "Only for pivotal career moments, controversial insights, or significant revelations. Most interview content should be NOTES.",
+        "key_point_guidance": """
+KEY POINT for interviews should capture:
+- Pivotal career moments or significant revelations
+- Controversial or surprising insights
+- Specific outcomes with numbers (revenue, impact, metrics)
+- Critical lessons learned or failures
+- Counter-intuitive findings from their experience
+
+Most interview content should be NOTES (background, stories, explanations).
+        """.strip(),
         "risk_guidance": "Focus on red flags, concerns, or potential issues with the interviewee's responses or qualifications.",
     },
 
     "PODCAST": {
-        "emphasize": ["NOTES"],
-        "deemphasize": ["ACTION", "DECISION", "KEY POINT"],
+        "emphasize": ["KEY POINT", "NOTES"],
+        "deemphasize": ["ACTION", "DECISION"],
         "sentiment_enabled": False,
         "action_strictness": "extreme",
         "notes_frequency": "high",
-        "key_point_guidance": "Only for surprising revelations, unexpected connections, or controversial takes. Most podcast discussion should be NOTES.",
+        "key_point_guidance": """
+KEY POINT for podcasts should capture:
+- Surprising revelations or unexpected connections
+- Controversial takes or counter-intuitive insights
+- Specific data points, statistics, or results
+- Critical implications of discussion topics
+- Expert disagreements or paradigm shifts
+
+Most casual discussion should be NOTES.
+        """.strip(),
         "risk_guidance": "Focus on controversial claims, potential misinformation, or statements that could be misleading to listeners.",
     },
 
@@ -293,6 +341,15 @@ CONTENT_TYPE_RULE_MODIFIERS = {
         "sentiment_enabled": False,
         "action_strictness": "block",
         "notes_frequency": "medium",
+        "key_point_guidance": """
+KEY POINT for news should capture:
+- Breaking developments or major announcements
+- Specific numbers, casualties, impacts
+- Significant changes in status or policy
+- Critical implications of events
+
+Background context should be NOTES.
+        """.strip(),
         "risk_guidance": "Focus on potential inaccuracies, unverified claims, or misleading information in the news report.",
     },
 
@@ -315,11 +372,21 @@ CONTENT_TYPE_RULE_MODIFIERS = {
     },
 
     "DEBATE": {
-        "emphasize": ["DECISION", "QUESTION", "RISK"],
-        "deemphasize": ["ACTION", "KEY POINT", "NOTES"],
+        "emphasize": ["KEY POINT", "DECISION", "QUESTION", "RISK"],
+        "deemphasize": ["ACTION", "NOTES"],
         "sentiment_enabled": False,
         "action_strictness": "very_high",
         "notes_frequency": "low",
+        "key_point_guidance": """
+KEY POINT for debates should capture:
+- Critical points of disagreement
+- Evidence or data cited by either side
+- Logical flaws or strong counter-arguments
+- Concessions or agreement on facts
+- Paradigm differences between debaters
+
+Routine arguments should be NOTES.
+        """.strip(),
         "risk_guidance": "Focus on weak points in arguments, logical fallacies, or potential counter-arguments that could undermine a position.",
     },
 
@@ -355,7 +422,8 @@ You operate incrementally. Each response reflects ONLY what materially changed s
 
 Provide a thoughtful explanation that remains as concise as possible of the most critical insights and their implications, without restating the entire transcript.
 
-Make sure to include explanation if pulling from prior context to generate insight on current window.  Analysis should include quote from prior context and what text in current window completed the insight.
+Make sure to include explanation if pulling from prior context to generate insight on current window. Analysis should include quote from prior context and what text in current window completed the insight.
+
 ---
 
 ## CORE INSIGHT TYPES (PRIORITY ORDER)
@@ -380,81 +448,200 @@ Extract insights using the following hierarchy. Choose the MOST SPECIFIC categor
    - If the question is rhetorical or answered immediately, do NOT log it.
    - **If no blocking question is asked, output nothing.**
 
-4. **KEY POINT** - Breakthrough-Level Insights Only
+4. **KEY POINT** - Critical Insights and Findings
 
-KEY POINT captures ONLY the most critical information that represents a fundamental breakthrough, paradigm shift, or high-stakes fact. This is the highest bar for classification.
+KEY POINT captures breakthrough insights, empirical findings, critical implications, counter-intuitive results, and fundamental limitations. This category balances capturing genuinely important information while filtering out routine explanations.
 
-### PRIMARY FILTER: Explanation vs Discovery
+### PRIMARY CLASSIFICATION FRAMEWORK
 
-**Ask FIRST: "Is the speaker EXPLAINING their framework/thesis, or REPORTING a specific finding/result?"**
+**Use this decision tree for EVERY potential KEY POINT:**
 
-**EXPLAINING (→ NOTES):**
-- "Architecture resolves context degradation" (thesis statement)
-- "Multi-hop reasoning is critical for legal contracts" (framework explanation)
-- "Context window size is only half the story" (conceptual claim)
-- "Task complexity is the primary driver" (theoretical claim)
-- "RAG retrieves documents via semantic similarity" (mechanism explanation)
+#### Category A: EMPIRICAL FINDINGS (Always KEY POINT if specific)
+Results from testing, measurement, or observation:
+- "We tested 1000 contracts and found 95% accuracy"
+- "The system fails above 10,000 requests/second"  
+- "Performance degraded by 60% at the 500K token threshold"
+- "The bug only manifests when all three conditions are true"
 
-**REPORTING (→ KEY POINT):**
-- "We tested 1000 contracts and found 95% accuracy" (empirical result)
-- "The system fails above 10,000 requests/second" (specific threshold)
-- "Recursion depth above 5 causes catastrophic failure" (specific failure condition)
-- "The bug only manifests when all three conditions are true" (specific discovery)
-- "Context degradation increases 10x at 500K tokens" (quantitative finding)
+**Rule**: Specific numbers + outcomes = KEY POINT
 
-**Rule**: If the speaker is teaching/explaining their ideas, it's NOTES. If they're reporting measurements, thresholds, or unexpected findings, it's KEY POINT.
+#### Category B: COUNTER-INTUITIVE FINDINGS (Always KEY POINT)
+Results that contradict common expectations or beliefs:
+- "RAG approach reduces reliability rather than improving it for complex documents"
+- "Summarization shown by RLM paper to be inexpensive, countering expense concerns"
+- "Smaller context windows performed better than larger ones for this task"
 
-### Threshold Criteria - TWO OR MORE must be true (AFTER passing PRIMARY FILTER):
+**Triggers**: "rather than", "instead of", "contrary to", "surprisingly", "unexpectedly"
+
+#### Category C: CRITICAL IMPLICATIONS (KEY POINT if fundamental)
+Explains WHY something matters or what it fundamentally enables/undermines:
+- "Multi-hop reasoning failures fundamentally undermine trust in AI agents" ← KEY POINT (stakes)
+- "This limitation makes the approach unsuitable for production" ← KEY POINT (blocks adoption)
+- "Context degradation affects user experience" ← NOTES (obvious consequence)
+
+**Rule**: Is the implication fundamental/non-obvious? → KEY POINT. Is it obvious? → NOTES
+
+#### Category D: PARADIGM SHIFTS (KEY POINT if challenges assumptions)
+Changes how experts should think about a problem:
+- "Context window size is only half the story - task complexity matters more" ← KEY POINT
+- "The problem isn't retrieval but structural document complexity" ← KEY POINT  
+- "We should model documents as dependency graphs not sequential text" ← KEY POINT
+
+**Rule**: Does it challenge a common mental model? → KEY POINT
+
+#### Category E: CRITICAL LIMITATIONS (KEY POINT if specific)
+Boundaries, failure modes, or conditions where approach doesn't work:
+- "Very small models still exhibit deterioration despite the framework's advantages" ← KEY POINT
+- "This approach doesn't work for documents under 10K tokens" ← KEY POINT
+- "The method has limitations" ← NOTES (vague)
+
+**Rule**: Specific boundary or failure mode → KEY POINT. Vague acknowledgment → NOTES
+
+#### Category F: SPEAKER'S THESIS/FRAMEWORK (Usually NOTES)
+Core concepts being explained or introduced:
+- "Architecture resolves context degradation" ← NOTES (thesis statement)
+- "Multi-hop reasoning is critical for legal contracts" ← NOTES (framework)
+- "Task complexity is the primary driver" ← NOTES (conceptual claim)
+
+**Exception**: First mention of a truly novel framework can be KEY POINT if it challenges existing paradigms.
+
+**Rule**: If speaker is EXPLAINING their own ideas → NOTES. If speaker is REPORTING findings about their ideas → check other categories.
+
+### PROGRESSIVE REFINEMENT PATTERN
+
+Speakers often reveal insights in stages. Track the evolution:
+
+**Stage 1: Concept Introduction** → NOTES
+- "Architecture resolves context degradation"
+
+**Stage 2: Mechanism Explanation** → NOTES (continuation_of)
+- "Uses dependency graphs and REPL loops"
+
+**Stage 3: Critical Implication** → KEY POINT (continuation_of)  
+- "This fundamentally solves the multi-hop reasoning problem that undermined prior approaches"
+
+**Stage 4: Empirical Validation** → KEY POINT
+- "Tested on 1000 contracts with 95% accuracy vs 60% for RAG"
+
+**CRITICAL**: Do NOT skip stages 3-4 just because the topic was mentioned in stage 1. The value emerges through progressive refinement.
+
+### SELF-CORRECTION DETECTION
+
+When speaker contradicts their own earlier statement:
+
+**Original** [Window 8, 2:15]:
+- "Performance falls off a cliff at specific complexity thresholds" → NOTES
+
+**Correction** [Window 15, 5:19]:
+- "Correction: ContextRot causes gradual degradation not cliff-like failure" → KEY POINT (correction_of: 8)
+
+**Triggers**: "actually", "correction:", "I misspoke", "let me clarify", "not X but Y"
+
+**Rule**: Self-corrections are always KEY POINT with correction_of field populated.
+
+### Threshold Criteria for Borderline Cases
+
+If an insight doesn't clearly fit Categories A-F above, apply TWO OR MORE of these:
 
 1. **Paradigm Impact**: Would change how experts think about this domain?
 2. **Decision Gravity**: Would this single fact determine a major decision?
 3. **Novelty Level**: Is this new, surprising, or counter-intuitive?
-4. **Stakes Clarity**: Is being wrong about this fact have significant consequences?
+4. **Stakes Clarity**: Would being wrong about this fact have significant consequences?
+
+If fewer than 2 criteria met → NOTES
 
 ### Synthesis Rule (Within-Window)
 
-When multiple insights express the same core idea **in the same window**, output ONE KEY POINT that synthesizes them, not multiple separate KEY POINTs.
+When multiple statements express the same core idea **in the same window**, output ONE insight that synthesizes them, not multiple separate insights.
 
-**Example of WRONG output:**
-- "Task complexity is the primary driver" (2:15)
-- "Task complexity is the primary driver" (2:57)
-- "Task complexity is the primary driver" (3:54)
-- "Task complexity is the primary driver" (4:12)
+**WRONG** (Within Same Window):
+```json
+{
+  "insights": [
+    {"insight_type": "NOTES", "insight_text": "Task complexity is the primary driver"},
+    {"insight_type": "NOTES", "insight_text": "Task complexity matters more than context size"},
+    {"insight_type": "NOTES", "insight_text": "Context window is only half the story"}
+  ]
+}
+```
 
-**Example of CORRECT output:**
-- "Task complexity is the primary driver of context window limitations, not just context window size" (single synthesis)
+**CORRECT**:
+```json
+{
+  "insights": [
+    {
+      "insight_type": "KEY POINT",
+      "insight_text": "Context window size is only half the story - task complexity is the primary driver of performance degradation"
+    }
+  ]
+}
+```
 
 ### Cross-Window Deduplication Rule
 
-Before outputting a KEY POINT, check if a semantically similar KEY POINT was output in PRIOR INSIGHTS (last 2-5 minutes).
+Before outputting a KEY POINT, check if PRIOR INSIGHTS contain semantically similar content from the last 2-5 minutes.
 
-**If similar:**
-- Skip if pure repetition with no new information
-- Output as NOTES with `continuation_of` if adding minor detail
-- Only output as KEY POINT if fundamentally new aspect or quantitative finding
+**Decision Matrix**:
 
-**Example:**
-- Window 1: "Architecture resolves context degradation" → KEY POINT
-- Window 2: "Architecture enables direct interaction" → NOTES (continuation_of Window 1)
-- Window 3: "Architecture reduces context by 10x vs summarization" → KEY POINT (new quantitative aspect)
+| Prior Insight | Current Content | Action |
+|--------------|-----------------|--------|
+| "Architecture resolves degradation" (NOTES) | "Architecture resolves degradation" | SKIP (exact repeat) |
+| "Architecture resolves degradation" (NOTES) | "Fundamentally resolves degradation" | SKIP (paraphrase) |
+| "Architecture resolves degradation" (NOTES) | "This solves the trust problem in agents" | KEY POINT (critical implication) |
+| "Architecture resolves degradation" (NOTES) | "Reduces context by 10x vs summarization" | KEY POINT (quantitative finding) |
+| "Architecture is efficient" (NOTES) | "Architecture shown to be inexpensive" | KEY POINT (contradicts expectations) |
+| "Performance falls off a cliff" (NOTES) | "Actually, degradation is gradual not cliff-like" | KEY POINT w/ correction_of (self-correction) |
+
+**Semantic Similarity Thresholds**:
+- Pure repetition: Skip entirely
+- Paraphrase without new value: Skip entirely  
+- Adds quantification (numbers, percentages, comparisons): KEY POINT if >40% difference
+- Adds critical implication (explains why it matters): KEY POINT if >40% difference
+- Adds evidence/validation (empirical results): KEY POINT if >40% difference
+- Adds limitations/boundaries (when it fails): KEY POINT if >40% difference
+- Contradicts or corrects: Always KEY POINT with correction_of field
 
 ### What NEVER Qualifies as KEY POINT:
-- Standard explanations or how things work
-- Speaker's thesis or framework being explained
+- Standard explanations of mechanisms or how things work (unless counter-intuitive)
+- Speaker's thesis or framework being explained (unless paradigm-shifting)
 - Common knowledge in the field
 - Incremental improvements or routine updates
 - Contextual details that support understanding
-- Information that would be covered in a basic tutorial
-- Repetition of the same point across multiple windows
+- Information that would be in a basic tutorial
+- Exact repetition or paraphrasing of earlier points without new value
+- Vague statements like "this has limitations" or "this is important"
 
 ### What QUALIFIES as KEY POINT:
-- "This approach fails above 10,000 requests/second"
-- "The bug only manifests when all three conditions are true"
-- "We discovered the memory leak is in the third-party library"
-- "The new algorithm reduces latency by 60%"
-- "This pattern indicates a security vulnerability"
-- "Task complexity is the primary driver of context window limitations"
-- "Context degradation is task-specific, occurring at specific saturation levels with severity increasing non-linearly"
+
+**Empirical Findings**:
+- "We tested 1000 contracts and found 95% accuracy"
+- "The system fails above 10,000 requests/second"
+- "Performance degraded by 60% at the 500K token threshold"
+
+**Counter-Intuitive Findings**:
+- "RAG reduces reliability rather than improving it for complex documents"
+- "Summarization shown to be inexpensive, countering common concerns"
+
+**Critical Implications**:
+- "Multi-hop reasoning failures fundamentally undermine trust in AI agents"
+- "This makes the approach unsuitable for production use"
+
+**Paradigm Shifts**:
+- "Context window size is only half the story - task complexity matters more"
+- "Model documents as dependency graphs not sequential text"
+
+**Critical Limitations**:
+- "Very small models still deteriorate despite the framework"
+- "Approach doesn't work for documents under 10K tokens"
+- "95th percentile cost can become very expensive in recursion loops"
+
+**Specific Thresholds/Boundaries**:
+- "Recursion depth above 5 causes catastrophic failure"
+- "Only one layer deep of recursion is allowed"
+
+**Comparative Findings**:
+- "Architecture reduces context by 10x vs summarization"
+- "Performed better than GPT-5 on the Qwen 340B model"
 
 5. **RISK**
    Time-bound or blocking threats that could derail a committed ACTION or DECISION.
@@ -469,12 +656,15 @@ Before outputting a KEY POINT, check if a semantically similar KEY POINT was out
    A running contextual log for continuity and minor details. This is the ONLY insight type that may be output when no other insights exist.
 
    Use NOTES for:
-   - topic changes
-   - speaker identification
-   - background context
-   - isolated facts, statistics, or details without standalone significance
-   - minor details that provide context but don't warrant KEY POINT classification
-   - non-actionable but informative statements
+   - Topic changes
+   - Speaker identification
+   - Background context
+   - Speaker's thesis or framework being explained
+   - Mechanism explanations (how something works)
+   - Isolated facts, statistics, or details without standalone significance
+   - Minor details that provide context but don't warrant KEY POINT classification
+   - Non-actionable but informative statements
+   - Standard technical explanations
 
    **Output NOTES only when they provide genuine continuity value. Do not output NOTES just to have output.**
 
@@ -509,49 +699,113 @@ Use these examples to classify borderline cases:
 
 | Example | Classification | Reasoning |
 |---------|----------------|-----------|
-| "Architecture resolves context degradation" | NOTES | Explains speaker's thesis |
+| "Architecture resolves context degradation" | NOTES | Speaker's thesis statement |
 | "Architecture uses read-evaluate-print loops" | NOTES | Explains mechanism |
-| "Context window size is only half the story" | NOTES | Explanation of concept |
-| "Task complexity is the primary driver" | NOTES | Explains speaker's framework |
-| "Multi-hop reasoning is critical for recursive tasks" | NOTES | Explains how something works |
+| "Context window size is only half the story" | KEY POINT | Challenges common assumption (paradigm shift) |
+| "Task complexity is the primary driver" | NOTES | First mention - explains framework |
+| "Task complexity AND context both matter - not just tokens" | KEY POINT | Refinement adding critical nuance |
+| "Multi-hop reasoning is critical for legal contracts" | NOTES | Explains requirement |
+| "Multi-hop reasoning failures fundamentally undermine trust in AI agents" | KEY POINT | States critical implication |
 | "Clauses referencing other clauses create recursive complexity" | NOTES | Explains mechanism |
 | "Context degradation is task-specific" | NOTES | Explains characteristic |
-| "RAG retrieves documents via semantic similarity" | NOTES | Explains how RAG works |
+| "RAG retrieves documents via semantic similarity" | NOTES | Standard mechanism explanation |
+| "RAG approach reduces reliability rather than improving it for complex documents" | KEY POINT | Counter-intuitive finding |
 | "The API endpoint is /api/v1/users" | NOTES | Standard reference information |
 | "Authentication requires a Bearer token" | NOTES | Common configuration detail |
-| "We use a retry with exponential backoff" | NOTES | Standard pattern, no breakthrough |
+| "We use retry with exponential backoff" | NOTES | Standard pattern, no breakthrough |
 | "Setting pool_size to 20 is recommended" | NOTES | Configuration advice, not breakthrough |
 | "The library handles JSON serialization automatically" | NOTES | Standard functionality |
 | "The function takes a string parameter and returns a boolean" | NOTES | Basic API documentation |
-| "Architecture reduces context by 10x vs summarization" | KEY POINT | Quantitative finding with comparison |
+| "Architecture reduces context by 10x vs summarization" | KEY POINT | Quantitative comparison finding |
 | "We tested 1000 contracts and found 95% accuracy" | KEY POINT | Empirical result |
-| "The system fails above 10,000 concurrent connections" | KEY POINT | Critical threshold that limits the system |
+| "The system fails above 10,000 concurrent connections" | KEY POINT | Critical threshold limiting the system |
 | "The memory leak was traced to an unclosed database connection" | KEY POINT | Critical bug discovery |
 | "At 500ms latency, user experience degrades significantly" | KEY POINT | Critical performance threshold |
 | "A race condition exists when two requests arrive simultaneously" | KEY POINT | Critical vulnerability identification |
 | "Recursion depth above 5 causes catastrophic failure" | KEY POINT | Specific failure condition |
+| "Summarization is lossy - information is lost" | NOTES | Expected characteristic |
+| "Summarization shown by RLM paper to be inexpensive, countering expense concerns" | KEY POINT | Contradicts common belief |
+| "Very small models still exhibit deterioration despite framework advantages" | KEY POINT | Important limitation of approach |
+| "Performance falls off a cliff at complexity thresholds" | NOTES | Initial descriptive claim |
+| "Correction: ContextRot causes gradual degradation not cliff-like failure" | KEY POINT | Self-correction of earlier statement |
+| "Problem isn't retrieval but structural document complexity" | KEY POINT | Paradigm shift in problem understanding |
+| "Model documents as dependency graphs not sequential text" | KEY POINT | Novel mental model/approach |
+| "Only one layer deep of recursion allowed" | KEY POINT | Critical architectural constraint |
+| "95th percentile cost becomes very expensive in recursion loops" | KEY POINT | Important cost limitation |
+| "Approach doesn't work well for very small models" | KEY POINT | Specific limitation/boundary |
 
 #### Repetition Detection Examples
 
 **Within-Window Repetition (WRONG):**
-- "Task complexity is the primary driver" (2:15)
-- "Task complexity is the primary driver" (2:57)
-- "Task complexity is the primary driver" (3:54)
+```json
+{
+  "insights": [
+    {"insight_text": "Task complexity is the primary driver", "timestamp": "2:15"},
+    {"insight_text": "Task complexity is the primary driver", "timestamp": "2:57"},
+    {"insight_text": "Task complexity is the primary driver", "timestamp": "3:54"}
+  ]
+}
+```
 
 **Within-Window Synthesis (CORRECT):**
-- "Task complexity is the primary driver of context window limitations" (single NOTES)
+```json
+{
+  "insights": [
+    {
+      "insight_text": "Task complexity is the primary driver of context window limitations, not just context window size",
+      "insight_type": "KEY POINT"
+    }
+  ]
+}
+```
 
 **Cross-Window Repetition (WRONG):**
-- Window 1: "Architecture resolves context degradation" → KEY POINT
-- Window 2: "Architecture resolves context degradation" → KEY POINT (DUPLICATE)
-- Window 3: "Fundamentally resolves context degradation" → KEY POINT (PARAPHRASE)
-- Window 4: "Resolves multidimensional context degradation" → KEY POINT (PARAPHRASE)
+```json
+// Window 1
+{"insight_text": "Architecture resolves context degradation", "insight_type": "KEY POINT"}
 
-**Cross-Window Deduplication (CORRECT):**
-- Window 1: "Architecture resolves context degradation" → NOTES (explains thesis)
-- Window 2: "Architecture enables direct interaction" → NOTES (continuation_of Window 1)
-- Window 3: "Architecture reduces context by 10x vs summarization" → KEY POINT (new quantitative finding)
-- Window 4: "We tested architecture on 1000 contracts, 95% accuracy" → KEY POINT (empirical result)
+// Window 2  
+{"insight_text": "Architecture resolves context degradation", "insight_type": "KEY POINT"}
+
+// Window 3
+{"insight_text": "Fundamentally resolves context degradation", "insight_type": "KEY POINT"}
+
+// Window 4
+{"insight_text": "Resolves multidimensional context degradation", "insight_type": "KEY POINT"}
+```
+
+**Cross-Window Progressive Refinement (CORRECT):**
+```json
+// Window 1
+{
+  "insight_id": 8,
+  "insight_text": "Architecture resolves context degradation using REPL and recursion",
+  "insight_type": "NOTES"
+}
+
+// Window 2
+{
+  "insight_id": 15,
+  "insight_text": "Architecture enables intelligent search over complex documents by building dependency graphs",
+  "insight_type": "NOTES",
+  "continuation_of": 8
+}
+
+// Window 3
+{
+  "insight_id": 22,
+  "insight_text": "This fundamentally solves the multi-hop reasoning problem that undermined trust in prior AI agents",
+  "insight_type": "KEY POINT",
+  "continuation_of": 15
+}
+
+// Window 4
+{
+  "insight_id": 28,
+  "insight_text": "Tested architecture on 1000 contracts with 95% accuracy vs 60% for RAG approach",
+  "insight_type": "KEY POINT"
+}
+```
 
 ---
 
@@ -561,13 +815,15 @@ Use these examples to classify borderline cases:
   If nothing meaningful is said, output an empty insights array. Do not manufacture insights to fill output. Silence is preferable to noise.
 
 - **High-Value Focus**
-  Produce **0–3 insights per window**. Only output when genuine value exists. One meaningful insight is better than three trivial ones.
+  Produce **0–5 insights per window** (increased from 3 to allow for dense technical content). Only output when genuine value exists. One meaningful insight is better than three trivial ones.
+  - Up to 3 KEY POINTs per window if genuinely distinct (empirical finding + limitation + implication = 3 valid KEY POINTs)
+  - NOTES do not count toward the limit
 
 - **Stream Continuity First**
   Assume missing or reordered context. Reconcile with prior windows when possible.
 
 - **Update > Guess**
-  If new information contradicts prior insights, invalidate and update immediately.
+  If new information contradicts prior insights, invalidate and update immediately using the correction_of field.
   Never preserve outdated conclusions.
 
 - **Atomic Output**
@@ -628,7 +884,8 @@ Modifiers may:
 - Enforce stricter ACTION / DECISION gating
 
 When modifiers are active:
-- Apply them strictly
+- Apply them as guidance, not rigid constraints
+- For TECHNICAL_TALK and LECTURE_OR_TALK: Still capture empirical findings, counter-intuitive results, critical implications, and limitations as KEY POINTs
 - Do not compensate by inventing other insight types
 - Prefer omission over speculation
 
@@ -655,10 +912,13 @@ Before outputting any insight, ask: "Is this genuinely new and valuable?"
   - Prior: "Decision: Proceed with Option A"
   - Current: "We decided to go with Option A" → SKIP
 
-- **Repetition of speaker's thesis/framework** → Skip entirely
+- **Verbatim repetition of speaker's thesis** → Skip entirely
   - Prior: "Architecture resolves context degradation"
-  - Current: "Fundamentally resolves context degradation" → SKIP (paraphrase)
-  - Current: "Resolves multidimensional context degradation" → SKIP (paraphrase)
+  - Current: "Architecture resolves context degradation" → SKIP
+
+- **Paraphrase without new information** → Skip entirely
+  - Prior: "Architecture resolves context degradation" (NOTES)
+  - Current: "Fundamentally resolves context degradation" → SKIP (pure paraphrase)
 
 ### When to Output an Insight:
 - **New information on same topic** → Output as new insight
@@ -668,32 +928,77 @@ Before outputting any insight, ask: "Is this genuinely new and valuable?"
 - **Contradiction or correction** → Output with `correction_of` field
   - Prior #37: "Decision: Proceed with Option A"
   - Current: "Actually, we're going with Option B" → OUTPUT with correction_of: 37
+  
+  - Prior #15: "Performance falls off a cliff"
+  - Current: "Actually, degradation is gradual not cliff-like" → OUTPUT with correction_of: 15
 
-- **Meaningful continuation** → Output with `continuation_of` field
+- **Meaningful continuation that adds new angle** → Output with `continuation_of` field
   - Prior #42: "Question: What's the timeline?"
   - Current: "Timeline is 6 weeks" → OUTPUT with continuation_of: 42
 
-- **Quantitative or empirical finding on same topic** → Output as KEY POINT
-  - Prior: "Architecture resolves context degradation" (NOTES)
-  - Current: "Architecture reduces context by 10x vs summarization" → OUTPUT (quantitative finding)
-  - Current: "We tested architecture on 1000 contracts, 95% accuracy" → OUTPUT (empirical result)
+- **Critical implication of earlier concept** → Output as KEY POINT with `continuation_of`
+  - Prior #8: "Multi-hop reasoning is required" (NOTES)
+  - Current: "Multi-hop failures fundamentally undermine trust in AI agents" → OUTPUT as KEY POINT with continuation_of: 8
 
-### Semantic Similarity Check:
+- **Quantitative or empirical finding on same topic** → Output as KEY POINT
+  - Prior #12: "Architecture resolves context degradation" (NOTES)
+  - Current: "Architecture reduces context by 10x vs summarization" → OUTPUT as KEY POINT
+  - Current: "We tested architecture on 1000 contracts, 95% accuracy" → OUTPUT as KEY POINT
+
+- **Limitation or boundary on earlier concept** → Output as KEY POINT
+  - Prior #20: "RLM approach handles complexity well" (NOTES)
+  - Current: "Very small models still deteriorate despite the framework" → OUTPUT as KEY POINT
+
+- **Counter-intuitive finding on earlier concept** → Output as KEY POINT
+  - Prior #5: "RAG is used to improve performance" (NOTES)
+  - Current: "RAG actually reduces reliability for complex docs" → OUTPUT as KEY POINT
+
+### Semantic Similarity Check (UPDATED THRESHOLDS):
 - Before outputting a KEY POINT, check if PRIOR INSIGHTS contain semantically similar KEY POINTs
-- Paraphrasing the same idea does NOT make it a new KEY POINT
-- Require 70%+ semantic difference for a new KEY POINT on the same topic
-- If adding minor detail to existing KEY POINT, use NOTES with `continuation_of`
+- Pure paraphrasing (same finding, same words) does NOT make it a new KEY POINT → SKIP
+- Adding critical value makes it new even if topic is same → OUTPUT as KEY POINT
+- Require 70% semantic difference for pure topic repetition
+- **BUT only 40% difference if adding**:
+  - Quantification (numbers, percentages, comparisons)
+  - Critical implication (explains fundamental consequences)
+  - Evidence/validation (empirical results)
+  - Limitations/boundaries (failure modes, constraints)
+  - Contradiction/correction (counter-intuitive or fixes error)
+
+### Progressive Refinement Pattern (Critical for Technical Content):
+Speakers often reveal insights in stages - track the evolution, don't skip it:
+
+**Stage 1: Concept** → NOTES
+- "Architecture resolves context degradation"
+
+**Stage 2: Mechanism** → NOTES with continuation_of
+- "Uses dependency graphs and REPL to do it"
+
+**Stage 3: Critical Implication** → KEY POINT with continuation_of
+- "This fundamentally solves the multi-hop reasoning problem that undermined prior approaches"
+
+**Stage 4: Evidence** → KEY POINT
+- "Tested on 1000 contracts with 95% accuracy"
+
+**DO NOT treat stage 3-4 as repetition just because stage 1 mentioned the topic.**
 
 ### Timing Context:
 - PRIOR INSIGHTS include timestamps showing when they were captured
 - Use timing to understand conversation flow and avoid repeating recent points
-- If the same point is mentioned 30+ seconds later with new emphasis, it's still repetition unless new information is added
-- In lectures/talks, speakers often repeat their thesis multiple times - this should be NOTES or skipped, not multiple KEY POINTs
+- If the same point is mentioned 30+ seconds later without new information, it's still repetition → SKIP
+- BUT if later mention adds critical context (implication, evidence, limitation), it's NEW → OUTPUT
+- In lectures/talks, speakers often repeat their thesis (stage 1) but later reveal implications (stage 3) - capture stage 3 as KEY POINT
 
-**Default stance**: When in doubt, prefer omission over repetition. Lectures and talks are explanatory by nature - most content should be NOTES.
+**Default stance**: When in doubt between skip vs output, ask:
+- Does current text add critical implication?
+- Does current text add quantification/evidence?
+- Does current text add limitation/boundary?
+- Does current text contradict expectations or earlier statement?
+
+If YES to any → OUTPUT (likely as KEY POINT)
+If NO to all → SKIP
 
 ---
-
 """.strip()
 
 SYSTEM_PROMPT_OUTPUT_CONSTRAINTS = """
