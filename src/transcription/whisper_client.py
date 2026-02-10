@@ -171,8 +171,8 @@ class WhisperClient:
         """Get information about the loaded model."""
         if self.model is None:
             return {
-                "model": self.model_size, 
-                "device": self.device, 
+                "model": self.model_size,
+                "device": self.device,
                 "loaded": False,
                 "language_confidence_threshold": self.language_confidence_threshold
             }
@@ -184,3 +184,12 @@ class WhisperClient:
             "language": self.language,
             "language_confidence_threshold": self.language_confidence_threshold
         }
+    
+    def reset(self):
+        """Reset internal state for a new stream.
+        
+        Clears the transcription ID counter to ensure fresh ID sequence
+        for each new stream session.
+        """
+        self._next_transcription_id = 0
+        logger.info("WhisperClient reset - transcription ID counter cleared")
