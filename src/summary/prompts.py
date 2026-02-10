@@ -663,11 +663,37 @@ Before outputting a KEY POINT, check if PRIOR INSIGHTS contain semantically simi
 
    **NOTES Philosophy**: Capture the substance of what's being said in clear, concise language. Think of NOTES as creating a reliable, searchable record of the conversation that someone could read later to understand what was discussed.
 
+   **Writing Style for NOTES**:
+   - Write in **direct, declarative voice** - state what is being said, not who is saying it
+   - **AVOID**: "Speaker explains X", "Speaker clarifies Y", "Speaker emphasizes Z"
+   - **USE**: Just state the content directly - "X is explained as...", "Y works by...", "Z is important because..."
+   - Only mention "Speaker" or speaker names when:
+     * Multiple speakers are present and attribution matters
+     * There's a specific speaker name to reference (e.g., "John explains...")
+     * Speaker transitions occur
+   
+   **Examples**:
+   
+   ❌ AVOID:
+   - "Speaker explains that ContextRot is a performance issue"
+   - "Speaker clarifies the difference between RAG and summarization"
+   - "Speaker emphasizes the importance of task complexity"
+   
+   ✅ CORRECT:
+   - "ContextRot is a performance degradation issue with increased context"
+   - "RAG differs from summarization in how it retrieves information"
+   - "Task complexity is critical factor alongside context length"
+   
+   ✅ CORRECT (when multiple speakers):
+   - "John explains the architecture uses REPL loops"
+   - "Sarah asks about performance thresholds"
+   - "Speaker transitions to discussing limitations"
+
    Use NOTES for:
    - Topic changes and transitions
-   - Speaker identification
+   - Speaker identification (when multiple speakers)
    - Background context and setup
-   - Speaker's thesis or framework being explained
+   - Thesis or framework being explained
    - Mechanism explanations (how something works)
    - Conceptual explanations and definitions
    - Examples and illustrations provided
@@ -682,13 +708,13 @@ Before outputting a KEY POINT, check if PRIOR INSIGHTS contain semantically simi
    **Atomic NOTES**: Break complex explanations into separate NOTES entries rather than combining everything into one long insight. Each NOTES entry should capture one coherent idea or piece of information.
 
    **Example of Atomic NOTES** (GOOD):
-   - NOTES: "Speaker introduces concept of ContextRot as performance degradation with increased context"
+   - NOTES: "ContextRot is performance degradation that occurs with increased context"
    - NOTES: "ContextRot is function of both context length and task complexity, not just tokens"
    - NOTES: "Legal contracts example: clauses reference other clauses creating complex structure"
-   - NOTES: "Models struggle with multi-hop reasoning across these self-referential documents"
+   - NOTES: "Models struggle with multi-hop reasoning across self-referential documents"
 
    **Example of Overly Condensed** (AVOID):
-   - NOTES: "Speaker explains ContextRot concept and legal contract complexity"  ← Too vague, loses detail
+   - NOTES: "Speaker explains ContextRot concept and legal contract complexity"  ← Too vague, loses detail, unnecessary "Speaker explains"
 
    **Frequency Guidance**: In a 30-second window of technical talk, you might output 3-5 NOTES entries plus 1-2 KEY POINTs. NOTES should be the primary way content is captured, with KEY POINTs reserved for the breakthrough insights within that content.
 
@@ -934,9 +960,9 @@ You have access to PRIOR INSIGHTS from recent windows.
 **NOTES Redundancy Rules**:
 NOTES should paraphrase content atomically. If the speaker continues discussing a topic across multiple windows, continue producing NOTES that paraphrase each new piece of information. Use `continuation_of` to link related NOTES entries when building on earlier content.
 
-**Example of ACCEPTABLE NOTES across windows**:
-- Window 1: "Speaker introduces ContextRot as performance degradation with increased context"
-- Window 2: "ContextRot affected by both context length and task complexity" (continuation_of: window_1)
+**Example of ACCEPTABLE NOTES across windows** (using direct voice):
+- Window 1: "ContextRot is performance degradation that occurs with increased context"
+- Window 2: "ContextRot affected by both context length and task complexity, not just raw token count" (continuation_of: window_1)
 - Window 3: "Legal contracts have high task complexity due to self-referencing clauses" (continuation_of: window_2)
 
 This is NOT redundant - each NOTES paraphrases new content being discussed.
@@ -988,13 +1014,13 @@ Do NOT output KEY POINTs that repeat information already captured in PRIOR INSIG
 - Verbatim repetition within same window
 - Content already paraphrased in current window
 
-**Example showing NOTES + KEY POINTS together**:
+**Example showing NOTES + KEY POINTS together** (direct voice):
 ```json
 {
   "insights": [
     {
       "insight_type": "NOTES",
-      "insight_text": "Speaker explains RLM architecture uses REPL loops"
+      "insight_text": "RLM architecture uses REPL loops for processing"
     },
     {
       "insight_type": "NOTES", 
