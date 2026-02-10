@@ -243,7 +243,7 @@ CONTENT_TYPE_RULE_MODIFIERS = {
         "deemphasize": ["ACTION"],
         "sentiment_enabled": False,
         "action_strictness": "extreme",
-        "notes_frequency": "high",
+        "notes_frequency": "very_high",  # Changed from "high" to "very_high"
         "key_point_guidance": """
 KEY POINT for technical talks should capture:
 - Empirical results with specific numbers (accuracy, performance, thresholds)
@@ -259,6 +259,8 @@ DO NOT use KEY POINT for:
 - Background context or setup
 
 The speaker's explanations are NOTES. The speaker's findings, results, and critical insights are KEY POINTs.
+
+NOTES should be frequent and atomic - paraphrase content comprehensively to create a reliable record.
         """.strip(),
         "risk_guidance": "Focus on technical issues, bugs, failures, or limitations that could impact system behavior or development progress.",
     },
@@ -268,7 +270,7 @@ The speaker's explanations are NOTES. The speaker's findings, results, and criti
         "deemphasize": ["ACTION", "DECISION", "QUESTION"],
         "sentiment_enabled": False,
         "action_strictness": "block",
-        "notes_frequency": "medium",
+        "notes_frequency": "very_high",  # Changed from "medium" to "very_high"
         "key_point_guidance": """
 KEY POINT for lectures should capture:
 - Empirical results with specific numbers
@@ -284,6 +286,8 @@ DO NOT use KEY POINT for:
 - Standard academic content
 
 Lectures are explanatory, but the breakthrough insights within them should be KEY POINTs.
+
+NOTES should be frequent and atomic - paraphrase the lecture content comprehensively to create a reliable record.
         """.strip(),
         "risk_guidance": "Focus on potential misconceptions, outdated information, or controversial claims that could mislead listeners.",
     },
@@ -423,6 +427,8 @@ You operate incrementally. Each response reflects ONLY what materially changed s
 Provide a thoughtful explanation that remains as concise as possible of the most critical insights and their implications, without restating the entire transcript.
 
 Make sure to include explanation if pulling from prior context to generate insight on current window. Analysis should include quote from prior context and what text in current window completed the insight.
+
+**For NOTES-heavy output**: Briefly summarize the main topics being discussed. For example: "Speaker continues explaining ContextRot concept with legal contract examples, then discusses RAG approach limitations."
 
 ---
 
@@ -652,23 +658,43 @@ Before outputting a KEY POINT, check if PRIOR INSIGHTS contain semantically simi
    - Track pivots or escalation/de-escalation when relevant.
    - **If no meaningful sentiment shift occurs, output nothing.**
 
-7. **NOTES** - The Only Exception for Continuity
-   A running contextual log for continuity and minor details. This is the ONLY insight type that may be output when no other insights exist.
+7. **NOTES** - Comprehensive Content Paraphrasing
+   A running atomic log that provides reliable paraphrasing of ALL meaningful content. NOTES should be frequent and granular.
+
+   **NOTES Philosophy**: Capture the substance of what's being said in clear, concise language. Think of NOTES as creating a reliable, searchable record of the conversation that someone could read later to understand what was discussed.
 
    Use NOTES for:
-   - Topic changes
+   - Topic changes and transitions
    - Speaker identification
-   - Background context
+   - Background context and setup
    - Speaker's thesis or framework being explained
    - Mechanism explanations (how something works)
-   - Isolated facts, statistics, or details without standalone significance
-   - Minor details that provide context but don't warrant KEY POINT classification
-   - Non-actionable but informative statements
-   - Standard technical explanations
+   - Conceptual explanations and definitions
+   - Examples and illustrations provided
+   - Supporting arguments or reasoning
+   - Facts, statistics, or details (even if not decision-impacting)
+   - Technical explanations and descriptions
+   - Historical context or prior work mentioned
+   - Comparisons and analogies
+   - Process descriptions
+   - Any substantive content that doesn't rise to the level of other insight types
 
-   **Output NOTES only when they provide genuine continuity value. Do not output NOTES just to have output.**
+   **Atomic NOTES**: Break complex explanations into separate NOTES entries rather than combining everything into one long insight. Each NOTES entry should capture one coherent idea or piece of information.
 
-   NOTES may coexist with other insight types, but no other insight may be duplicated in the same window.
+   **Example of Atomic NOTES** (GOOD):
+   - NOTES: "Speaker introduces concept of ContextRot as performance degradation with increased context"
+   - NOTES: "ContextRot is function of both context length and task complexity, not just tokens"
+   - NOTES: "Legal contracts example: clauses reference other clauses creating complex structure"
+   - NOTES: "Models struggle with multi-hop reasoning across these self-referential documents"
+
+   **Example of Overly Condensed** (AVOID):
+   - NOTES: "Speaker explains ContextRot concept and legal contract complexity"  ← Too vague, loses detail
+
+   **Frequency Guidance**: In a 30-second window of technical talk, you might output 3-5 NOTES entries plus 1-2 KEY POINTs. NOTES should be the primary way content is captured, with KEY POINTs reserved for the breakthrough insights within that content.
+
+   **Balance**: NOTES provide the reliable paraphrasing and continuity. KEY POINTs provide the highlights. Both are essential - NOTES are not "filler" but rather the foundation of the insight stream.
+
+   NOTES may and should coexist with other insight types in the same window.
 
 ---
 
@@ -811,13 +837,22 @@ Use these examples to classify borderline cases:
 
 ## REAL-TIME OPERATING RULES
 
-- **Zero-Output is Valid**
-  If nothing meaningful is said, output an empty insights array. Do not manufacture insights to fill output. Silence is preferable to noise.
+- **Zero-Output is Valid for Non-NOTES Insights**
+  If no ACTION, DECISION, QUESTION, KEY POINT, RISK, or SENTIMENT exists, those arrays should be empty. However, if substantive content is being discussed, output NOTES to paraphrase it. Only output completely empty insights array during pure silence or filler content.
 
-- **High-Value Focus**
-  Produce **0–5 insights per window** (increased from 3 to allow for dense technical content). Only output when genuine value exists. One meaningful insight is better than three trivial ones.
-  - Up to 3 KEY POINTs per window if genuinely distinct (empirical finding + limitation + implication = 3 valid KEY POINTs)
-  - NOTES do not count toward the limit
+- **NOTES Should Be Frequent**
+  NOTES are your primary output mechanism. In a typical 30-second technical talk window, expect:
+  - 3-7 NOTES entries (atomic paraphrasing of content)
+  - 1-2 KEY POINTs (breakthrough insights within that content)
+  - 0-1 of other types (ACTION, DECISION, etc.)
+  
+  **Do not be conservative with NOTES.** They provide the reliable record of what was said.
+
+- **Atomic NOTES**
+  Break explanations into discrete NOTES entries. Each NOTES should capture one coherent thought or piece of information, not multiple concepts mashed together.
+
+- **High-Value Focus for KEY POINTs**
+  While NOTES should be frequent, KEY POINTs should remain selective. Only upgrade to KEY POINT when content meets the Category A-F criteria (empirical findings, counter-intuitive results, critical implications, paradigm shifts, limitations, corrections).
 
 - **Stream Continuity First**
   Assume missing or reordered context. Reconcile with prior windows when possible.
@@ -826,18 +861,14 @@ Use these examples to classify borderline cases:
   If new information contradicts prior insights, invalidate and update immediately using the correction_of field.
   Never preserve outdated conclusions.
 
-- **Atomic Output**
-  Output only net-new or materially changed insights.
-  Never summarize the entire conversation.
-
 - **Noise Handling**
-  Ignore filler, repetition, or verbal ticks unless repetition signals urgency or emphasis.
+  Ignore filler phrases, verbal ticks, or pure repetition unless repetition signals urgency or emphasis. But do paraphrase substantive content even if it's casual or informal.
 
 - **Speaker Awareness**
   Attribute insights to speakers when identifiable, without breaking flow.
 
 - **No Fabrication**
-  Do NOT invent names, numbers, intent, or structure that is not present.
+  Do NOT invent names, numbers, intent, or structure that is not present. Paraphrase what is actually said.
 
 ---
 
@@ -895,65 +926,97 @@ When modifiers are active:
 
 You have access to PRIOR INSIGHTS from recent windows.
 
-**Critical Rule**: Do NOT output insights that repeat information already captured in PRIOR INSIGHTS. 
-The Current Window in user message should support the end of the insight captured.
+**Critical Distinction**: 
+- **NOTES redundancy** is acceptable if paraphrasing new content or providing atomic detail
+- **KEY POINT redundancy** must be strictly prevented
+- **Other insight types** (ACTION, DECISION, etc.) must not duplicate
 
-**Zero-Output Validation**:
-Before outputting any insight, ask: "Is this genuinely new and valuable?"
-- If no → Output empty insights array
-- If yes → Proceed with extraction
+**NOTES Redundancy Rules**:
+NOTES should paraphrase content atomically. If the speaker continues discussing a topic across multiple windows, continue producing NOTES that paraphrase each new piece of information. Use `continuation_of` to link related NOTES entries when building on earlier content.
 
-### When to Skip an Insight:
-- **Same topic, same information** → Skip entirely
-  - Prior: "Action: Submit report by Friday"
-  - Current: "Don't forget the Friday report deadline" → SKIP
+**Example of ACCEPTABLE NOTES across windows**:
+- Window 1: "Speaker introduces ContextRot as performance degradation with increased context"
+- Window 2: "ContextRot affected by both context length and task complexity" (continuation_of: window_1)
+- Window 3: "Legal contracts have high task complexity due to self-referencing clauses" (continuation_of: window_2)
+
+This is NOT redundant - each NOTES paraphrases new content being discussed.
+
+**KEY POINT Redundancy Rules**:
+Do NOT output KEY POINTs that repeat information already captured in PRIOR INSIGHTS as KEY POINTs.
+
+### When to Skip a KEY POINT:
+- **Same finding already captured** → Skip entirely
+  - Prior KEY POINT: "RAG reduces reliability rather than improving it"
+  - Current: "RAG actually makes things worse" → SKIP (same finding, already captured)
   
-- **Rephrasing without new value** → Skip entirely
-  - Prior: "Decision: Proceed with Option A"
-  - Current: "We decided to go with Option A" → SKIP
+- **Pure paraphrase of prior KEY POINT** → Skip entirely
+  - Prior KEY POINT: "Architecture reduces context by 10x"
+  - Current: "10x context reduction achieved" → SKIP
 
-- **Verbatim repetition of speaker's thesis** → Skip entirely
-  - Prior: "Architecture resolves context degradation"
-  - Current: "Architecture resolves context degradation" → SKIP
-
-- **Paraphrase without new information** → Skip entirely
-  - Prior: "Architecture resolves context degradation" (NOTES)
-  - Current: "Fundamentally resolves context degradation" → SKIP (pure paraphrase)
-
-### When to Output an Insight:
-- **New information on same topic** → Output as new insight
-  - Prior: "Budget concerns mentioned"
-  - Current: "Budget increased by 10%" → OUTPUT (new detail)
+### When to Output a KEY POINT:
+- **New finding on same topic** → Output as new KEY POINT
+  - Prior KEY POINT: "Architecture reduces context by 10x"
+  - Current: "Also reduces latency by 40%" → OUTPUT (new finding)
   
 - **Contradiction or correction** → Output with `correction_of` field
-  - Prior #37: "Decision: Proceed with Option A"
-  - Current: "Actually, we're going with Option B" → OUTPUT with correction_of: 37
-  
-  - Prior #15: "Performance falls off a cliff"
-  - Current: "Actually, degradation is gradual not cliff-like" → OUTPUT with correction_of: 15
-
-- **Meaningful continuation that adds new angle** → Output with `continuation_of` field
-  - Prior #42: "Question: What's the timeline?"
-  - Current: "Timeline is 6 weeks" → OUTPUT with continuation_of: 42
+  - Prior #37 KEY POINT: "Performance falls off a cliff"
+  - Current: "Actually, degradation is gradual not cliff-like" → OUTPUT with correction_of: 37
 
 - **Critical implication of earlier concept** → Output as KEY POINT with `continuation_of`
-  - Prior #8: "Multi-hop reasoning is required" (NOTES)
+  - Prior #8 NOTES: "Multi-hop reasoning is required"
   - Current: "Multi-hop failures fundamentally undermine trust in AI agents" → OUTPUT as KEY POINT with continuation_of: 8
 
-- **Quantitative or empirical finding on same topic** → Output as KEY POINT
-  - Prior #12: "Architecture resolves context degradation" (NOTES)
+- **Quantification of earlier qualitative claim** → Output as KEY POINT
+  - Prior #12 NOTES: "Architecture resolves degradation"
   - Current: "Architecture reduces context by 10x vs summarization" → OUTPUT as KEY POINT
-  - Current: "We tested architecture on 1000 contracts, 95% accuracy" → OUTPUT as KEY POINT
 
-- **Limitation or boundary on earlier concept** → Output as KEY POINT
-  - Prior #20: "RLM approach handles complexity well" (NOTES)
-  - Current: "Very small models still deteriorate despite the framework" → OUTPUT as KEY POINT
+- **Empirical validation of earlier concept** → Output as KEY POINT
+  - Prior #15 NOTES: "Dependency graph approach handles complexity"
+  - Current: "Tested on 1000 contracts, achieved 95% accuracy" → OUTPUT as KEY POINT
 
-- **Counter-intuitive finding on earlier concept** → Output as KEY POINT
-  - Prior #5: "RAG is used to improve performance" (NOTES)
-  - Current: "RAG actually reduces reliability for complex docs" → OUTPUT as KEY POINT
+### NOTES Generation Rules:
 
-### Semantic Similarity Check (UPDATED THRESHOLDS):
+**When to Output NOTES**:
+- Always paraphrase substantive content being discussed
+- Break complex explanations into atomic NOTES entries
+- Continue producing NOTES as speaker discusses a topic (use continuation_of to link)
+- Paraphrase examples, analogies, and supporting details
+- Capture mechanism explanations and process descriptions
+
+**When to Skip NOTES**:
+- Pure filler phrases ("um", "you know", "like")
+- Verbatim repetition within same window
+- Content already paraphrased in current window
+
+**Example showing NOTES + KEY POINTS together**:
+```json
+{
+  "insights": [
+    {
+      "insight_type": "NOTES",
+      "insight_text": "Speaker explains RLM architecture uses REPL loops"
+    },
+    {
+      "insight_type": "NOTES", 
+      "insight_text": "REPL stands for Read-Evaluate-Print-Loop enabling recursive processing"
+    },
+    {
+      "insight_type": "KEY POINT",
+      "insight_text": "Recursion limited to one layer deep to prevent infinite loops and cost explosion"
+    },
+    {
+      "insight_type": "NOTES",
+      "insight_text": "Workflow made synchronous rather than asynchronous to maintain control"
+    },
+    {
+      "insight_type": "KEY POINT",
+      "insight_text": "95th percentile costs become very expensive when recursion loops go off in wrong directions"
+    }
+  ]
+}
+```
+
+### Semantic Similarity Check (Applies to KEY POINTs Only):
 - Before outputting a KEY POINT, check if PRIOR INSIGHTS contain semantically similar KEY POINTs
 - Pure paraphrasing (same finding, same words) does NOT make it a new KEY POINT → SKIP
 - Adding critical value makes it new even if topic is same → OUTPUT as KEY POINT
@@ -964,6 +1027,8 @@ Before outputting any insight, ask: "Is this genuinely new and valuable?"
   - Evidence/validation (empirical results)
   - Limitations/boundaries (failure modes, constraints)
   - Contradiction/correction (counter-intuitive or fixes error)
+
+**Note**: Semantic similarity check does NOT apply to NOTES. NOTES should paraphrase ongoing content atomically.
 
 ### Progressive Refinement Pattern (Critical for Technical Content):
 Speakers often reveal insights in stages - track the evolution, don't skip it:
