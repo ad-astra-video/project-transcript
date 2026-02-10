@@ -146,7 +146,7 @@ async def load_model(**kwargs):
         api_key=summary_api_key,
         history_length=summary_history_length,
         model=summary_model,
-        windows_to_accumulate=2,  # Default value, will be updated via update_params if needed
+        windows_to_accumulate=3,  # Default value, will be updated via update_params if needed
     )
     await STATE.summary_client.initialize()
     logger.info("Summary client initialized")
@@ -265,8 +265,14 @@ def _check_cleanup(audio_path: str):
 
 
 async def _summary_worker():
-    """Background task to process summary requests from the queue."""
-    logger.info("Starting summary worker")
+    """Background task to process summary requests from the queue.
+    
+    This is a thin pass-through worker. The SummaryClient handles all
+    buffering, merging, and payload building. The worker simply:
+    1. Receives transcription windows from the queue
+    2. Calls process_segments() on the client
+    3. Sends the result directly to the results deque
+    """
     while STATE is not None:
         try:
             # Wait for work with timeout to allow checking shutdown state
@@ -294,122 +300,82 @@ async def _summary_worker():
                 logger.info(f"Summary worker skipping window {transcription_window_id} - stop requested")
                 continue
             
-            # Increment window count for skip logic
-            STATE.summary_client.summary_window_count += 1
-            
-            # Check if this window should be processed (every Nth window)
-            should_process = (STATE.summary_client.summary_window_count % STATE.summary_client.summary_skip_every_n == 0)
-            
-            if should_process:
-                # Process this window through LLM
-                try:
-                    # Add window to in-flight tracking in summary client
-                    STATE.summary_client.add_in_flight_window(transcription_window_id)
-                    
-                    # Segments may already be dicts or TranscriptionSegment objects
-                    # Only convert if they're not already dicts
-                    if segments and isinstance(segments[0], dict):
-                        segments_dict = segments
-                        logger.info(f"Using pre-built payload with {len(segments_dict)} segments")
-                    else:
-                        segments_dict = _build_segments_payload(segments, window_start_ts)
-                        logger.info(f"Built payload with {len(segments_dict)} segments")
-                    
-                    try:
-                        start = time.perf_counter()
-                        result_payload = await asyncio.wait_for(
-                            STATE.summary_client.process_segments("context_summary", segments_dict, transcription_window_id, window_start_ts, window_end_ts),
-                            timeout=50.0
-                        )
-                        end = time.perf_counter()
-                        if not PROCESSOR is None:
-                            await PROCESSOR.send_monitoring_event({"duration_seconds": end - start, "window_id": result_payload.get("summary_window_id", transcription_window_id), "window_start_ms": window_start_ts * 1000, "window_end_ms": window_end_ts * 1000}, "llm_summary_request_stats")
-                    except asyncio.TimeoutError:
-                        logger.warning(f"Summarization timed out for window {transcription_window_id} [{window_start_ts:.3f}s - {window_end_ts:.3f}s]")
-                        continue
-                    except Exception as e:
-                        logger.error(f"Error in summarization task: {e}")
-                        continue
-                    
-                    if result_payload:
-                        summary_segments = result_payload.get("segments", [])
-                        logger.info(f"Summary processed {len(summary_segments)} segments")
-                        # Store summary data in deque for background sender
-                        summary_payload = {
-                            "type": "context_summary",
-                            "timestamp_utc": datetime.now(timezone.utc).isoformat(),
-                            "timing": {
-                                "window_id": result_payload.get("summary_window_id", transcription_window_id),
-                                "transcription_window_ids": result_payload.get("transcription_window_ids", [transcription_window_id]),
-                                "media_window_start_ms": int(result_payload.get("combined_window_start", window_start_ts) * 1000),
-                                "media_window_end_ms": int(result_payload.get("combined_window_end", window_end_ts) * 1000)
-                            },
-                            "segments": [
-                                {
-                                    "id": f"{result_payload.get('summary_window_id', transcription_window_id)}-{i}",
-                                    "summary_type": seg.get("summary_type") if isinstance(seg, dict) else seg.summary_type,
-                                    "background_context": seg.get("background_context") if isinstance(seg, dict) else seg.background_context,
-                                    "summary": seg.get("summary") if isinstance(seg, dict) else seg.summary,
-                                }
-                                for i, seg in enumerate(summary_segments)
-                            ]
-                        }
-                        STATE.summary_results.append(summary_payload)
-                        logger.debug(f"Staged summary data for window {result_payload.get('summary_window_id', transcription_window_id)} with transcription_window_ids {result_payload.get('transcription_window_ids', [transcription_window_id])}")
-                except Exception as e:
-                    logger.error(f"Summary processing error: {e}")
-                finally:
-                    # Remove from in-flight tracking regardless of success or failure
-                    STATE.summary_client.remove_in_flight_window(transcription_window_id)
-            else:
-                # Skip LLM processing, store for merging with next window
-                # Segments may already be dicts or TranscriptionSegment objects
-                if segments and isinstance(segments[0], dict):
-                    segments_dict = segments
-                else:
-                    segments_dict = _build_segments_payload(segments, window_start_ts)
+            # Process through client - it handles all buffering, merging, and payload building
+            try:
+                # Add window to in-flight tracking in summary client
+                STATE.summary_client.add_in_flight_window(transcription_window_id)
                 
-                await STATE.summary_client.store_skipped_segments(
-                    segments_dict,
-                    transcription_window_id,
-                    window_start_ts,
-                    window_end_ts
+                start = time.perf_counter()
+                result_payload = await asyncio.wait_for(
+                    STATE.summary_client.process_segments(
+                        "context_summary",
+                        segments,
+                        transcription_window_id,
+                        window_start_ts,
+                        window_end_ts
+                    ),
+                    timeout=85.0
                 )
+                end = time.perf_counter()
                 
-                # Run content type detection on skipped window
-                try:
-                    logger.debug(f"Running content type detection for window {transcription_window_id}")
-                    previous_content_type = STATE.summary_client._content_type_state.content_type
-                    result = await STATE.summary_client.process_content_type_detection(
-                        transcription_window_id, window_start_ts, window_end_ts
+                # Log monitoring event
+                if not PROCESSOR is None:
+                    await PROCESSOR.send_monitoring_event(
+                        {
+                            "duration_seconds": end - start,
+                            "window_id": result_payload.get("summary_window_id", transcription_window_id),
+                            "window_start_ms": window_start_ts * 1000,
+                            "window_end_ms": window_end_ts * 1000
+                        },
+                        "llm_summary_request_stats"
                     )
-                    logger.debug(f"Content type detection result: {result}")
-                    if result:
-                        # Content type detected - add to results for sending
-                        logger.debug(f"Previous content type: '{previous_content_type}', New: '{result.content_type}'")
-                        if result.content_type != previous_content_type:
-                            logger.info(f"Content type CHANGED - sending message: '{previous_content_type}' -> '{result.content_type}'")
-                            add_content_type_detection_to_results(
-                                content_type=result.content_type,
-                                confidence=result.confidence,
-                                source="AUTO_DETECTED",
-                                previous_content_type=previous_content_type
-                            )
-                        else:
-                            logger.debug(f"Content type UNCHANGED - not sending message")
-                    else:
-                        logger.debug(f"No content type result - user override active or detection skipped")
-                    logger.debug(f"Content type detection completed for skipped window {STATE.summary_client.summary_window_count}")
-                except Exception as e:
-                    logger.error(f"Content type detection failed on skipped window: {e}")
                 
-                logger.info(f"Skipped summary processing, stored window {STATE.summary_client.summary_window_count} for merging (ran content type detection)")
+                # Send result directly - client already built complete payload
+                if result_payload and result_payload.get("segments"):
+                    STATE.summary_results.append(result_payload)
+                    logger.debug(
+                        f"Staged summary data for window {result_payload.get('summary_window_id', transcription_window_id)} "
+                        f"with transcription_window_ids {result_payload.get('transcription_window_ids', [transcription_window_id])}"
+                    )
+                elif result_payload.get("type") == "content_type_detection":
+                    STATE.summary_results.append(result_payload)
+                    logger.info(
+                        f"Staged content_type_detection: {result_payload.get('content_type')} "
+                        f"(source: {result_payload.get('source')})"
+                    )
+                else:
+                    logger.debug(
+                        f"No summary segments for window {transcription_window_id} "
+                        f"(client is buffering/merging windows)"
+                    )
+                    
+            except asyncio.TimeoutError:
+                logger.warning(
+                    f"Summarization timed out for window {transcription_window_id} "
+                    f"[{window_start_ts:.3f}s - {window_end_ts:.3f}s]"
+                )
+                if not PROCESSOR is None:
+                    await PROCESSOR.send_monitoring_event(
+                        {
+                            "window_id": transcription_window_id,
+                            "window_start_ms": window_start_ts * 1000,
+                            "window_end_ms": window_end_ts * 1000
+                        },
+                        "llm_summary_request_timeout"
+                    )
+            except Exception as e:
+                logger.error(f"Summary processing error: {e}")
+            finally:
+                # Remove from in-flight tracking regardless of success or failure
+                STATE.summary_client.remove_in_flight_window(transcription_window_id)
+                
         except asyncio.TimeoutError:
             continue
         except asyncio.CancelledError:
             break
         except Exception as e:
             logger.error(f"Summary worker error: {e}")
+    
     logger.info("Summary worker stopped")
 
 
@@ -977,14 +943,6 @@ async def update_params(params: dict):
                 model=params.get("summary_model"),
             )
     
-    # Summary skip rate parameter
-    if "summary_skip_every_n" in params:
-        new_value = int(params["summary_skip_every_n"])
-        if STATE.summary_client is not None:
-            old_value = STATE.summary_client.summary_skip_every_n
-            STATE.summary_client.update_summary_skip_every_n(new_value)
-            logger.info(f"Updated summary_skip_every_n: {old_value} -> {new_value}")
-    
     # Initial summary delay parameter
     if "initial_summary_delay_seconds" in params:
         delay = float(params["initial_summary_delay_seconds"])
@@ -1033,6 +991,10 @@ async def on_stream_start(params: dict):
             # Reset summary client state (includes window tracking state)
             if STATE.summary_client is not None:
                 STATE.summary_client.reset()
+            
+            # Reset whisper client state for new stream (clear transcription ID counter)
+            if STATE.whisper_client is not None:
+                STATE.whisper_client.reset()
             
             # Reset shutdown state for new stream
             STATE.shutdown_requested = False
