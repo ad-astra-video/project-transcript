@@ -643,6 +643,7 @@ async def _process_transcription_async(window_samples: np.ndarray, window_start_
             payload = {
                 "type": "transcript",
                 "timestamp_utc": datetime.now(timezone.utc).isoformat(),
+                "transcription_window_id": transcription_window_id,
                 "timing": {
                     "media_window_start_ms": int(window_start_ts * 1000),
                     "media_window_end_ms": int(end_ts * 1000)
