@@ -146,7 +146,8 @@ async def load_model(**kwargs):
         api_key=summary_api_key,
         history_length=summary_history_length,
         model=summary_model,
-        windows_to_accumulate=3,  # Default value, will be updated via update_params if needed
+        transcription_windows_per_summary_window=4,  # Default value, will be updated via update_params if needed
+        send_monitoring_event_callback=PROCESSOR.send_monitoring_event if PROCESSOR else None
     )
     await STATE.summary_client.initialize()
     logger.info("Summary client initialized")
@@ -314,7 +315,7 @@ async def _summary_worker():
                         window_start_ts,
                         window_end_ts
                     ),
-                    timeout=85.0
+                    timeout=120.0
                 )
                 end = time.perf_counter()
                 
