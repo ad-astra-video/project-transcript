@@ -44,9 +44,9 @@ class TestInitialDelayLogic:
     @pytest.mark.asyncio
     async def test_no_delay_when_elapsed_greater_than_delay(self):
         """Test that delay is not applied when elapsed time exceeds delay setting."""
-        # Use windows_to_accumulate=1 to ensure immediate processing
+        # Use transcription_windows_per_summary_window=1 to ensure immediate processing
         client = self.create_client(delay_seconds=30.0)
-        client._window_manager.windows_to_accumulate = 1
+        client._window_manager.transcription_windows_per_summary_window = 1
         
         # Add a window with timestamp 0
         client._window_manager.add_window("test text", 0.0, 5.0)

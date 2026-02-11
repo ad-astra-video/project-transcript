@@ -196,30 +196,31 @@ class TestKeyPointClassification:
             assert result["insights"][0]["insight_type"] == "NOTES"
     
     def test_technical_talk_content_type_key_point_deemphasis(self):
-        """Test that TECHNICAL_TALK deemphasizes KEY POINT extraction."""
+        """Test that TECHNICAL_TALK emphasizes KEY POINT and NOTES extraction."""
         client = self.create_client()
         client.set_content_type("TECHNICAL_TALK", confidence=0.9, source="AUTO_DETECTED")
         
-        # Verify KEY POINT is deemphasized for TECHNICAL_TALK
+        # Verify KEY POINT and NOTES are emphasized for TECHNICAL_TALK
         from src.summary.prompts import CONTENT_TYPE_RULE_MODIFIERS
         rules = CONTENT_TYPE_RULE_MODIFIERS["TECHNICAL_TALK"]
         
-        assert "KEY POINT" in rules["deemphasize"], "KEY POINT should be deemphasized for TECHNICAL_TALK"
-        assert rules["notes_frequency"] == "high", "NOTES frequency should be high for TECHNICAL_TALK (reduced for less insights)"
+        assert "KEY POINT" in rules["emphasize"], "KEY POINT should be emphasized for TECHNICAL_TALK"
+        assert "NOTES" in rules["emphasize"], "NOTES should be emphasized for TECHNICAL_TALK"
+        assert rules["notes_frequency"] == "very_high", "NOTES frequency should be very_high for TECHNICAL_TALK"
         assert rules["action_strictness"] == "extreme", "ACTION strictness should be extreme for TECHNICAL_TALK"
     
     def test_lecture_or_talk_content_type_key_point_emphasis(self):
-        """Test that LECTURE_OR_TALK emphasizes NOTES extraction (not KEY POINT)."""
+        """Test that LECTURE_OR_TALK emphasizes KEY POINT and NOTES extraction."""
         client = self.create_client()
         client.set_content_type("LECTURE_OR_TALK", confidence=0.9, source="AUTO_DETECTED")
         
-        # Verify NOTES is emphasized for LECTURE_OR_TALK (KEY POINT is deemphasized for less insights)
+        # Verify KEY POINT and NOTES are emphasized for LECTURE_OR_TALK
         from src.summary.prompts import CONTENT_TYPE_RULE_MODIFIERS
         rules = CONTENT_TYPE_RULE_MODIFIERS["LECTURE_OR_TALK"]
         
+        assert "KEY POINT" in rules["emphasize"], "KEY POINT should be emphasized for LECTURE_OR_TALK"
         assert "NOTES" in rules["emphasize"], "NOTES should be emphasized for LECTURE_OR_TALK"
-        assert "KEY POINT" in rules["deemphasize"], "KEY POINT should be deemphasized for LECTURE_OR_TALK"
-        assert rules["notes_frequency"] == "medium", "NOTES frequency should be medium for LECTURE_OR_TALK (reduced for less insights)"
+        assert rules["notes_frequency"] == "very_high", "NOTES frequency should be very_high for LECTURE_OR_TALK"
     
     def test_general_meeting_content_type_key_point_deemphasis(self):
         """Test that GENERAL_MEETING deemphasizes KEY POINT extraction."""
@@ -235,30 +236,30 @@ class TestKeyPointClassification:
         assert "DECISION" in rules["emphasize"], "DECISION should be emphasized for GENERAL_MEETING"
     
     def test_interview_content_type_notes_emphasis(self):
-        """Test that INTERVIEW emphasizes NOTES extraction (not KEY POINT for less insights)."""
+        """Test that INTERVIEW emphasizes NOTES and KEY POINT extraction."""
         client = self.create_client()
         client.set_content_type("INTERVIEW", confidence=0.9, source="AUTO_DETECTED")
         
-        # Verify NOTES is emphasized for INTERVIEW
+        # Verify NOTES and KEY POINT are emphasized for INTERVIEW
         from src.summary.prompts import CONTENT_TYPE_RULE_MODIFIERS
         rules = CONTENT_TYPE_RULE_MODIFIERS["INTERVIEW"]
         
         assert "NOTES" in rules["emphasize"], "NOTES should be emphasized for INTERVIEW"
-        assert "KEY POINT" in rules["deemphasize"], "KEY POINT should be deemphasized for INTERVIEW"
+        assert "KEY POINT" in rules["emphasize"], "KEY POINT should be emphasized for INTERVIEW"
         assert "QUESTION" in rules["emphasize"], "QUESTION should be emphasized for INTERVIEW"
     
     def test_podcast_content_type_notes_emphasis(self):
-        """Test that PODCAST emphasizes NOTES extraction (not KEY POINT for less insights)."""
+        """Test that PODCAST emphasizes NOTES and KEY POINT extraction."""
         client = self.create_client()
         client.set_content_type("PODCAST", confidence=0.9, source="AUTO_DETECTED")
         
-        # Verify NOTES is emphasized for PODCAST (KEY POINT is deemphasized for less insights)
+        # Verify NOTES and KEY POINT are emphasized for PODCAST
         from src.summary.prompts import CONTENT_TYPE_RULE_MODIFIERS
         rules = CONTENT_TYPE_RULE_MODIFIERS["PODCAST"]
         
         assert "NOTES" in rules["emphasize"], "NOTES should be emphasized for PODCAST"
-        assert "KEY POINT" in rules["deemphasize"], "KEY POINT should be deemphasized for PODCAST"
-        assert rules["notes_frequency"] == "high", "NOTES frequency should be high for PODCAST (reduced for less insights)"
+        assert "KEY POINT" in rules["emphasize"], "KEY POINT should be emphasized for PODCAST"
+        assert rules["notes_frequency"] == "high", "NOTES frequency should be high for PODCAST"
 
 
 class TestKeyPointVsNotesDecisionGuide:

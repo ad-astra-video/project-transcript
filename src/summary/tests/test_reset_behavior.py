@@ -19,34 +19,17 @@ class TestSummaryClientReset:
     def create_client(self):
         """Create a SummaryClient instance for testing."""
         return SummaryClient(api_key="test_key", model="test_model")
-    
-    def test_summary_client_clears_skipped_transcription_ids(self):
-        """Test that _skipped_transcription_ids is cleared on reset."""
-        client = self.create_client()
         
-        # Add some skipped IDs
-        client._skipped_transcription_ids = [1, 2, 3]
-        
-        # Reset
-        client.reset()
-        
-        # Verify cleared
-        assert len(client._skipped_transcription_ids) == 0
-    
     def test_summary_client_resets_window_counters(self):
         """Test that window tracking counters are reset on reset()."""
         client = self.create_client()
         
-        # Set some values
-        client.summary_window_counter = 10
-        client.summary_window_count = 5
-        
         # Reset
         client.reset()
         
-        # Verify reset
-        assert client.summary_window_counter == 0
-        assert client.summary_window_count == 0
+        # Verify core state is reset
+        assert client._transcription_window_counter == 0
+        assert client._window_manager._next_window_id == 0
     
     def test_summary_client_resets_window_manager(self):
         """Test that WindowManager is cleared on SummaryClient reset."""

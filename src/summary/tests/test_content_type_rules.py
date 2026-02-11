@@ -24,7 +24,7 @@ class TestContentTypeRuleModifiersUpdated:
         
         # Should have stricter settings
         assert rules["action_strictness"] == "extreme", "TECHNICAL_TALK should have extreme action_strictness"
-        assert rules["notes_frequency"] == "high", "TECHNICAL_TALK should have high notes_frequency"
+        assert rules["notes_frequency"] == "very_high", "TECHNICAL_TALK should have very_high notes_frequency"
     
     def test_lecture_or_talk_stricter_settings(self):
         """Test that LECTURE_OR_TALK has stricter settings."""
@@ -32,7 +32,7 @@ class TestContentTypeRuleModifiersUpdated:
         
         # Should have stricter settings
         assert rules["action_strictness"] == "block", "LECTURE_OR_TALK should have block action_strictness"
-        assert rules["notes_frequency"] == "medium", "LECTURE_OR_TALK should have medium notes_frequency"
+        assert rules["notes_frequency"] == "very_high", "LECTURE_OR_TALK should have very_high notes_frequency"
     
     def test_streamer_monologue_reduced_notes(self):
         """Test that STREAMER_MONOLOGUE has reduced notes_frequency."""

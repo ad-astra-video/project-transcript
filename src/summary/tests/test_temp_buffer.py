@@ -9,12 +9,12 @@ from src.summary.summary_client import SummaryClient
 class TestTempBufferForModuloProcessing:
     """Tests for temp buffer accumulation with modulo-based processing."""
     
-    def create_client(self, windows_to_accumulate: int = 2):
+    def create_client(self, transcription_windows_per_summary_window: int = 2):
         """Create a SummaryClient instance for testing."""
         return SummaryClient(
             api_key="test_key",
             model="test_model",
-            windows_to_accumulate=windows_to_accumulate
+            transcription_windows_per_summary_window=transcription_windows_per_summary_window
         )
     
     def test_add_to_temp_buffer_stores_segments(self):
@@ -78,19 +78,19 @@ class TestTempBufferForModuloProcessing:
         assert end == 0.0
         assert ids == []
     
-    def test_buffer_accumulation_pattern_windows_to_accumulate_2(self):
-        """Test buffer accumulation pattern with windows_to_accumulate=2.
+    def test_buffer_accumulation_pattern_transcription_windows_per_summary_window_2(self):
+        """Test buffer accumulation pattern with transcription_windows_per_summary_window=2.
         
         The counter is incremented in process_segments BEFORE calling _add_to_temp_buffer.
         When should_process is True, _flush_temp_buffer is called.
         """
-        client = self.create_client(windows_to_accumulate=2)
+        client = self.create_client(transcription_windows_per_summary_window=2)
         
         for i in range(1, 5):
             # Simulate what process_segments does: increment counter first
             client._transcription_window_counter += 1
             
-            should_process = (client._transcription_window_counter % client._window_manager.windows_to_accumulate == 0)
+            should_process = (client._transcription_window_counter % client._window_manager.transcription_windows_per_summary_window == 0)
             
             if not should_process:
                 client._add_to_temp_buffer([{"id": str(i)}], i, 0.0, 2.5)
@@ -104,19 +104,19 @@ class TestTempBufferForModuloProcessing:
             else:
                 assert len(client._temp_segment_buffer) == 0  # After window 2 (flushed)
     
-    def test_buffer_accumulation_pattern_windows_to_accumulate_3(self):
-        """Test buffer accumulation pattern with windows_to_accumulate=3.
+    def test_buffer_accumulation_pattern_transcription_windows_per_summary_window_3(self):
+        """Test buffer accumulation pattern with transcription_windows_per_summary_window=3.
         
         The counter is incremented in process_segments BEFORE calling _add_to_temp_buffer.
         When should_process is True, _flush_temp_buffer is called.
         """
-        client = self.create_client(windows_to_accumulate=3)
+        client = self.create_client(transcription_windows_per_summary_window=3)
         
         for i in range(1, 7):
             # Simulate what process_segments does: increment counter first
             client._transcription_window_counter += 1
             
-            should_process = (client._transcription_window_counter % client._window_manager.windows_to_accumulate == 0)
+            should_process = (client._transcription_window_counter % client._window_manager.transcription_windows_per_summary_window == 0)
             
             if not should_process:
                 client._add_to_temp_buffer([{"id": str(i)}], i, 0.0, 2.5)
@@ -152,17 +152,17 @@ class TestTempBufferForModuloProcessing:
         assert len(client._temp_buffer_window_ids) == 0
         assert client._transcription_window_counter == 0
     
-    def test_update_windows_to_accumulate_with_pending_buffer(self):
-        """Test update_windows_to_accumulate with pending buffer."""
-        client = self.create_client(windows_to_accumulate=2)
+    def test_update_transcription_windows_per_summary_window_with_pending_buffer(self):
+        """Test update_transcription_windows_per_summary_window with pending buffer."""
+        client = self.create_client(transcription_windows_per_summary_window=2)
         
         # Add one window to buffer
         client._add_to_temp_buffer([{"id": "1", "text": "Hello"}], 1, 0.0, 2.5)
         
-        # Update windows_to_accumulate
+        # Update transcription_windows_per_summary_window
         client.update_windows_to_accumulate(3)
         
-        assert client._window_manager.windows_to_accumulate == 3
+        assert client._window_manager.transcription_windows_per_summary_window == 3
         # Buffer should still be there
         assert len(client._temp_segment_buffer) == 1
 

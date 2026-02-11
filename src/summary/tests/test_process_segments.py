@@ -18,8 +18,8 @@ class TestProcessSegmentsAnalysisOverride:
     @pytest.mark.asyncio
     async def test_analysis_field_used_as_background_context(self):
         """Test that analysis field is used as background_context when present."""
-        # Use shorter delay and windows_to_accumulate=1 to ensure immediate processing
-        client = SummaryClient(api_key="test_key", model="test_model", initial_summary_delay_seconds=1.0, windows_to_accumulate=1)
+        # Use shorter delay and transcription_windows_per_summary_window=1 to ensure immediate processing
+        client = SummaryClient(api_key="test_key", model="test_model", initial_summary_delay_seconds=1.0, transcription_windows_per_summary_window=1)
         
         # Mock the summarize_text method
         analysis_text = "This is the analysis from the LLM"
@@ -57,8 +57,8 @@ class TestProcessSegmentsAnalysisOverride:
     @pytest.mark.asyncio
     async def test_reasoning_content_used_when_analysis_missing(self):
         """Test that reasoning_content is used when analysis field is missing."""
-        # Use shorter delay and windows_to_accumulate=1 to ensure immediate processing
-        client = SummaryClient(api_key="test_key", model="test_model", initial_summary_delay_seconds=1.0, windows_to_accumulate=1)
+        # Use shorter delay and transcription_windows_per_summary_window=1 to ensure immediate processing
+        client = SummaryClient(api_key="test_key", model="test_model", initial_summary_delay_seconds=1.0, transcription_windows_per_summary_window=1)
         
         reasoning_text = "This is the reasoning content"
         
@@ -93,8 +93,8 @@ class TestProcessSegmentsAnalysisOverride:
     @pytest.mark.asyncio
     async def test_reasoning_content_used_when_analysis_empty(self):
         """Test that reasoning_content is used when analysis field is empty string."""
-        # Use shorter delay and windows_to_accumulate=1 to ensure immediate processing
-        client = SummaryClient(api_key="test_key", model="test_model", initial_summary_delay_seconds=1.0, windows_to_accumulate=1)
+        # Use shorter delay and transcription_windows_per_summary_window=1 to ensure immediate processing
+        client = SummaryClient(api_key="test_key", model="test_model", initial_summary_delay_seconds=1.0, transcription_windows_per_summary_window=1)
         
         reasoning_text = "This is the reasoning content"
         
@@ -130,8 +130,8 @@ class TestProcessSegmentsAnalysisOverride:
     @pytest.mark.asyncio
     async def test_reasoning_content_used_when_json_parse_fails(self):
         """Test that reasoning_content is used when JSON parsing fails."""
-        # Use shorter delay and windows_to_accumulate=1 to ensure immediate processing
-        client = SummaryClient(api_key="test_key", model="test_model", initial_summary_delay_seconds=1.0, windows_to_accumulate=1)
+        # Use shorter delay and transcription_windows_per_summary_window=1 to ensure immediate processing
+        client = SummaryClient(api_key="test_key", model="test_model", initial_summary_delay_seconds=1.0, transcription_windows_per_summary_window=1)
         
         reasoning_text = "This is the reasoning content"
         

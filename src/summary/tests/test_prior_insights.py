@@ -37,9 +37,9 @@ class TestPriorInsightsAccumulation:
         This test verifies that the first window processed returns 0 prior insights,
         which is the expected behavior since no prior windows have been processed yet.
         """
-        # Use windows_to_accumulate=1 to ensure immediate processing
+        # Use transcription_windows_per_summary_window=1 to ensure immediate processing
         client = self.create_client(delay_seconds=0.0)
-        client._window_manager.windows_to_accumulate = 1
+        client._window_manager.transcription_windows_per_summary_window = 1
         
         # Mock LLM response with an insight
         mock_response = self._create_mock_response(
@@ -76,17 +76,17 @@ class TestPriorInsightsAccumulation:
             assert window_0_insights[0].insight_text == "Complete the first task"
             
             # Verify that _build_context returns 0 prior insights for first window
-            # (since no accumulated windows exist yet with windows_to_accumulate=2)
+            # (since no accumulated windows exist yet with transcription_windows_per_summary_window=2)
             context, prior_insights = client._build_context(include_insights=True)
-            # With only 1 window and windows_to_accumulate=2, there are no accumulated windows
+            # With only 1 window and transcription_windows_per_summary_window=2, there are no accumulated windows
             assert len(prior_insights) == 0
     
     @pytest.mark.asyncio
     async def test_second_window_has_prior_insights_from_first_window(self):
         """Test that second summary call has prior insights from first window."""
-        # Use windows_to_accumulate=1 to ensure immediate processing
+        # Use transcription_windows_per_summary_window=1 to ensure immediate processing
         client = self.create_client(delay_seconds=0.0)
-        client._window_manager.windows_to_accumulate = 1
+        client._window_manager.transcription_windows_per_summary_window = 1
         
         # Mock response for first window
         first_response = self._create_mock_response(
@@ -151,7 +151,7 @@ class TestPriorInsightsAccumulation:
     @pytest.mark.asyncio
     async def test_accumulated_text_and_insights_retrieval(self):
         """Test that get_accumulated_text_and_insights returns correct data."""
-        manager = WindowManager(max_chars=10000, windows_to_accumulate=2)
+        manager = WindowManager(context_limit=10000)
         
         # Add windows with insights
         manager.add_window("Window 0 text", 0.0, 5.0)
@@ -183,28 +183,32 @@ class TestPriorInsightsAccumulation:
         manager.add_insight_to_window(0, insight1)
         manager.add_insight_to_window(1, insight2)
         
-        # Get accumulated text and insights (excludes last 2 windows)
+        # Get accumulated text and insights (excludes last 1 window)
         accumulated_text, accumulated_insights = manager.get_accumulated_text_and_insights()
         
-        # Should only include window 0 (first 2 windows excluded from accumulation)
+        # Should include windows 0 and 1 (all except last window 2)
         assert "Window 0 text" in accumulated_text
-        assert len(accumulated_insights) == 1
+        assert "Window 1 text" in accumulated_text
+        assert len(accumulated_insights) == 2
         assert accumulated_insights[0].insight_text == "First action"
+        assert accumulated_insights[1].insight_text == "First decision"
     
     @pytest.mark.asyncio
     async def test_build_context_includes_prior_insights(self):
         """Test that _build_context includes prior insights in the context string."""
         client = self.create_client(delay_seconds=0.0)
         
-        # Add windows manually (need at least 3 windows to have accumulated windows with windows_to_accumulate=2)
+        # Add windows manually (need at least 3 windows to have accumulated windows with transcription_windows_per_summary_window=2)
+        # Auto-assigned window IDs will be 0, 1, 2
         client._window_manager.add_window("Window 0 text", 0.0, 5.0)
         client._window_manager.add_window("Window 1 text", 5.0, 10.0)
         client._window_manager.add_window("Window 2 text", 10.0, 15.0)
+        client._window_manager.add_window("Window 3 text", 15.0, 20.0)  # Add 4th window for accumulation
         
-        # Add insight to window 0
+        # Add insight to window 0 (auto-assigned ID)
         insight = WindowInsight(
             insight_id=1,
-            insight_type="KEY_POINT",
+            insight_type="KEY POINT",
             insight_text="Important finding",
             confidence=0.85,
             window_id=0,
@@ -218,7 +222,7 @@ class TestPriorInsightsAccumulation:
         context, prior_insights = client._build_context(include_insights=True)
         
         # Context should include PRIOR INSIGHTS section
-        assert "## PRIOR INSIGHTS" in context
+        assert "## PRIOR INSIGHTS" in context, f"Expected PRIOR INSIGHTS in context, got: '{context}'"
         assert "Important finding" in context
         assert len(prior_insights) == 1
         assert prior_insights[0].insight_text == "Important finding"
