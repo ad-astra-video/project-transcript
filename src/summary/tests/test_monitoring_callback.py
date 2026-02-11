@@ -54,11 +54,11 @@ class TestMonitoringCallback:
             window_end=10.0
         )
         
-        # Verify callback was invoked
-        mock_callback.assert_called_once()
-        
-        # Verify callback was called with (dict, str) signature
-        event_data, event_type = mock_callback.call_args[0]
+        # Verify callback received a content_type_changed event (token events may also be sent)
+        assert any(call.args[1] == "content_type_changed" for call in mock_callback.call_args_list)
+        # Extract the content_type_changed call and verify payload
+        ct_call = next(call for call in mock_callback.call_args_list if call.args[1] == "content_type_changed")
+        event_data, event_type = ct_call.args
         assert event_type == "content_type_changed"
         assert event_data["previous_content_type"] == ContentType.UNKNOWN.value
         assert event_data["new_content_type"] == "TECHNICAL_TALK"
@@ -88,11 +88,10 @@ class TestMonitoringCallback:
             window_end=10.0
         )
         
-        # Verify callback WAS invoked (content type changed from TECHNICAL_TALK to INTERVIEW)
-        mock_callback.assert_called_once()
-        
-        # Verify event data
-        event_data, event_type = mock_callback.call_args[0]
+        # Verify callback received a content_type_changed event (token events may also be sent)
+        assert any(call.args[1] == "content_type_changed" for call in mock_callback.call_args_list)
+        ct_call = next(call for call in mock_callback.call_args_list if call.args[1] == "content_type_changed")
+        event_data, event_type = ct_call.args
         assert event_type == "content_type_changed"
         assert event_data["previous_content_type"] == "TECHNICAL_TALK"
         assert event_data["new_content_type"] == "INTERVIEW"
@@ -120,8 +119,8 @@ class TestMonitoringCallback:
             window_end=10.0
         )
         
-        # Verify callback was NOT invoked (content type unchanged)
-        mock_callback.assert_not_called()
+        # Verify no content_type_changed event was sent (token events may still be emitted)
+        assert not any(call.args[1] == "content_type_changed" for call in mock_callback.call_args_list)
     
     def test_callback_not_set_when_none_provided(self):
         """Client should work normally when no callback is provided."""
@@ -152,8 +151,8 @@ class TestMonitoringCallback:
             window_end=10.0
         )
         
-        # Verify callback was still called
-        mock_callback.assert_called_once()
+        # Verify callback received a content_type_changed event (token events may also be sent)
+        assert any(call.args[1] == "content_type_changed" for call in mock_callback.call_args_list)
         
         # Verify result was still returned
         assert result is not None
@@ -175,8 +174,8 @@ class TestMonitoringCallback:
             window_end=10.0
         )
         
-        # Verify callback was NOT invoked (still unknown, no change)
-        mock_callback.assert_not_called()
+        # Verify no content_type_changed event was sent (token events may still be emitted)
+        assert not any(call.args[1] == "content_type_changed" for call in mock_callback.call_args_list)
     
     @pytest.mark.asyncio
     async def test_callback_includes_all_event_data(self, client_with_callback, mock_callback):
@@ -194,11 +193,10 @@ class TestMonitoringCallback:
             window_end=15.0
         )
         
-        # Verify callback was invoked
-        mock_callback.assert_called_once()
-        
-        # Verify all event data fields
-        event_data, event_type = mock_callback.call_args[0]
+        # Verify callback received a content_type_changed event (token events may also be sent)
+        assert any(call.args[1] == "content_type_changed" for call in mock_callback.call_args_list)
+        ct_call = next(call for call in mock_callback.call_args_list if call.args[1] == "content_type_changed")
+        event_data, event_type = ct_call.args
         assert event_type == "content_type_changed"
         assert "previous_content_type" in event_data
         assert "new_content_type" in event_data
@@ -236,8 +234,8 @@ class TestMonitoringCallback:
             window_end=10.0
         )
         
-        # Verify callback was still called
-        mock_callback.assert_called_once()
+        # Verify callback received a content_type_changed event (token events may also be sent)
+        assert any(call.args[1] == "content_type_changed" for call in mock_callback.call_args_list)
         
         # Verify result was still returned
         assert result is not None

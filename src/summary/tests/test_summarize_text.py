@@ -31,7 +31,7 @@ class TestSummarizeTextRawOutput:
         with patch.object(client.client.chat.completions, 'create', new_callable=AsyncMock) as mock_create:
             mock_create.return_value = mock_response
             
-            result_summary, result_reasoning = await client.summarize_text(
+            result_summary, result_reasoning, _ = await client.summarize_text(
                 text="Test text",
                 context="Test context"
             )
@@ -56,7 +56,7 @@ class TestSummarizeTextRawOutput:
         with patch.object(client.client.chat.completions, 'create', new_callable=AsyncMock) as mock_create:
             mock_create.return_value = mock_response
             
-            result_summary, result_reasoning = await client.summarize_text(
+            result_summary, result_reasoning, _ = await client.summarize_text(
                 text="Test text",
                 context="Test context"
             )
