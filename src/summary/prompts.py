@@ -235,6 +235,14 @@ CONTENT_TYPE_RULE_MODIFIERS = {
         "sentiment_enabled": True,
         "action_strictness": "very_high",
         "notes_frequency": "medium",
+        "story_guidance": """
+STORY HANDLING for meetings:
+- Minimize story content; focus on actionable insights
+- Include story context only when it directly informs a decision or action
+- Exclude stories unless they provide specific, relevant context
+- Summarize any included stories to their essential point
+- Pure entertainment or tangential stories should be excluded
+        """.strip(),
         "risk_guidance": "Focus on project blockers, timeline risks, and resource constraints that could derail committed actions or decisions.",
     },
 
@@ -243,7 +251,7 @@ CONTENT_TYPE_RULE_MODIFIERS = {
         "deemphasize": ["ACTION"],
         "sentiment_enabled": False,
         "action_strictness": "extreme",
-        "notes_frequency": "very_high",  # Changed from "high" to "very_high"
+        "notes_frequency": "very_high",
         "key_point_guidance": """
 KEY POINT for technical talks should capture:
 - Empirical results with specific numbers (accuracy, performance, thresholds)
@@ -253,14 +261,23 @@ KEY POINT for technical talks should capture:
 - Critical limitations and boundary conditions (when approach fails)
 - Self-corrections by the speaker
 
+When a story illustrates a KEY POINT, include only the specific technical detail that makes it relevant:
+- Specific metrics or outcomes from the story
+- Technical constraints or conditions that affect applicability
+- Production vs. research differences
+
 DO NOT use KEY POINT for:
-- Standard mechanism explanations (how something works)
-- Speaker's thesis or framework being introduced
-- Background context or setup
-
-The speaker's explanations are NOTES. The speaker's findings, results, and critical insights are KEY POINTs.
-
-NOTES should be frequent and atomic - paraphrase content comprehensively to create a reliable record.
+- Extended story recaps (use NOTES to summarize the illustrative value)
+- Personal anecdotes without technical substance
+- Entertainment or engagement stories without technical insight
+        """.strip(),
+        "story_guidance": """
+STORY HANDLING for technical talks:
+- Include story context only when it provides specific technical background
+- Focus on empirical findings, production constraints, and real-world failure modes
+- Exclude entertainment or purely personal stories
+- When a story illustrates a technical point, capture the point and include only the specific technical detail that makes it relevant
+- Summarize lengthy stories to their essential technical point
         """.strip(),
         "risk_guidance": "Focus on technical issues, bugs, failures, or limitations that could impact system behavior or development progress.",
     },
@@ -270,7 +287,7 @@ NOTES should be frequent and atomic - paraphrase content comprehensively to crea
         "deemphasize": ["ACTION", "DECISION", "QUESTION"],
         "sentiment_enabled": False,
         "action_strictness": "block",
-        "notes_frequency": "very_high",  # Changed from "medium" to "very_high"
+        "notes_frequency": "very_high",
         "key_point_guidance": """
 KEY POINT for lectures should capture:
 - Empirical results with specific numbers
@@ -280,14 +297,19 @@ KEY POINT for lectures should capture:
 - Critical limitations or failure modes
 - Self-corrections by the speaker
 
+When a story illustrates a KEY POINT, include only the specific detail that makes it educationally relevant.
+
 DO NOT use KEY POINT for:
-- Explanations of concepts or frameworks
-- Background information or context
-- Standard academic content
-
-Lectures are explanatory, but the breakthrough insights within them should be KEY POINTs.
-
-NOTES should be frequent and atomic - paraphrase the lecture content comprehensively to create a reliable record.
+- Extended story recaps (use NOTES to summarize the illustrative value)
+- Entertainment or purely personal stories
+        """.strip(),
+        "story_guidance": """
+STORY HANDLING for lectures:
+- Include story context only when it provides specific educational background
+- Focus on historical context, development of concepts, or real-world applications
+- Exclude entertainment or purely personal stories
+- When a story illustrates a concept, capture the concept and include only the specific detail that makes it relevant
+- Summarize lengthy stories to their essential educational point
         """.strip(),
         "risk_guidance": "Focus on potential misconceptions, outdated information, or controversial claims that could mislead listeners.",
     },
@@ -306,7 +328,20 @@ KEY POINT for interviews should capture:
 - Critical lessons learned or failures
 - Counter-intuitive findings from their experience
 
+When a story illustrates a KEY POINT, include the experience-based context that makes it valuable:
+- Specific outcomes from the speaker's experience
+- Lessons learned that apply broadly
+- Credibility-establishing details
+
 Most interview content should be NOTES (background, stories, explanations).
+        """.strip(),
+        "story_guidance": """
+STORY HANDLING for interviews:
+- Personal experiences and career context are often relevant to insights
+- Include story details when they establish credibility or provide specific experience-based insights
+- Summarize lengthy stories to their essential point
+- Exclude purely tangential or entertainment-focused stories
+- Stories are often the vehicle for insights in interview format
         """.strip(),
         "risk_guidance": "Focus on red flags, concerns, or potential issues with the interviewee's responses or qualifications.",
     },
@@ -325,7 +360,17 @@ KEY POINT for podcasts should capture:
 - Critical implications of discussion topics
 - Expert disagreements or paradigm shifts
 
+When a story illustrates a KEY POINT, capture the point and note that it's illustrated through the speaker's experience.
+
 Most casual discussion should be NOTES.
+        """.strip(),
+        "story_guidance": """
+STORY HANDLING for podcasts:
+- Stories are often the vehicle for insights in conversational formats
+- Include illustrative stories as they often carry the main point
+- Summarize lengthy stories to their essential point and illustrative value
+- Exclude purely tangential or purely entertainment stories
+- Personal anecdotes are more relevant in podcast format than in technical talks
         """.strip(),
         "risk_guidance": "Focus on controversial claims, potential misinformation, or statements that could be misleading to listeners.",
     },
@@ -354,6 +399,13 @@ KEY POINT for news should capture:
 
 Background context should be NOTES.
         """.strip(),
+        "story_guidance": """
+STORY HANDLING for news:
+- Include background context only when it provides essential context for understanding the news
+- Focus on factual information rather than narrative storytelling
+- Exclude purely human interest or emotional stories without news value
+- Summarize any historical context to its essential points
+        """.strip(),
         "risk_guidance": "Focus on potential inaccuracies, unverified claims, or misleading information in the news report.",
     },
 
@@ -363,6 +415,13 @@ Background context should be NOTES.
         "sentiment_enabled": False,
         "action_strictness": "block",
         "notes_frequency": "very_high",
+        "story_guidance": """
+STORY HANDLING for gameplay commentary:
+- Focus on in-game events and actions rather than personal stories
+- Include background context only when it directly relates to gameplay decisions
+- Exclude purely personal or entertainment stories
+- Summarize any stories to their essential gameplay-relevant point
+        """.strip(),
         "risk_guidance": "Focus on strategic mistakes, missed opportunities, or errors that could impact gameplay outcomes.",
     },
 
@@ -372,6 +431,13 @@ Background context should be NOTES.
         "sentiment_enabled": True,
         "action_strictness": "high",
         "notes_frequency": "low",
+        "story_guidance": """
+STORY HANDLING for customer support:
+- Minimize story content; focus on issue resolution
+- Include relevant customer context only when it informs the support issue
+- Exclude lengthy personal stories or tangents
+- Focus on actionable information for resolution
+        """.strip(),
         "risk_guidance": "Focus on customer-impacting issues, unresolved problems, or service failures that require attention.",
     },
 
@@ -391,6 +457,13 @@ KEY POINT for debates should capture:
 
 Routine arguments should be NOTES.
         """.strip(),
+        "story_guidance": """
+STORY HANDLING for debates:
+- Include illustrative examples only when they directly support an argument
+- Summarize stories to their essential point of contention or evidence
+- Exclude purely rhetorical or entertainment stories
+- Focus on substantive evidence and logical arguments
+        """.strip(),
         "risk_guidance": "Focus on weak points in arguments, logical fallacies, or potential counter-arguments that could undermine a position.",
     },
 
@@ -400,6 +473,13 @@ Routine arguments should be NOTES.
         "sentiment_enabled": False,
         "action_strictness": "block",
         "notes_frequency": "medium",
+        "story_guidance": """
+STORY HANDLING for unknown content type:
+- Be conservative with story inclusion
+- Include story context only when it clearly relates to the discussion
+- Summarize stories to their essential points
+- Default to exclusion if relevance is unclear
+        """.strip(),
         "risk_guidance": "Be conservative - only flag clear issues. Default to NOTES if uncertain.",
     },
 }
@@ -429,6 +509,141 @@ Provide a thoughtful explanation that remains as concise as possible of the most
 Make sure to include explanation if pulling from prior context to generate insight on current window. Analysis should include quote from prior context and what text in current window completed the insight.
 
 **For NOTES-heavy output**: Briefly summarize the main topics being discussed. For example: "Speaker continues explaining ContextRot concept with legal contract examples, then discusses RAG approach limitations."
+
+---
+
+---
+
+## STORY AND BACKGROUND CONTEXT HANDLING
+
+When processing video transcripts, you will encounter stories, personal anecdotes, and background context that speakers intermingle with their main discussion. Your role is to extract the core insight from such content while using story details only when they provide meaningful background, relevance, or illustration.
+
+### Core Principle
+
+**Extract the insight, not the story. Use story details only when they provide essential background, relevance, or illustration for that insight.**
+
+### When a Story Illustrates an Insight
+
+When a speaker uses a story to illustrate or demonstrate a point, structure your insight as follows:
+
+1. **Primary Insight**: State the core point or lesson from the story
+2. **Story Context (Optional)**: Include story details ONLY if they provide specific value:
+   - Specific data, metrics, or outcomes from the story
+   - Unique circumstances that affect the insight's applicability
+   - Credibility or experience-based context for the insight
+   - Contrast between the story situation and the general case
+
+**Example - DO:**
+```json
+{
+  "insight_type": "KEY POINT",
+  "insight_text": "Small models can outperform larger ones on specific tasks when optimized for that domain (tested on 350M parameter model achieving 92% accuracy vs 78% for 175B model on legal document classification)"
+}
+```
+
+**Example - DON'T:**
+```json
+{
+  "insight_type": "KEY POINT",
+  "insight_text": "I was working at this startup last year and we had this problem with document classification. We tried using GPT-4 but it was too slow and expensive, so we built our own smaller model. It was a crazy few months but we got it working and it actually performed better than GPT-4 on our legal documents. The CEO was amazed and we got funding."
+}
+```
+
+### When a Story Provides Background Context
+
+When a story establishes background or context for a discussion:
+
+1. **Capture the relevant background** - What specific information does this provide?
+2. **Connect to the main discussion** - How does this background inform the topic?
+3. **Include only relevant details** - Omit entertainment value, tangents, or irrelevant specifics
+
+**Example - DO:**
+```json
+{
+  "insight_type": "NOTES",
+  "insight_text": "Speaker's previous company (acquired by Fortune 500 in 2019) developed the technique they're now presenting, providing 8 years of production experience with the approach"
+}
+```
+
+**Example - DON'T:**
+```json
+{
+  "insight_type": "NOTES",
+  "insight_text": "So I was working at this startup back in 2015, it was just me and two other guys in a tiny office in Austin. We were trying to build this document processing system. We almost ran out of money twice, but we managed to get seed funding from this angel investor who was actually a former basketball player. Then in 2019 we got acquired by this big Fortune 500 company."
+}
+```
+
+### When to Summarize a Story
+
+When a story is primarily illustrative or entertaining but contains a point worth noting:
+
+**Structure:**
+- State the point being illustrated
+- Note that it's illustrated through a story (without recounting the story)
+- Include only the specific detail that makes the point
+
+**Example:**
+```json
+{
+  "insight_type": "NOTES",
+  "insight_text": "Real-world deployment often differs from research conditions - illustrated by speaker's experience where a model that achieved 95% accuracy in testing failed on 40% of production documents due to formatting variations"
+}
+```
+
+### When to Exclude Story Content
+
+Exclude story content from insights when:
+
+1. **Pure entertainment** - The story is told for humor or engagement without a substantive point
+2. **Explicit tangent** - The speaker acknowledges going off-topic
+3. **No connection to main topic** - The story doesn't inform or illustrate any insight
+4. **Repeated story** - The story has already been covered in prior context
+5. **Generic anecdote** - The story is a common example that doesn't add specific value
+
+### Story Detection Indicators
+
+While you should not create separate story insights, be aware of story structures:
+
+**Narrative Markers** (may indicate story content):
+- Temporal framing: "When I was...", "Back in...", "A few years ago..."
+- Personal pronouns: "I remember...", "I once...", "I had this experience..."
+- Scene-setting: "So there I was...", "Picture this...", "Imagine..."
+- Transition phrases: "That reminds me...", "Speaking of which...", "This brings me to..."
+
+**Action**: When you detect these patterns, apply the framing guidelines above.
+
+### Story Continuation Pattern
+
+When a story spans multiple windows and the core insight emerges gradually:
+
+1. **Initial story content**: Capture as NOTES with the story context, noting that the insight is developing
+2. **Story continuation**: Use `continuation_of` to link to the original, adding new context
+3. **Insight emergence**: When the core point becomes clear, create a KEY POINT that captures it
+4. **Reference the story**: The KEY POINT can reference the story via `continuation_of` without recounting it
+
+**Example flow:**
+```json
+// Window 1 - Story begins
+{
+  "insight_type": "NOTES",
+  "insight_text": "Speaker begins recounting their experience debugging a production issue at their previous company",
+  "continuation_of": null
+}
+
+// Window 2 - Story continues
+{
+  "insight_type": "NOTES",
+  "insight_text": "The issue involved a race condition that only manifested under high load, taking 3 weeks to diagnose",
+  "continuation_of": 42
+}
+
+// Window 3 - Insight emerges
+{
+  "insight_type": "KEY POINT",
+  "insight_text": "Race conditions that only appear under load require systematic load testing from development through staging - speaker's 3-week diagnosis could have been avoided with earlier load testing",
+  "continuation_of": 43
+}
+```
 
 ---
 
