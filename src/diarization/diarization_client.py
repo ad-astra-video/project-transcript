@@ -412,7 +412,6 @@ class DiarizationClient:
     
     async def initialize(self):
         """Initialize lock and speaker memory."""
-        logger.info("DiarizationClient.initialize called")
         
         if self._lock is None:
             self._lock = threading.Lock()

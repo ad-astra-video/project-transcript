@@ -998,6 +998,10 @@ async def on_stream_start(params: dict):
             if STATE.whisper_client is not None:
                 STATE.whisper_client.reset()
             
+            # Reset diarization client state for new stream (clear speaker memory)
+            if STATE.diarization_client is not None:
+                STATE.diarization_client.reset()
+            
             # Reset shutdown state for new stream
             STATE.shutdown_requested = False
             STATE.shutdown_completed = False
