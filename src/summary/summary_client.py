@@ -455,6 +455,9 @@ class SummaryClient:
         # Auto content type detection trigger - runs on first buffered window
         self._auto_detect_content_type_detection: bool = True
         
+        # In-flight flag to prevent concurrent content type detection requests
+        self._content_type_detection_in_progress: bool = False
+        
         # Store last raw LLM responses for debugging
         self._last_summary_raw_response: Optional[str] = None
         
@@ -1052,6 +1055,11 @@ class SummaryClient:
             # Check if this is the first buffered window (buffer just went from empty to non-empty)
             # AND we need auto-detection
             if len(self._temp_segment_buffer) == 1 and self._auto_detect_content_type_detection:
+                # Skip if content type detection is already in progress (prevents concurrent LLM calls)
+                if self._content_type_detection_in_progress:
+                    logger.debug("Content type detection already in progress - skipping duplicate request")
+                    return {"type": "context_summary", "segments": []}
+                
                 # Check user override FIRST - send immediately without elapsed time check
                 if self._user_content_type_override:
                     # User override provided - send detection message with override
@@ -1459,6 +1467,8 @@ class SummaryClient:
         self._user_content_type_override = None
         # Reset auto-detection trigger for new stream
         self._auto_detect_content_type_detection = True
+        # Reset in-flight detection flag for new stream
+        self._content_type_detection_in_progress = False
         # Reset raw response storage
         self._last_summary_raw_response = None
         # Reset last processed timestamp for new stream
@@ -1620,32 +1630,37 @@ class SummaryClient:
         Returns:
             ContentTypeState if detection succeeded, None if skipped (user override)
         """
-        # Check for user override first
-        if self._user_content_type_override:
-            logger.info(f"Skipping content type detection - user override active: {self._user_content_type_override}")
-            return None
+        # Set in-progress flag to prevent concurrent detection requests
+        self._content_type_detection_in_progress = True
+        logger.debug("Content type detection started - in_progress flag set to True")
         
-        # Store previous content type for change detection
-        previous_content_type = self._content_type_state.content_type
-        
-        # Get accumulated text from all windows (newest to oldest)
-        context_text = self._window_manager.get_all_windows_text()
-        
-        # Get current context length from state, or use default
-        context_length = self._content_type_state.context_length
-        if context_length < 2000:
-            context_length = 2000
-        
-        # Don't exceed available text
-        max_context_length = len(context_text)
-        if context_length > max_context_length:
-            context_length = max_context_length
-        
-        # Get context text (last N chars)
-        context_to_use = context_text[-context_length:] if len(context_text) > context_length else context_text
-        
-        # Format the context text for the user message
-        user_content = f"""## TRANSCRIPT CONTEXT
+        try:
+            # Check for user override first
+            if self._user_content_type_override:
+                logger.info(f"Skipping content type detection - user override active: {self._user_content_type_override}")
+                return None
+            
+            # Store previous content type for change detection
+            previous_content_type = self._content_type_state.content_type
+            
+            # Get accumulated text from all windows (newest to oldest)
+            context_text = self._window_manager.get_all_windows_text()
+            
+            # Get current context length from state, or use default
+            context_length = self._content_type_state.context_length
+            if context_length < 2000:
+                context_length = 2000
+            
+            # Don't exceed available text
+            max_context_length = len(context_text)
+            if context_length > max_context_length:
+                context_length = max_context_length
+            
+            # Get context text (last N chars)
+            context_to_use = context_text[-context_length:] if len(context_text) > context_length else context_text
+            
+            # Format the context text for the user message
+            user_content = f"""## TRANSCRIPT CONTEXT
 
 Transcript Text (Last {context_length} characters):
 {context_to_use}
@@ -1654,120 +1669,124 @@ Transcript Text (Last {context_length} characters):
 
 Please analyze the transcript context above and output content type detection as JSON with fields: content_type, confidence, and reasoning."""
 
-        messages = self._build_messages(
-            system_prompt=CONTENT_TYPE_DETECTION_PROMPT,
-            user_content=user_content
-        )
-        
-        try:
-            logger.info(f"Running content type detection (context_length={context_length})")
+            messages = self._build_messages(
+                system_prompt=CONTENT_TYPE_DETECTION_PROMPT,
+                user_content=user_content
+            )
             
             try:
-                response: ChatCompletion = await self.client.chat.completions.create(
-                    model=self.model,
-                    messages=messages,
-                    max_tokens=self.max_tokens,
-                    temperature=0.1,
-                    response_format={"type": "json_schema", "json_schema": {"name": "content_type_detection", "schema": self.content_type_response_json_schema}},
-                )
+                logger.info(f"Running content type detection (context_length={context_length})")
                 
-                # Extract input tokens from response usage
-                input_tokens = 0
-                if response.usage:
-                    input_tokens = response.usage.prompt_tokens or 0
-                    logger.info(f"Content type detection input tokens: {input_tokens}")
-                
-                # Send monitoring event with input token count
-                await self._send_monitoring_event({
-                    "input_tokens": input_tokens,
-                    "context_length": context_length,
-                    "window_start": window_start,
-                    "window_end": window_end,
-                    "timestamp_utc": datetime.now(timezone.utc).isoformat()
-                }, "content_type_detection_tokens")
-                
-            except Exception as e:
-                logger.error(f"Content type detection LLM call failed: {e}")
-                raise
-
-            if response.choices and len(response.choices) > 0:
-                content = response.choices[0].message.content or ""
-                
-                # Validate response before parsing
-                if not content or not content.strip():
-                    return self._content_type_state
-                
-                # Check for partial/incomplete JSON
-                content_stripped = content.strip()
-                starts_with_brace = content_stripped.startswith('{')
-                ends_with_brace = content_stripped.endswith('}')
-                
-                if not starts_with_brace or not ends_with_brace:
-                    return self._content_type_state
-                
-                result = self._parse_content_type_response(content)
-                
-                # Check if UNKNOWN - increase context length for next run
-                if result.content_type == ContentType.UNKNOWN.value:
-                    logger.info(f"Content type UNKNOWN detected (confidence: {result.confidence:.2f})")
+                try:
+                    response: ChatCompletion = await self.client.chat.completions.create(
+                        model=self.model,
+                        messages=messages,
+                        max_tokens=self.max_tokens,
+                        temperature=0.1,
+                        response_format={"type": "json_schema", "json_schema": {"name": "content_type_detection", "schema": self.content_type_response_json_schema}},
+                    )
                     
-                    # Extract reasoning from response if available
-                    try:
-                        data = json.loads(content)
-                        reasoning = data.get("reasoning", "No reasoning provided")
-                        logger.info(f"UNKNOWN reasoning: {reasoning}")
-                    except Exception:
-                        logger.info("Could not extract reasoning from UNKNOWN response")
+                    # Extract input tokens from response usage
+                    input_tokens = 0
+                    if response.usage:
+                        input_tokens = response.usage.prompt_tokens or 0
+                        logger.info(f"Content type detection input tokens: {input_tokens}")
                     
-                    # Increase context length by 500 for next run (don't exceed max)
-                    new_context_length = min(context_length + 500, max_context_length)
-                    if new_context_length != context_length:
-                        logger.info(f"Increasing context length to {new_context_length} for next run")
-                    context_length = new_context_length
-                
-                # Get sentiment_enabled from rules
-                sentiment_enabled = False
-                if result.content_type in CONTENT_TYPE_RULE_MODIFIERS:
-                    sentiment_enabled = CONTENT_TYPE_RULE_MODIFIERS[result.content_type].get("sentiment_enabled", False)
-                
-                # Update state with new context length and sentiment_enabled
-                self._content_type_state = ContentTypeState(
-                    content_type=result.content_type,
-                    confidence=result.confidence,
-                    source=ContentTypeSource.AUTO_DETECTED.value,
-                    last_detection_text=context_to_use,
-                    context_length=context_length,
-                    sentiment_enabled=sentiment_enabled
-                )
-                
-                logger.info(f"Content type detected: {result.content_type} (confidence: {result.confidence:.2f}, sentiment_enabled={sentiment_enabled})")
-                
-                # Check for content type change and send monitoring event
-                if previous_content_type != result.content_type:
-                    # Create event data dict
-                    event_data = {
-                        "previous_content_type": previous_content_type,
-                        "new_content_type": result.content_type,
-                        "confidence": result.confidence,
-                        "reasoning": getattr(result, 'reasoning', 'No reasoning provided'),
+                    # Send monitoring event with input token count
+                    await self._send_monitoring_event({
+                        "input_tokens": input_tokens,
                         "context_length": context_length,
-                        "source": ContentTypeSource.AUTO_DETECTED.value,
                         "window_start": window_start,
                         "window_end": window_end,
                         "timestamp_utc": datetime.now(timezone.utc).isoformat()
-                    }
+                    }, "content_type_detection_tokens")
                     
-                    await self._send_monitoring_event(event_data, "content_type_changed")
-                    logger.info(f"Sent content_type_changed monitoring event: {previous_content_type} -> {result.content_type}")
+                except Exception as e:
+                    logger.error(f"Content type detection LLM call failed: {e}")
+                    raise
+
+                if response.choices and len(response.choices) > 0:
+                    content = response.choices[0].message.content or ""
+                    
+                    # Validate response before parsing
+                    if not content or not content.strip():
+                        return self._content_type_state
+                    
+                    # Check for partial/incomplete JSON
+                    content_stripped = content.strip()
+                    starts_with_brace = content_stripped.startswith('{')
+                    ends_with_brace = content_stripped.endswith('}')
+                    
+                    if not starts_with_brace or not ends_with_brace:
+                        return self._content_type_state
+                    
+                    result = self._parse_content_type_response(content)
+                    
+                    # Check if UNKNOWN - increase context length for next run
+                    if result.content_type == ContentType.UNKNOWN.value:
+                        logger.info(f"Content type UNKNOWN detected (confidence: {result.confidence:.2f})")
+                        
+                        # Extract reasoning from response if available
+                        try:
+                            data = json.loads(content)
+                            reasoning = data.get("reasoning", "No reasoning provided")
+                            logger.info(f"UNKNOWN reasoning: {reasoning}")
+                        except Exception:
+                            logger.info("Could not extract reasoning from UNKNOWN response")
+                        
+                        # Increase context length by 500 for next run (don't exceed max)
+                        new_context_length = min(context_length + 500, max_context_length)
+                        if new_context_length != context_length:
+                            logger.info(f"Increasing context length to {new_context_length} for next run")
+                        context_length = new_context_length
+                    
+                    # Get sentiment_enabled from rules
+                    sentiment_enabled = False
+                    if result.content_type in CONTENT_TYPE_RULE_MODIFIERS:
+                        sentiment_enabled = CONTENT_TYPE_RULE_MODIFIERS[result.content_type].get("sentiment_enabled", False)
+                    
+                    # Update state with new context length and sentiment_enabled
+                    self._content_type_state = ContentTypeState(
+                        content_type=result.content_type,
+                        confidence=result.confidence,
+                        source=ContentTypeSource.AUTO_DETECTED.value,
+                        last_detection_text=context_to_use,
+                        context_length=context_length,
+                        sentiment_enabled=sentiment_enabled
+                    )
+                    
+                    logger.info(f"Content type detected: {result.content_type} (confidence: {result.confidence:.2f}, sentiment_enabled={sentiment_enabled})")
+                    
+                    # Check for content type change and send monitoring event
+                    if previous_content_type != result.content_type:
+                        # Create event data dict
+                        event_data = {
+                            "previous_content_type": previous_content_type,
+                            "new_content_type": result.content_type,
+                            "confidence": result.confidence,
+                            "reasoning": getattr(result, 'reasoning', 'No reasoning provided'),
+                            "context_length": context_length,
+                            "source": ContentTypeSource.AUTO_DETECTED.value,
+                            "window_start": window_start,
+                            "window_end": window_end,
+                            "timestamp_utc": datetime.now(timezone.utc).isoformat()
+                        }
+                        
+                        await self._send_monitoring_event(event_data, "content_type_changed")
+                        logger.info(f"Sent content_type_changed monitoring event: {previous_content_type} -> {result.content_type}")
+                    
+                    return self._content_type_state
                 
+                # Return current state if LLM returns empty response
                 return self._content_type_state
-            
-            # Return current state if LLM returns empty response
-            return self._content_type_state
-            
-        except Exception as e:
-            logger.error(f"Content type detection error: {e}")
-            return self._content_type_state
+                
+            except Exception as e:
+                logger.error(f"Content type detection error: {e}")
+                return self._content_type_state
+        finally:
+            # Always clear the in-progress flag, regardless of success or failure
+            self._content_type_detection_in_progress = False
+            logger.debug("Content type detection completed - in_progress flag set to False")
     
     def _parse_content_type_response(self, content: str) -> ContentTypeDetectionSchema:
         """

@@ -203,6 +203,87 @@ class TestContentTypeDetectionTiming:
         assert result.get("type") == "content_type_detection"
         assert result.get("content_type") == "TECHNICAL_TALK"
         assert result.get("source") == "AUTO_DETECTED"
+    
+    @pytest.mark.asyncio
+    async def test_concurrent_detection_skipped_when_in_progress(self, mock_client):
+        """Content type detection should be skipped when another detection is already in progress."""
+        # Set up mock LLM response
+        mock_response = Mock()
+        mock_response.choices = [Mock()]
+        mock_response.choices[0].message.content = '{"content_type": "TECHNICAL_TALK", "confidence": 0.85, "reasoning": "Test"}'
+        mock_response.choices[0].message.reasoning = ""
+        mock_client.client.chat.completions.create = AsyncMock(return_value=mock_response)
+        
+        # Simulate detection already in progress (concurrent worker scenario)
+        mock_client._content_type_detection_in_progress = True
+        mock_client._auto_detect_content_type_detection = True
+        mock_client._temp_segment_buffer = []  # Empty buffer (first window)
+        mock_client._window_manager._first_window_timestamp = 0.0
+        
+        # Create test segments
+        segments = [{"id": "1", "start_ms": 0, "end_ms": 2500, "text": "Test transcription"}]
+        
+        # Call process_segments - should skip detection because it's already in progress
+        result = await mock_client.process_segments(
+            "context_summary",
+            segments,
+            transcription_window_id=1,
+            window_start=7.5,  # 75% of 10s initial delay
+            window_end=10.0
+        )
+        
+        # Verify detection was skipped - no LLM call made
+        assert result.get("type") == "context_summary"
+        assert result.get("segments") == []
+        assert mock_client.client.chat.completions.create.call_count == 0
+        # Auto-detection flag should still be True (detection still pending)
+        assert mock_client._auto_detect_content_type_detection == True
+    
+    @pytest.mark.asyncio
+    async def test_detection_flag_cleared_on_completion(self, mock_client):
+        """Content type detection in-progress flag should be cleared after detection completes."""
+        # Set up mock LLM response
+        mock_response = Mock()
+        mock_response.choices = [Mock()]
+        mock_response.choices[0].message.content = '{"content_type": "PODCAST", "confidence": 0.92, "reasoning": "Test"}'
+        mock_response.choices[0].message.reasoning = ""
+        mock_client.client.chat.completions.create = AsyncMock(return_value=mock_response)
+        
+        # Verify flag is initially False
+        assert mock_client._content_type_detection_in_progress == False
+        
+        # Simulate first window arriving with enough elapsed time
+        mock_client._window_manager._first_window_timestamp = 0.0
+        mock_client._auto_detect_content_type_detection = True
+        mock_client._temp_segment_buffer = []
+        
+        segments = [{"id": "1", "start_ms": 0, "end_ms": 2500, "text": "Test transcription"}]
+        
+        # Call process_segments - should trigger detection
+        result = await mock_client.process_segments(
+            "context_summary",
+            segments,
+            transcription_window_id=1,
+            window_start=7.5,
+            window_end=10.0
+        )
+        
+        # Verify detection ran and flag was cleared
+        assert result.get("type") == "content_type_detection"
+        assert mock_client._content_type_detection_in_progress == False
+    
+    def test_in_progress_flag_resets_on_stream(self, mock_client):
+        """In-progress flag should reset properly on new stream."""
+        # Set up in-progress state
+        mock_client._content_type_detection_in_progress = True
+        mock_client._auto_detect_content_type_detection = False
+        
+        # Reset the client
+        mock_client.reset()
+        
+        # Verify in-progress flag was reset
+        assert mock_client._content_type_detection_in_progress == False
+        assert mock_client._auto_detect_content_type_detection == True
 
 
 class TestWindowManagerBufferTracking:
