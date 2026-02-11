@@ -106,10 +106,10 @@ class SpeakerMemory:
         return float(np.dot(a, b))
     
     def identify(
-        self, 
+        self,
         embedding: np.ndarray,
         segment_info: Optional[dict] = None
-    ) -> Tuple[str, float]:
+    ) -> Tuple[str, float, Optional[Dict[str, float]]]:
         """
         Match embedding to existing speaker or create new one.
         
@@ -118,11 +118,11 @@ class SpeakerMemory:
             segment_info: Optional metadata for logging (timestamp, text, etc)
             
         Returns:
-            (speaker_id, confidence_score)
+            (speaker_id, confidence_score, alt_speakers)
         """
         if len(embedding) == 0:
             logger.info("Empty embedding received, cannot identify speaker")
-            return "unknown", 0.0
+            return "unknown", 0.0, {}
         
         embedding = self._normalize(embedding)
         
@@ -173,15 +173,15 @@ class SpeakerMemory:
             self.history.append(best_id)
             return best_id, best_score, alt_speakers
         else:
-            speaker_id, confidence = self._create_speaker(embedding, segment_info, confidence=best_score)
+            speaker_id, confidence, _ = self._create_speaker(embedding, segment_info, confidence=best_score)
             return speaker_id, confidence, alt_speakers
             
     def _create_speaker(
-        self, 
-        embedding: np.ndarray, 
+        self,
+        embedding: np.ndarray,
         segment_info: Optional[dict],
         confidence: float
-    ) -> Tuple[str, float]:
+    ) -> Tuple[str, float, Optional[Dict[str, float]]]:
         """Create a new speaker profile."""
         speaker_id = f"speaker_{self.speaker_counter}"
         self.speaker_counter += 1
@@ -191,7 +191,7 @@ class SpeakerMemory:
         self.last_speaker = speaker_id
         self.history.append(speaker_id)
         
-        return speaker_id, confidence
+        return speaker_id, confidence, {}
     
     def _update_speaker(self, speaker_id: str, embedding: np.ndarray):
         """Update speaker centroid with running average."""
