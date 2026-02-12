@@ -120,7 +120,7 @@ class TestSixWindowAccumulation:
             assert processed_count == 3, f"Expected 3 processed windows (at modulo 0), got {processed_count}"
             
             # Verify accumulated text in _build_context
-            context, prior_insights = client._build_context(include_insights=True)
+            context, prior_insights, text_length, insights_per_window = client._build_context(include_insights=True)
             
             # With current behavior, get_accumulated_text_and_insights() holds back only last 1 window
             # So accumulated text includes windows 0-4 (5 windows), excludes only window 5
@@ -267,7 +267,7 @@ class TestSixWindowAccumulation:
             client._window_manager.add_window(text, i * 5.0, (i + 1) * 5.0)
         
         # Build context with insights
-        context, prior_insights = client._build_context(include_insights=True)
+        context, prior_insights, text_length, insights_per_window = client._build_context(include_insights=True)
         
         # With current behavior, windows 0-4 should be accumulated (excludes only last 1: window 5)
         assert "Alpha point one" in context, "First window should be in accumulated text"
@@ -312,7 +312,7 @@ class TestSixWindowAccumulation:
                 client._window_manager.add_insight_to_window(window_id, insight)
         
         # Build context with insights
-        context, prior_insights = client._build_context(include_insights=True)
+        context, prior_insights, text_length, insights_per_window = client._build_context(include_insights=True)
         
         # With current behavior holding back only last 1 window, windows 0-4 are accumulated
         # So we should have insights from windows 0-4 = 8 insights (2 per window for 4 windows)
@@ -393,7 +393,7 @@ class TestSixWindowAccumulation:
                             pass
             
             # Verify accumulated context handles empty insights correctly
-            context, prior_insights = client._build_context(include_insights=True)
+            context, prior_insights, text_length, insights_per_window = client._build_context(include_insights=True)
             
             # Context should still be built correctly
             assert "## PRIOR TEXT" in context, "PRIOR TEXT section should be present"
@@ -433,7 +433,7 @@ class TestSixWindowAccumulation:
             wm.add_window(text, i * 5.0, (i + 1) * 5.0)
         
         # Get accumulated text and insights
-        accumulated_text, insights = wm.get_accumulated_text_and_insights()
+        accumulated_text, insights, text_length, insights_per_window = wm.get_accumulated_text_and_insights()
         
         # With current behavior, all windows except the last one should be accumulated
         # So windows 0-4 should be in accumulated text, window 5 should NOT be
@@ -462,7 +462,7 @@ class TestSixWindowAccumulation:
             client._window_manager.add_window(long_text, i * 5.0, (i + 1) * 5.0)
         
         # Get accumulated text and insights
-        accumulated_text, insights = client._window_manager.get_accumulated_text_and_insights()
+        accumulated_text, insights, text_length, insights_per_window = client._window_manager.get_accumulated_text_and_insights()
         
         # With current behavior, text is added while under the limit
         # So accumulated text should be truncated to respect raw_text_context_limit
@@ -490,7 +490,7 @@ class TestSixWindowAccumulation:
             client._window_manager.add_insight_to_window(i, insight)
         
         # Get accumulated text and insights
-        accumulated_text, insights = client._window_manager.get_accumulated_text_and_insights()
+        accumulated_text, insights, text_length, insights_per_window = client._window_manager.get_accumulated_text_and_insights()
         
         # With current behavior, the last window's insights are NOT included
         # accumulated_windows = all except last, so only windows 0-1 are included
@@ -632,7 +632,7 @@ class TestSixWindowAccumulation:
             client._window_manager.add_insight_to_window(i, insight)
         
         # Build context with insights
-        context, prior_insights = client._build_context(include_insights=True)
+        context, prior_insights, text_length, insights_per_window = client._build_context(include_insights=True)
         
         # Verify all sections are present
         assert "## PRIOR TEXT" in context, "PRIOR TEXT section should be present"
@@ -670,7 +670,7 @@ class TestSixWindowAccumulation:
         client._window_manager.add_window("Third window text", 10.0, 15.0)
 
         # Build context (now includes windows 0-1 as prior)
-        context, prior_insights = client._build_context(include_insights=True)
+        context, prior_insights, text_length, insights_per_window = client._build_context(include_insights=True)
         
         # Verify insights are formatted with ID and timing hints
         for insight in prior_insights:
@@ -718,7 +718,7 @@ class TestSixWindowAccumulation:
         client._window_manager.add_window("Third window text", 10.0, 15.0)
 
         # Build context (now includes windows 0-1 as prior)
-        context, prior_insights = client._build_context(include_insights=True)
+        context, prior_insights, text_length, insights_per_window = client._build_context(include_insights=True)
         
         # Verify continuation marker is present
         assert "CONTINUATION of insight #1" in context, "Continuation marker should be in context"
@@ -753,6 +753,6 @@ class TestSixWindowAccumulation:
         assert len(wm) == 0, "Should have 0 windows after clear"
         
         # Verify windows are empty
-        accumulated_text, insights = wm.get_accumulated_text_and_insights()
+        accumulated_text, insights, text_length, insights_per_window = wm.get_accumulated_text_and_insights()
         assert accumulated_text == "", "Accumulated text should be empty after clear"
         assert insights == [], "Insights should be empty after clear"

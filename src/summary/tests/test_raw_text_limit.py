@@ -21,7 +21,7 @@ class TestWindowManagerRawTextLimit:
         wm.add_window("Hello world " * 100, 0.0, 10.0)  # ~1200 chars
         wm.add_window("Test message " * 50, 10.0, 20.0)  # ~600 chars
         
-        text, insights = wm.get_accumulated_text_and_insights()
+        text, insights, text_length, insights_per_window = wm.get_accumulated_text_and_insights()
         
         # Should have text from first window (second window is held out)
         assert len(text) > 0
@@ -46,7 +46,7 @@ class TestWindowManagerRawTextLimit:
         wm.add_window("C" * 300, 20.0, 30.0)  # 300 chars
         wm.add_window("D" * 300, 30.0, 40.0)  # 300 chars
         
-        text, insights = wm.get_accumulated_text_and_insights()
+        text, insights, text_length, insights_per_window = wm.get_accumulated_text_and_insights()
         
         # Should have text from first 2 windows (300 + 1 space + 300 = 601 > 500)
         # Window 0: 300 < 500 → add (current=300)
@@ -95,7 +95,7 @@ class TestWindowManagerRawTextLimit:
         wm.add_window("C" * 100, 20.0, 30.0)
         wm.add_window("D" * 100, 30.0, 40.0)
         
-        text, insights = wm.get_accumulated_text_and_insights()
+        text, insights, text_length, insights_per_window = wm.get_accumulated_text_and_insights()
         
         # Should have 2 insights (from first 2 windows)
         assert len(insights) == 2
@@ -110,7 +110,7 @@ class TestWindowManagerRawTextLimit:
             transcription_windows_per_summary_window=4
         )
         
-        text, insights = wm.get_accumulated_text_and_insights()
+        text, insights, text_length, insights_per_window = wm.get_accumulated_text_and_insights()
         
         assert text == ""
         assert insights == []
@@ -125,7 +125,7 @@ class TestWindowManagerRawTextLimit:
         
         wm.add_window("Test text", 0.0, 10.0)
         
-        text, insights = wm.get_accumulated_text_and_insights()
+        text, insights, text_length, insights_per_window = wm.get_accumulated_text_and_insights()
         
         assert text == ""
         assert insights == []
@@ -148,7 +148,7 @@ class TestWindowManagerRawTextLimit:
         wm_small.add_window("C" * 100, 20.0, 30.0)  # 100 chars
         wm_small.add_window("D" * 100, 30.0, 40.0)  # 100 chars
         
-        text_small, _ = wm_small.get_accumulated_text_and_insights()
+        text_small, _, _, _ = wm_small.get_accumulated_text_and_insights()
         # Window 0: 100 < 50 → add (current=100)
         # Window 1: 100 < 50 → skip
         assert len(text_small) == 100
@@ -164,7 +164,7 @@ class TestWindowManagerRawTextLimit:
         wm_large.add_window("C" * 100, 20.0, 30.0)
         wm_large.add_window("D" * 100, 30.0, 40.0)
         
-        text_large, _ = wm_large.get_accumulated_text_and_insights()
+        text_large, _, _, _ = wm_large.get_accumulated_text_and_insights()
         # All 3 windows fit under 5000 limit (100 + 1 + 100 + 1 + 100 = 302)
         assert len(text_large) == 302  # 100 + 1 + 100 + 1 + 100
         assert len(text_large) > len(text_small)

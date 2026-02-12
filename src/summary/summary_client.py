@@ -219,7 +219,7 @@ class WindowManager:
 
         return actual_window_id
     
-    def get_accumulated_text_and_insights(self) -> tuple[str, List[WindowInsight]]:
+    def get_accumulated_text_and_insights(self) -> tuple[str, List[WindowInsight], int, float]:
         """
         Get accumulated text and insights from all windows except the last one.
         
@@ -230,20 +230,17 @@ class WindowManager:
         adding text from windows while current length is under the limit.
         
         Returns:
-            Tuple of (accumulated_text_string, list_of_insights)
+            Tuple of (accumulated_text_string, list_of_insights, text_length, insights_per_window_metric)
         """
         if len(self._windows) <= 1:
             logger.debug(f"Not enough windows for accumulation: {len(self._windows)} <= 1")
-            return "", []
+            return "", [], 0, 0.0
         
         # All windows except the last one (current window being analyzed)
         accumulated_windows = self._windows[:-1]
         text_parts = []
         current_text_length = 0
         insights = []
-        
-        # Diagnostic: track insights per window
-        insights_per_window = []
         
         for window in accumulated_windows:
             # Only add text if we're still under the limit
@@ -252,18 +249,25 @@ class WindowManager:
                 current_text_length += len(window.text)
             
             # Collect insights (always include all insights regardless of text limit)
-            window_insight_count = len(window.insights)
-            insights_per_window.append(f"w{window.window_id}:{window_insight_count}")
             if window.insights:
                 insights.extend(window.insights)
         
         accumulated_text = " ".join(text_parts)
+        
+        # Calculate metrics once
+        num_windows = len(accumulated_windows)
+        total_insights = len(insights)
+        text_length = len(accumulated_text)
+        insights_per_window = total_insights / num_windows if num_windows > 0 else 0.0
+        
+        # Log the insights per window metric
         logger.info(
-            f"Returning accumulated text from {len(accumulated_windows)} windows with {len(insights)} total insights. "
-            f"Text length: {len(accumulated_text)} chars (limit: {self.raw_text_context_limit}). "
-            f"Per-window breakdown: [{', '.join(insights_per_window)}]"
+            f"Returning accumulated text from {num_windows} windows with {total_insights} total insights. "
+            f"Text length: {text_length} chars (limit: {self.raw_text_context_limit}). "
+            f"Insights per window metric: {insights_per_window:.2f}"
         )
-        return accumulated_text, insights
+        
+        return accumulated_text, insights, text_length, insights_per_window
     
     def get_all_windows_text(self) -> str:
         """
@@ -750,16 +754,16 @@ class SummaryClient:
         
         return " ".join(new_text_parts)
     
-    def _build_context(self, include_insights: bool = True) -> tuple[str, List[WindowInsight]]:
+    def _build_context(self, include_insights: bool = True) -> tuple[str, List[WindowInsight], int, float]:
         """
         Build context string with text and optionally insights from accumulated windows.
         Single-pass: loops through accumulated windows once to get both text and insights.
         
         Returns:
-            Tuple of (formatted_context_string, list_of_insights_from_accumulated_windows)
+            Tuple of (formatted_context_string, list_of_insights_from_accumulated_windows, text_length, insights_per_window_metric)
         """
         # Single-pass accumulation from same windows
-        accumulated_text, insights = self._window_manager.get_accumulated_text_and_insights()
+        accumulated_text, insights, text_length, insights_per_window = self._window_manager.get_accumulated_text_and_insights()
         
         parts = []
         
@@ -773,7 +777,7 @@ class SummaryClient:
             parts.append(f"## PRIOR INSIGHTS\n{insights_text}")
         
         context_string = "\n\n".join(parts) if parts else ""
-        return context_string, insights
+        return context_string, insights, text_length, insights_per_window
     
     def _format_insights_for_context(self, insights: List[WindowInsight]) -> str:
         """Format insights for inclusion in Prior Context with IDs and timing hints."""
@@ -979,7 +983,6 @@ class SummaryClient:
                 input_tokens = 0
                 if response.usage:
                     input_tokens = response.usage.prompt_tokens or 0
-                    logger.info(f"LLM input tokens: {input_tokens}")
                 
                 # Extract summary text and reasoning content from response
                 if response.choices and len(response.choices) > 0:
@@ -1161,8 +1164,8 @@ class SummaryClient:
                 else:
                     logger.info(f"Initial delay passed - proceeding with first summary after {elapsed:.1f}s")
         
-        # Get context and prior insights from accumulated windows
-        context, prior_insights = self._build_context(include_insights=True)
+        # Get context and prior insights from accumulated windows (also returns metrics)
+        context, prior_insights, context_text_length, insights_per_window = self._build_context(include_insights=True)
         
         # Get unprocessed text from all windows (for first summary, this includes all accumulated text)
         unprocessed_text = self._window_manager.get_unprocessed_text()
@@ -1177,20 +1180,22 @@ class SummaryClient:
             logger.info(f"Subsequent summary: analyzing {len(content_to_analyze)} chars new text")
         
         # Send text + context (with insights) to LLM
-        logger.info(f"Sending {len(content_to_analyze)} chars to analyze + {len(context)} chars context (with {len(prior_insights)} prior insights) to LLM")
+        logger.info(f"Sending {len(content_to_analyze)} chars to analyze + {context_text_length} chars context (with {len(prior_insights)} prior insights) to LLM")
         summary_text, reasoning_content, input_tokens = await self.summarize_text(content_to_analyze, context)
         
-        # Log input tokens for monitoring
-        logger.info(f"LLM input tokens for window {summary_window_id}: {input_tokens}")
+        # Calculate accumulated windows count (exclude current window being processed)
+        num_accumulated_windows = len(self._window_manager._windows) - 1
         
-        # Send monitoring event with input token count
+        # Send monitoring event with input token count and insights per window metric
         await self._send_monitoring_event({
             "summary_window_id": summary_window_id,
             "transcription_window_ids": transcription_window_ids,
             "input_tokens": input_tokens,
             "text_chars": len(content_to_analyze),
-            "context_chars": len(context),
+            "context_chars": context_text_length,
             "prior_insights_count": len(prior_insights),
+            "accumulated_windows_count": num_accumulated_windows,
+            "insights_per_window": round(insights_per_window, 2),
             "timestamp_utc": datetime.now(timezone.utc).isoformat()
         }, "summary_tokens")
         
@@ -1207,6 +1212,7 @@ class SummaryClient:
                 if analysis_field:
                     background_context = analysis_field
                     logger.debug(f"Using analysis field as background_context (length={len(analysis_field)})")
+                    parsed_data.pop("analysis")  # Remove analysis from parsed_data to avoid duplication in summary
                 else:
                     background_context = reasoning_content
                     logger.debug("No analysis field found, using reasoning_content as fallback")
@@ -1240,7 +1246,6 @@ class SummaryClient:
         
         # Mark that we have performed at least one summary
         self._has_performed_summary = True
-        logger.info(f"First summary: analyzing {len(content_to_analyze)} chars from {len(self._window_manager._windows)} windows")
         
         # Re-enable auto-detection for next buffered window (after buffer flushes) if no override
         if not self._user_content_type_override:
@@ -1248,7 +1253,6 @@ class SummaryClient:
         
         # Mark all windows as processed after first summary
         self._window_manager.mark_all_windows_processed()
-        logger.info("Marked all windows as processed after first summary")
         
         # Build complete payload with summary_window_id and transcription_window_ids list
         payload = {

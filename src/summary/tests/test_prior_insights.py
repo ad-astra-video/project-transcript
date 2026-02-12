@@ -77,7 +77,7 @@ class TestPriorInsightsAccumulation:
             
             # Verify that _build_context returns 0 prior insights for first window
             # (since no accumulated windows exist yet with transcription_windows_per_summary_window=2)
-            context, prior_insights = client._build_context(include_insights=True)
+            context, prior_insights, text_length, insights_per_window = client._build_context(include_insights=True)
             # With only 1 window and transcription_windows_per_summary_window=2, there are no accumulated windows
             assert len(prior_insights) == 0
     
@@ -184,7 +184,7 @@ class TestPriorInsightsAccumulation:
         manager.add_insight_to_window(1, insight2)
         
         # Get accumulated text and insights (excludes last 1 window)
-        accumulated_text, accumulated_insights = manager.get_accumulated_text_and_insights()
+        accumulated_text, accumulated_insights, text_length, insights_per_window = manager.get_accumulated_text_and_insights()
         
         # Should include windows 0 and 1 (all except last window 2)
         assert "Window 0 text" in accumulated_text
@@ -219,7 +219,7 @@ class TestPriorInsightsAccumulation:
         client._window_manager.add_insight_to_window(0, insight)
         
         # Build context with insights
-        context, prior_insights = client._build_context(include_insights=True)
+        context, prior_insights, text_length, insights_per_window = client._build_context(include_insights=True)
         
         # Context should include PRIOR INSIGHTS section
         assert "## PRIOR INSIGHTS" in context, f"Expected PRIOR INSIGHTS in context, got: '{context}'"
@@ -251,7 +251,7 @@ class TestPriorInsightsAccumulation:
         client._window_manager.add_insight_to_window(0, insight)
         
         # Build context without insights
-        context, prior_insights = client._build_context(include_insights=False)
+        context, prior_insights, text_length, insights_per_window = client._build_context(include_insights=False)
         
         # Context string should NOT include PRIOR INSIGHTS section
         assert "## PRIOR INSIGHTS" not in context
