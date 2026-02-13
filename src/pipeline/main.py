@@ -315,7 +315,7 @@ async def _summary_worker():
                         window_start_ts,
                         window_end_ts
                     ),
-                    timeout=120.0
+                    timeout=180.0
                 )
                 end = time.perf_counter()
                 
