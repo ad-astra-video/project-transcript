@@ -478,18 +478,62 @@ class SummaryClient:
         # Monitoring event callback
         self._send_monitoring_event_callback: Optional[MonitoringCallback] = send_monitoring_event_callback
     
-    async def initialize(self):
+    async def initialize(self) -> Optional[str]:
         """
-        Initialize the lock for async operations.
+        Initialize the lock for async operations and detect model if needed.
         
-        With the OpenAI client, we no longer need to fetch models from /models endpoint.
+        If model is empty/None, fetches the loaded model from /models endpoint using
+        the OpenAI library's models.list() method.
+        
+        Returns:
+            The detected model ID if model was auto-detected, None otherwise
         """
         logger.info("SummaryClient.initialize called")
         
         if self._lock is None:
             self._lock = asyncio.Lock()
         
+        # Auto-detect model if not specified
+        if not self.model:
+            logger.info("No model specified, fetching loaded model from /models endpoint")
+            detected_model = await self.fetch_loaded_model()
+            self.model = detected_model
+            logger.info(f"Auto-detected model: {self.model}")
+            return detected_model
+        
         logger.info(f"SummaryClient initialized with model: {self.model}")
+        return None
+    
+    async def fetch_loaded_model(self) -> str:
+        """
+        Fetch the currently loaded model from the /models endpoint using OpenAI library.
+        
+        Uses the OpenAI Python library's models.list() method to retrieve available models
+        and returns the first one (typically the loaded/primary model).
+        
+        Returns:
+            The model ID string from the OpenAI models list response
+            
+        Raises:
+            RuntimeError: If the models.list() call fails or returns no models
+        """
+        try:
+            logger.info(f"Fetching available models from {self.base_url}")
+            
+            # Use OpenAI Python library's built-in models.list() method
+            response = await self.client.models.list()
+            
+            if response.data and len(response.data) > 0:
+                # Return the first model (typically the loaded/primary model)
+                model_id = response.data[0].id
+                logger.info(f"Detected loaded model: {model_id}")
+                return model_id
+            else:
+                raise RuntimeError("No models available from OpenAI API")
+                
+        except Exception as e:
+            logger.error(f"Failed to fetch models using OpenAI library: {e}")
+            raise RuntimeError(f"Model detection failed: {e}")
     
     async def startup_summary(self) -> bool:
         """

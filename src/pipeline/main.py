@@ -149,7 +149,19 @@ async def load_model(**kwargs):
         transcription_windows_per_summary_window=4,  # Default value, will be updated via update_params if needed
         send_monitoring_event_callback=PROCESSOR.send_monitoring_event if PROCESSOR else None
     )
-    await STATE.summary_client.initialize()
+    
+    # Initialize and detect model if needed
+    detected_model = await STATE.summary_client.initialize()
+    
+    if detected_model:
+        # Model was auto-detected, update our tracking
+        summary_model = detected_model
+        logger.info(f"Using auto-detected model: {summary_model}")
+    elif summary_model:
+        logger.info(f"Using configured model: {summary_model}")
+    else:
+        raise RuntimeError("No model specified and model detection failed")
+    
     logger.info("Summary client initialized")
     
     # Send startup warm-up request to verify model availability
