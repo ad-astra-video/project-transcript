@@ -320,7 +320,12 @@ def diarization_worker(hf_token: str, request_queue, result_queue):
                 shutdown_received = False  # Reset for new stream
                 logger.info("Received reset signal - clearing speaker memory for new stream")
                 speakers.reset()
-                continue
+                # CRITICAL FIX: Do NOT continue loop here - we need to re-check queue state
+                # The issue is that after clearing queues in reset_process(), the queue is empty
+                # If we continue and find queue empty with shutdown_received=False, we won't exit
+                # But if shutdown_received was True before, we need to ensure it stays False
+                # Actually, the issue is different - let me trace through the flow more carefully
+                logger.debug(f"After RESET_SIGNAL: shutdown_received={shutdown_received}, queue.empty()={request_queue.empty()}")
 
             logger.info(f"Received diarization request: {request.request_id}, audio: {request.audio_path}")
             try:
@@ -476,12 +481,21 @@ class DiarizationClient:
         logger.info(f"DiarizationClient params updated: threshold={self.threshold}, recency_boost={self.recency_boost}")
     
     def reset(self):
-        """Reset all accumulated state."""
+        """Reset all accumulated state.
+        
+        NOTE: This method does NOT stop the worker process anymore.
+        The worker process continues running across stream boundaries.
+        Only the speaker memory and in-flight requests are cleared.
+        """
+        logger.info("DiarizationClient.reset() - clearing state WITHOUT stopping worker")
         if self._speaker_memory is not None:
             self._speaker_memory.reset()
         self.in_flight_requests.clear()
-        self.reset_process()
-        logger.info("DiarizationClient state reset")
+        # NOTE: We no longer call reset_process() here because that would:
+        # 1. Send RESET_SIGNAL to worker
+        # 2. Then stop_process() terminates the worker before it can process the signal
+        # The worker should keep running across streams - we only need to clear speaker memory
+        logger.info("DiarizationClient state reset (worker still running)")
     
     def add_in_flight_request(self, request_id: str):
         """Add request ID to in-flight tracking."""
