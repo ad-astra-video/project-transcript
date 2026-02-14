@@ -32,9 +32,9 @@ Transcript Text (Last {context_length} characters):
 
 ---
 
-## CONTENT TYPES
+## CONTENT TYPES (in priority order, try to fit these to the content in order)
 
-### GENERAL_MEETING
+### 1. GENERAL_MEETING
 Description:
 An informal, collaborative discussion among participants coordinating work or sharing updates.
 
@@ -48,7 +48,7 @@ Common Language:
 
 ---
 
-### TECHNICAL_TALK
+### 2. TECHNICAL_TALK
 Description:
 An explanation or discussion focused on technical subject matter.
 
@@ -66,7 +66,7 @@ Common Language:
 
 ---
 
-### LECTURE_OR_TALK
+### 3. LECTURE_OR_TALK
 Description:
 A structured, extended presentation intended to teach, inform, or share insights.
 
@@ -80,7 +80,7 @@ Common Language:
 
 ---
 
-### INTERVIEW
+### 4. INTERVIEW
 Description:
 A structured Q&A where one speaker asks questions and the other responds.
 
@@ -97,7 +97,7 @@ Common Language:
 
 ---
 
-### PODCAST
+### 5. PODCAST
 Description:
 A produced conversational show designed for an audience.
 
@@ -111,7 +111,7 @@ Common Language:
 
 ---
 
-### STREAMER_MONOLOGUE
+### 6. STREAMER_MONOLOGUE
 Description:
 An informal, audience-facing monologue typical of livestreams or recorded streams.
 
@@ -131,7 +131,7 @@ Common Language:
 
 ---
 
-### NEWS_UPDATE
+### 7. NEWS_UPDATE
 Description:
 A formal, prepared delivery of current events or announcements.
 
@@ -146,7 +146,7 @@ Common Language:
 
 ---
 
-### GAMEPLAY_COMMENTARY
+### 8. GAMEPLAY_COMMENTARY
 Description:
 Narration or reaction to gameplay events.
 
@@ -160,7 +160,7 @@ Common Language:
 
 ---
 
-### CUSTOMER_SUPPORT
+### 9. CUSTOMER_SUPPORT
 Description:
 A service interaction focused on resolving a user issue.
 
@@ -174,7 +174,7 @@ Common Language:
 
 ---
 
-### DEBATE
+### 10. DEBATE
 Description:
 An argumentative exchange between speakers with opposing viewpoints.
 
@@ -251,7 +251,7 @@ STORY HANDLING for meetings:
         "deemphasize": ["ACTION"],
         "sentiment_enabled": False,
         "action_strictness": "extreme",
-        "notes_frequency": "very_high",
+        "notes_frequency": "high",
         "key_point_guidance": """
 KEY POINT for technical talks should capture:
 - Empirical results with specific numbers (accuracy, performance, thresholds)
@@ -502,6 +502,47 @@ You operate incrementally. Each response reflects ONLY what materially changed s
 
 ---
 
+## CONCISE THINKING RULES
+
+Think in short, focused bursts. Apply these principles:
+
+1. **Single-Thought Processing**
+   - One insight per extraction point
+   - Complete each thought before moving on
+   - Don't compound multiple ideas
+
+2. **Value-First Filtering**
+   - Ask: "Does this matter to anyone?"
+   - Skip: filler, tangents, repetition, meta-commentary
+   - Keep: decisions, actions, key points, risks, novel information
+
+3. **Minimal Context Chains**
+   - Reference only the immediately prior relevant insight
+   - Avoid long dependency chains
+   - If context is more than 2 hops back, reconsider extraction
+
+4. **Direct Output**
+   - State conclusions, not the path to them
+   - Skip intermediate reasoning steps
+   - Paraphrase speakers, don't reconstruct their thought process
+
+5. **Binary Decisions**
+   - Extract or skip
+   - Include or exclude
+   - No partial credit for marginal value
+
+6. **Brevity Over Completeness**
+   - Shorter is usually better
+   - One clear sentence beats three vague ones
+   - Empty output is valid when nothing warrants extraction
+
+7. **Speed Over Depth**
+   - Fast, decisive extractions beat slow, thorough ones
+   - The stream moves on; keep up
+   - Missing a minor point is acceptable; missing a major one is not
+
+---
+
 ## ANALYSIS EXPLANATION
 
 Provide a thoughtful explanation that remains as concise as possible of the most critical insights and their implications, without restating the entire transcript.
@@ -512,7 +553,6 @@ Make sure to include explanation if pulling from prior context to generate insig
 
 ---
 
----
 
 ## STORY AND BACKGROUND CONTEXT HANDLING
 
@@ -668,6 +708,21 @@ Extract insights using the following hierarchy. Choose the MOST SPECIFIC categor
    - Example: "What's the budget for this project?"
    - If the question is rhetorical or answered immediately, do NOT log it.
    - **If no blocking question is asked, output nothing.**
+
+  ### QUESTION TRACKING PATTERN
+   
+   When a QUESTION is asked:
+   - Log it normally with insight_type: "QUESTION"
+   
+   When the question is later answered:
+   - Use `continuation_of` field pointing to the original QUESTION insight ID
+   - Change insight_type to the appropriate type based on the answer:
+     - If the answer contains a KEY POINT → insight_type: "KEY POINT"
+     - If the answer contains an ACTION/DECISION → insight_type: "ACTION" or "DECISION"
+     - If the answer is informational → insight_type: "NOTES"
+   - Example: Original question logged as insight #42, answer provided later → output KEY POINT with continuation_of: 42
+   
+   **Detection**: When current window or prior context directly addresses a prior QUESTION insight that is not answered, mark it as answered using continuation_of.
 
 4. **KEY POINT** - Critical Insights and Findings
 
