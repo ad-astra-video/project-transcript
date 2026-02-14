@@ -24,7 +24,7 @@ class TestContentTypeRuleModifiersUpdated:
         
         # Should have stricter settings
         assert rules["action_strictness"] == "extreme", "TECHNICAL_TALK should have extreme action_strictness"
-        assert rules["notes_frequency"] == "very_high", "TECHNICAL_TALK should have very_high notes_frequency"
+        assert rules["notes_frequency"] == "high", "TECHNICAL_TALK should have high notes_frequency"
     
     def test_lecture_or_talk_stricter_settings(self):
         """Test that LECTURE_OR_TALK has stricter settings."""
@@ -134,6 +134,73 @@ class TestContentTypeRiskGuidance:
         
         assert "NEWS_UPDATE" in formatted
         assert "RISK Definition" in formatted or "NEWS_UPDATE" in formatted
+
+
+class TestContentTypeParticipantsEnabled:
+    """Tests for participants_enabled field in CONTENT_TYPE_RULE_MODIFIERS."""
+    
+    def test_all_content_types_have_participants_enabled(self):
+        """Test that all content types have participants_enabled field defined."""
+        expected_content_types = [
+            "GENERAL_MEETING",
+            "TECHNICAL_TALK",
+            "LECTURE_OR_TALK",
+            "INTERVIEW",
+            "PODCAST",
+            "STREAMER_MONOLOGUE",
+            "NEWS_UPDATE",
+            "GAMEPLAY_COMMENTARY",
+            "CUSTOMER_SUPPORT",
+            "DEBATE",
+            "UNKNOWN"
+        ]
+        
+        for content_type in expected_content_types:
+            assert content_type in CONTENT_TYPE_RULE_MODIFIERS, f"{content_type} missing from CONTENT_TYPE_RULE_MODIFIERS"
+            rules = CONTENT_TYPE_RULE_MODIFIERS[content_type]
+            assert "participants_enabled" in rules, f"{content_type} missing participants_enabled field"
+            assert isinstance(rules["participants_enabled"], bool), f"{content_type} participants_enabled must be a boolean"
+    
+    def test_multi_speaker_content_types_have_participants_enabled_true(self):
+        """Test that content types with multiple speakers have participants_enabled=True."""
+        enabled_types = [
+            "GENERAL_MEETING",
+            "TECHNICAL_TALK",
+            "LECTURE_OR_TALK",
+            "INTERVIEW",
+            "PODCAST",
+            "CUSTOMER_SUPPORT",
+            "DEBATE",
+            "UNKNOWN"
+        ]
+        
+        for content_type in enabled_types:
+            rules = CONTENT_TYPE_RULE_MODIFIERS[content_type]
+            assert rules["participants_enabled"] is True, f"{content_type} should have participants_enabled=True"
+    
+    def test_single_speaker_content_types_have_participants_enabled_false(self):
+        """Test that single-speaker content types have participants_enabled=False."""
+        disabled_types = [
+            "STREAMER_MONOLOGUE",
+            "NEWS_UPDATE",
+            "GAMEPLAY_COMMENTARY"
+        ]
+        
+        for content_type in disabled_types:
+            rules = CONTENT_TYPE_RULE_MODIFIERS[content_type]
+            assert rules["participants_enabled"] is False, f"{content_type} should have participants_enabled=False"
+    
+    def test_format_content_type_rules_includes_participants_tracking(self):
+        """Test that _format_content_type_rules includes participant tracking status."""
+        client = SummaryClient(api_key="test_key", model="test_model")
+        
+        # Test GENERAL_MEETING (enabled)
+        formatted = client._format_content_type_rules("GENERAL_MEETING")
+        assert "Participant Tracking: ENABLED" in formatted
+        
+        # Test STREAMER_MONOLOGUE (disabled)
+        formatted = client._format_content_type_rules("STREAMER_MONOLOGUE")
+        assert "Participant Tracking: DISABLED" in formatted
 
 
 if __name__ == "__main__":

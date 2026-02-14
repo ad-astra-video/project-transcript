@@ -64,6 +64,7 @@ class InsightType(str, Enum):
     KEY_POINT = "KEY POINT"
     RISK = "RISK"
     SENTIMENT = "SENTIMENT"
+    PARTICIPANTS = "PARTICIPANTS"
     NOTES = "NOTES"
 
 class ClassificationField(str, Enum):
@@ -113,6 +114,7 @@ class ContentTypeState:
     last_detection_text: str = ""  # Last N chars used for detection
     context_length: int = 2000  # Current context length for detection
     sentiment_enabled: bool = False  # Whether sentiment tracking is enabled for this content type
+    participants_enabled: bool = False  # Whether participant tracking is enabled for this content type
 
 class ContentTypeDetectionSchema(BaseModel):
     """Schema for content type detection response."""
@@ -375,7 +377,7 @@ class SummaryClient:
         history_length: int = 0,
         model: str = "Nanbeige/Nanbeige4-3B-Thinking-2511",
         max_tokens: int = 5200,
-        temperature: float = 0.6,
+        temperature: float = 0.3,
         system_prompt: str = SYSTEM_PROMPT,
         transcription_windows_per_summary_window: int = 8,
         raw_text_context_limit: int = 1000,
@@ -906,6 +908,7 @@ class SummaryClient:
 
 ### Processing Guidelines:
 - Sentiment Tracking: {"ENABLED" if rules["sentiment_enabled"] else "DISABLED"}
+- Participant Tracking: {"ENABLED" if rules["participants_enabled"] else "DISABLED"}
 - Action Strictness: {rules["action_strictness"].upper()}
 - Notes Frequency: {rules["notes_frequency"].upper()}
 
@@ -1428,6 +1431,9 @@ class SummaryClient:
         # Check if sentiment is enabled for current content type
         sentiment_enabled = self.is_sentiment_enabled()
         
+        # Check if participants tracking is enabled for current content type
+        participants_enabled = self.is_participants_enabled()
+        
         insights_for_summary = []
         
         for item in insights_list:
@@ -1439,6 +1445,14 @@ class SummaryClient:
             if insight_type == InsightType.SENTIMENT.value and not sentiment_enabled:
                 logger.debug(
                     f"Filtering SENTIMENT insight for content type with sentiment_enabled=False: "
+                    f"{item.get('insight_text', '')[:50]}..."
+                )
+                continue  # Skip this insight
+            
+            # Check if this is a PARTICIPANTS insight that should be filtered
+            if insight_type == InsightType.PARTICIPANTS.value and not participants_enabled:
+                logger.debug(
+                    f"Filtering PARTICIPANTS insight for content type with participants_enabled=False: "
                     f"{item.get('insight_text', '')[:50]}..."
                 )
                 continue  # Skip this insight
@@ -1533,18 +1547,21 @@ class SummaryClient:
             logger.warning(f"Invalid content type: {content_type}")
             return
         
-        # Get sentiment_enabled from rules
+        # Get sentiment_enabled and participants_enabled from rules
         sentiment_enabled = False
+        participants_enabled = False
         if content_type in CONTENT_TYPE_RULE_MODIFIERS:
             sentiment_enabled = CONTENT_TYPE_RULE_MODIFIERS[content_type].get("sentiment_enabled", False)
+            participants_enabled = CONTENT_TYPE_RULE_MODIFIERS[content_type].get("participants_enabled", False)
         
         self._content_type_state = ContentTypeState(
             content_type=content_type,
             confidence=confidence,
             source=source,
-            sentiment_enabled=sentiment_enabled
+            sentiment_enabled=sentiment_enabled,
+            participants_enabled=participants_enabled
         )
-        logger.info(f"Content type set to: {content_type} (source: {source}, confidence: {confidence:.2f}, sentiment_enabled={sentiment_enabled})")
+        logger.info(f"Content type set to: {content_type} (source: {source}, confidence: {confidence:.2f}, sentiment_enabled={sentiment_enabled}, participants_enabled={participants_enabled})")
     
     def set_content_type_override(self, content_type: Optional[str]):
         """
@@ -1590,6 +1607,15 @@ class SummaryClient:
             True if sentiment insights should be included, False otherwise
         """
         return self._content_type_state.sentiment_enabled
+    
+    def is_participants_enabled(self) -> bool:
+        """
+        Check if participant tracking is enabled for the current content type.
+        
+        Returns:
+            True if PARTICIPANTS insights should be included, False otherwise
+        """
+        return self._content_type_state.participants_enabled
     
     async def _send_monitoring_event(self, event_data: Dict[str, Any], event_type: str):
         """Send a monitoring event if callback is configured."""
@@ -1726,7 +1752,7 @@ Please analyze the transcript context above and output content type detection as
                         model=self.model,
                         messages=messages,
                         max_tokens=self.max_tokens,
-                        temperature=0.1,
+                        temperature=self.temperature,
                         extra_body={
                             "chat_template_kwargs": {
                                 "enable_thinking": True

@@ -233,6 +233,7 @@ CONTENT_TYPE_RULE_MODIFIERS = {
         "emphasize": ["ACTION", "DECISION", "QUESTION", "RISK"],
         "deemphasize": ["KEY POINT"],
         "sentiment_enabled": True,
+        "participants_enabled": True,
         "action_strictness": "very_high",
         "notes_frequency": "medium",
         "story_guidance": """
@@ -250,6 +251,7 @@ STORY HANDLING for meetings:
         "emphasize": ["KEY POINT", "NOTES", "QUESTION"],
         "deemphasize": ["ACTION"],
         "sentiment_enabled": False,
+        "participants_enabled": True,
         "action_strictness": "extreme",
         "notes_frequency": "high",
         "key_point_guidance": """
@@ -286,6 +288,7 @@ STORY HANDLING for technical talks:
         "emphasize": ["KEY POINT", "NOTES"],
         "deemphasize": ["ACTION", "DECISION", "QUESTION"],
         "sentiment_enabled": False,
+        "participants_enabled": True,
         "action_strictness": "block",
         "notes_frequency": "very_high",
         "key_point_guidance": """
@@ -318,6 +321,7 @@ STORY HANDLING for lectures:
         "emphasize": ["NOTES", "QUESTION", "KEY POINT"],
         "deemphasize": ["ACTION", "DECISION"],
         "sentiment_enabled": False,
+        "participants_enabled": True,
         "action_strictness": "extreme",
         "notes_frequency": "high",
         "key_point_guidance": """
@@ -350,6 +354,7 @@ STORY HANDLING for interviews:
         "emphasize": ["KEY POINT", "NOTES"],
         "deemphasize": ["ACTION", "DECISION"],
         "sentiment_enabled": False,
+        "participants_enabled": True,
         "action_strictness": "extreme",
         "notes_frequency": "high",
         "key_point_guidance": """
@@ -379,6 +384,7 @@ STORY HANDLING for podcasts:
         "emphasize": ["NOTES"],
         "deemphasize": ["KEY POINT", "ACTION", "DECISION", "QUESTION", "RISK"],
         "sentiment_enabled": False,
+        "participants_enabled": False,
         "action_strictness": "block",
         "notes_frequency": "low",
         "risk_guidance": "Focus on potentially harmful advice, misinformation, or statements that could negatively impact viewers.",
@@ -388,6 +394,7 @@ STORY HANDLING for podcasts:
         "emphasize": ["KEY POINT"],
         "deemphasize": ["ACTION", "DECISION", "QUESTION", "SENTIMENT"],
         "sentiment_enabled": False,
+        "participants_enabled": False,
         "action_strictness": "block",
         "notes_frequency": "medium",
         "key_point_guidance": """
@@ -413,6 +420,7 @@ STORY HANDLING for news:
         "emphasize": ["NOTES"],
         "deemphasize": ["KEY POINT", "ACTION", "DECISION", "QUESTION", "RISK"],
         "sentiment_enabled": False,
+        "participants_enabled": False,
         "action_strictness": "block",
         "notes_frequency": "very_high",
         "story_guidance": """
@@ -429,6 +437,7 @@ STORY HANDLING for gameplay commentary:
         "emphasize": ["ACTION", "QUESTION", "DECISION", "RISK"],
         "deemphasize": ["KEY POINT", "NOTES"],
         "sentiment_enabled": True,
+        "participants_enabled": True,
         "action_strictness": "high",
         "notes_frequency": "low",
         "story_guidance": """
@@ -445,6 +454,7 @@ STORY HANDLING for customer support:
         "emphasize": ["KEY POINT", "DECISION", "QUESTION", "RISK"],
         "deemphasize": ["ACTION", "NOTES"],
         "sentiment_enabled": False,
+        "participants_enabled": True,
         "action_strictness": "very_high",
         "notes_frequency": "low",
         "key_point_guidance": """
@@ -471,6 +481,7 @@ STORY HANDLING for debates:
         "emphasize": ["NOTES"],
         "deemphasize": ["ACTION", "DECISION", "QUESTION", "RISK"],
         "sentiment_enabled": False,
+        "participants_enabled": True,
         "action_strictness": "block",
         "notes_frequency": "medium",
         "story_guidance": """
@@ -928,41 +939,44 @@ Before outputting a KEY POINT, check if PRIOR INSIGHTS contain semantically simi
    - Track pivots or escalation/de-escalation when relevant.
    - **If no meaningful sentiment shift occurs, output nothing.**
 
-7. **NOTES** - Comprehensive Content Paraphrasing
+7. **PARTICIPANTS**
+   Track when a speaker is introduced and capture details about the speaker.
+   - Capture speaker name, role, pronouns, and identifying information
+   - Include why the speaker is here (e.g., their expertise, experience, or role in the conversation)
+   - Capture relevant background or context about the speaker
+   - Only log when a speaker is first introduced or when new speaker details emerge
+   - **If no new speaker is introduced, output nothing.**
+
+8. **NOTES** - Comprehensive Content Paraphrasing
    A running atomic log that provides reliable paraphrasing of ALL meaningful content. NOTES should be frequent and granular.
 
-   **NOTES Philosophy**: Capture the substance of what's being said in clear, concise language. Think of NOTES as creating a reliable, searchable record of the conversation that someone could read later to understand what was discussed.
+   **IMPORTANT**: Do NOT include participant details in NOTES. All participant information (name, role, pronouns, why they're here, experience, background) should go in PARTICIPANTS insights only.
+
+   **NOTES Philosophy**: Capture the substance of what's being said in clear, concise language. Think of NOTES as creating a reliable, searchable record of the conversation that someone could read later to understand what was discussed. NOTES should read like notes taken by a passive listener - focus on WHAT is said, not WHO says it.
 
    **Writing Style for NOTES**:
    - Write in **direct, declarative voice** - state what is being said, not who is saying it
    - **AVOID**: "Speaker explains X", "Speaker clarifies Y", "Speaker emphasizes Z"
+   - **AVOID**: Using speaker names in NOTES (e.g., "John explains...", "Sarah says...")
    - **USE**: Just state the content directly - "X is explained as...", "Y works by...", "Z is important because..."
-   - Only mention "Speaker" or speaker names when:
-     * Multiple speakers are present and attribution matters
-     * There's a specific speaker name to reference (e.g., "John explains...")
-     * Speaker transitions occur
-   
+   - **NEVER include participant background, experience, or why they're here in NOTES - use PARTICIPANTS for that**
+
    **Examples**:
    
    ❌ AVOID:
    - "Speaker explains that ContextRot is a performance issue"
    - "Speaker clarifies the difference between RAG and summarization"
-   - "Speaker emphasizes the importance of task complexity"
+   - "John, who has 10 years of experience in AI, explains the architecture"
    
    ✅ CORRECT:
    - "ContextRot is a performance degradation issue with increased context"
    - "RAG differs from summarization in how it retrieves information"
    - "Task complexity is critical factor alongside context length"
-   
-   ✅ CORRECT (when multiple speakers):
-   - "John explains the architecture uses REPL loops"
-   - "Sarah asks about performance thresholds"
-   - "Speaker transitions to discussing limitations"
 
    Use NOTES for:
    - Topic changes and transitions
-   - Speaker identification (when multiple speakers)
-   - Background context and setup
+   - What is being said (content only, not who or their background)
+   - Background context and setup (not participant background)
    - Thesis or framework being explained
    - Mechanism explanations (how something works)
    - Conceptual explanations and definitions
@@ -1391,10 +1405,11 @@ SYSTEM_PROMPT_OUTPUT_CONSTRAINTS = """
 - Output **VALID JSON ONLY**
 - Never include analysis or explanation
 - **Empty insights array is valid and expected** when nothing meaningful is said
-- Max **3 non-NOTES insights per update**
+- Max **3 non-NOTES, non-PARTICIPANTS insights per update**
   - Include more than one only if each additional insight is high-value
   - Merge overlapping or redundant KEY POINTs
 - NOTES do not count toward the limit
+- PARTICIPANTS do not count toward the limit
 - Never output duplicate insights within the same window
 
 ### Required output format:
@@ -1404,7 +1419,7 @@ SYSTEM_PROMPT_OUTPUT_CONSTRAINTS = """
   "analysis": "Thoughtful explanation of the most critical insights and their implications, without restating the entire transcript",
   "insights": [
     {
-      "insight_type": "ACTION | DECISION | QUESTION | KEY POINT | RISK | SENTIMENT | NOTES",
+      "insight_type": "ACTION | DECISION | QUESTION | KEY POINT | RISK | SENTIMENT | PARTICIPANTS | NOTES",
       "insight_text": "Concise, high-value statement",
       "confidence": 0.xx,
       "classification": "+ | ~ | -",
