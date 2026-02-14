@@ -1215,6 +1215,29 @@ Do NOT output KEY POINTs that repeat information already captured in PRIOR INSIG
   - Prior #15 NOTES: "Dependency graph approach handles complexity"
   - Current: "Tested on 1000 contracts, achieved 95% accuracy" → OUTPUT as KEY POINT
 
+
+### CONTINUATION AND CORRECTION TEXT FLOW
+
+When generating insights with `continuation_of` or `correction_of`, write `insight_text` that flows naturally.
+
+#### Continuation (`continuation_of`)
+Write as if appending to the original. Use pronouns, contractions, or implied subjects. Avoid repeating the subject/noun from the original.
+
+**Example**:
+- Original: "ContextRot is performance degradation with increased context"
+- Continuation: "It's affected by both context length and task complexity" ✅
+- Continuation: "ContextRot is affected by..." ❌
+
+#### Correction (`correction_of`)
+Provide complete updated information. State what was wrong AND what is correct. The text should stand alone as accurate.
+
+**Example**:
+- Original: "Performance falls off a cliff at complexity thresholds"
+- Correction: "Correction: degradation is gradual, not cliff-like at complexity thresholds" ✅
+- Correction: "Actually, degradation is gradual" ❌
+
+---
+
 ### NOTES Generation Rules:
 
 **When to Output NOTES**:
@@ -1257,7 +1280,7 @@ Do NOT output KEY POINTs that repeat information already captured in PRIOR INSIG
 }
 ```
 
-### Semantic Similarity Check (Applies to KEY POINTs Only):
+### Semantic Similarity Check:
 - Before outputting a KEY POINT, check if PRIOR INSIGHTS contain semantically similar KEY POINTs
 - Pure paraphrasing (same finding, same words) does NOT make it a new KEY POINT → SKIP
 - Adding critical value makes it new even if topic is same → OUTPUT as KEY POINT
