@@ -52,7 +52,7 @@ class TranscriberState:
         # Audio processing
         self.audio_sample_rate: int = 16000
         self.window_seconds: float = 2.5
-        self.overlap_seconds: float = 1.0
+        self.overlap_seconds: float = 0.5
         self.audio_buffer: np.ndarray = np.zeros((0,), dtype=np.float32)  # mono float32 [-1,1]
         self.buffer_start_ts: Optional[float] = None  # seconds
         self.buffer_rate: Optional[int] = None
@@ -146,7 +146,6 @@ async def load_model(**kwargs):
         api_key=summary_api_key,
         history_length=summary_history_length,
         model=summary_model,
-        transcription_windows_per_summary_window=4,  # Default value, will be updated via update_params if needed
         send_monitoring_event_callback=PROCESSOR.send_monitoring_event if PROCESSOR else None
     )
     

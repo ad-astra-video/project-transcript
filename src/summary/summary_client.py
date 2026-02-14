@@ -152,8 +152,8 @@ class WindowManager:
     def __init__(
         self,
         context_limit: int = 50000,  # Max characters for accumulated text
-        raw_text_context_limit: int = 2000,  # Max characters for raw text in LLM context
-        transcription_windows_per_summary_window: int = 4  # Number of transcription windows per summary window
+        raw_text_context_limit: int = 1000,  # Max characters for raw text in LLM context
+        transcription_windows_per_summary_window: int = 8  # Number of transcription windows per summary window
     ):
         self._windows: List[SummaryWindow] = []  # Ordered oldest -> newest
         self._char_count: int = 0
@@ -374,12 +374,12 @@ class SummaryClient:
         base_url: str = "http://byoc-transcription-vllm:5000/v1",
         history_length: int = 0,
         model: str = "Nanbeige/Nanbeige4-3B-Thinking-2511",
-        max_tokens: int = 4096,
-        temperature: float = 0.1,
+        max_tokens: int = 5200,
+        temperature: float = 0.6,
         system_prompt: str = SYSTEM_PROMPT,
-        transcription_windows_per_summary_window: int = 4,
-        raw_text_context_limit: int = 2000,
-        initial_summary_delay_seconds: float = 10.0,
+        transcription_windows_per_summary_window: int = 8,
+        raw_text_context_limit: int = 1000,
+        initial_summary_delay_seconds: float = 30,
         send_monitoring_event_callback: Optional[MonitoringCallback] = None
     ):
         """
@@ -1020,6 +1020,11 @@ class SummaryClient:
                     messages=messages,
                     max_tokens=self.max_tokens,
                     temperature=self.temperature,
+                    extra_body={
+                        "chat_template_kwargs": {
+                            "enable_thinking": True
+                        }
+                    },
                     response_format={"type": "json_schema", "json_schema": {"name": "insights", "schema": self.insights_response_json_schema}}
                 )
 
@@ -1246,22 +1251,13 @@ class SummaryClient:
         logger.info(f"Processed window (summary_window_id={summary_window_id}, transcription_window_ids={transcription_window_ids}), summary length={len(summary_text)}, input_tokens={input_tokens}")
         
         # Parse JSON and extract analysis for background_context
-        background_context = ""
+        background_context = reasoning_content
         parsed_data = None
         
         if summary_text:
             try:
                 parsed_data = json.loads(summary_text)
-                analysis_field = parsed_data.get("analysis", "")
-                if analysis_field:
-                    background_context = analysis_field
-                    logger.debug(f"Using analysis field as background_context (length={len(analysis_field)})")
-                    parsed_data.pop("analysis")  # Remove analysis from parsed_data to avoid duplication in summary
-                else:
-                    background_context = reasoning_content
-                    logger.debug("No analysis field found, using reasoning_content as fallback")
             except json.JSONDecodeError:
-                background_context = reasoning_content
                 logger.debug("JSON parse failed, using reasoning_content as fallback")
         
         # Extract insights and get updated parsed_data with assigned insight_ids
@@ -1731,6 +1727,11 @@ Please analyze the transcript context above and output content type detection as
                         messages=messages,
                         max_tokens=self.max_tokens,
                         temperature=0.1,
+                        extra_body={
+                            "chat_template_kwargs": {
+                                "enable_thinking": True
+                            }
+                        },
                         response_format={"type": "json_schema", "json_schema": {"name": "content_type_detection", "schema": self.content_type_response_json_schema}},
                     )
                     
