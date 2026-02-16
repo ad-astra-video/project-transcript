@@ -424,9 +424,10 @@ async def _summary_sender():
             while len(STATE.summary_results) > 0:
                 result = STATE.summary_results.popleft()
                 result_type = result.get("type", "unknown")
-                logger.info(f"SENDING from summary_results: type='{result_type}'")
+                result_msg = f"SENDING from summary_results: type='{result_type}'"
                 if result_type == "content_type_detection":
-                    logger.info(f"  content_type='{result.get('content_type')}', confidence={result.get('confidence')}, previous='{result.get('previous_content_type')}'")
+                    result_msg += f"  content_type='{result.get('content_type')}', confidence={result.get('confidence')}, previous='{result.get('previous_content_type')}'"
+                logger.info(result_msg)
                 try:
                     if PROCESSOR is not None:
                         await PROCESSOR.send_data(json.dumps(result))
@@ -855,7 +856,7 @@ async def _handle_graceful_shutdown():
     
     # Phase 4: Wait for completion with timeout
     start_time = time.time()
-    timeout = 90.0
+    timeout = 180.0
     
     while time.time() - start_time < timeout:
         # Check summary workers
