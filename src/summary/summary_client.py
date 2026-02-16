@@ -376,12 +376,12 @@ class SummaryClient:
         base_url: str = "http://byoc-transcription-vllm:5000/v1",
         history_length: int = 0,
         model: str = "Nanbeige/Nanbeige4-3B-Thinking-2511",
-        max_tokens: int = 5200,
-        temperature: float = 0.3,
+        max_tokens: int = 5750,
+        temperature: float = 0.2,
         system_prompt: str = SYSTEM_PROMPT,
         transcription_windows_per_summary_window: int = 8,
-        raw_text_context_limit: int = 1000,
-        initial_summary_delay_seconds: float = 30,
+        raw_text_context_limit: int = 1500,
+        initial_summary_delay_seconds: float = 15,
         send_monitoring_event_callback: Optional[MonitoringCallback] = None
     ):
         """
@@ -1023,11 +1023,6 @@ class SummaryClient:
                     messages=messages,
                     max_tokens=self.max_tokens,
                     temperature=self.temperature,
-                    extra_body={
-                        "chat_template_kwargs": {
-                            "enable_thinking": True
-                        }
-                    },
                     response_format={"type": "json_schema", "json_schema": {"name": "insights", "schema": self.insights_response_json_schema}}
                 )
 
@@ -1753,11 +1748,6 @@ Please analyze the transcript context above and output content type detection as
                         messages=messages,
                         max_tokens=self.max_tokens,
                         temperature=self.temperature,
-                        extra_body={
-                            "chat_template_kwargs": {
-                                "enable_thinking": True
-                            }
-                        },
                         response_format={"type": "json_schema", "json_schema": {"name": "content_type_detection", "schema": self.content_type_response_json_schema}},
                     )
                     
