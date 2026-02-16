@@ -111,27 +111,7 @@ Common Language:
 
 ---
 
-### 6. STREAMER_MONOLOGUE
-Description:
-An informal, audience-facing monologue typical of livestreams or recorded streams.
-
-Key Signals:
-- Single dominant speaker
-- Direct address to audience or chat
-- Casual, spontaneous, or rambling delivery
-- Commentary, reactions, or personal opinions
-
-Explicitly NOT:
-- Gameplay narration
-- Structured lectures
-- Interviews or debates
-
-Common Language:
-"Chat was wild earlier", "You guys know how it is", "Let me rant for a second"
-
----
-
-### 7. NEWS_UPDATE
+### 6. NEWS_UPDATE
 Description:
 A formal, prepared delivery of current events or announcements.
 
@@ -146,7 +126,7 @@ Common Language:
 
 ---
 
-### 8. GAMEPLAY_COMMENTARY
+### 7. GAMEPLAY_COMMENTARY
 Description:
 Narration or reaction to gameplay events.
 
@@ -160,7 +140,7 @@ Common Language:
 
 ---
 
-### 9. CUSTOMER_SUPPORT
+### 8. CUSTOMER_SUPPORT
 Description:
 A service interaction focused on resolving a user issue.
 
@@ -174,7 +154,7 @@ Common Language:
 
 ---
 
-### 10. DEBATE
+### 9. DEBATE
 Description:
 An argumentative exchange between speakers with opposing viewpoints.
 
@@ -208,21 +188,22 @@ Used when the available context lacks sufficient signals for classification.
 3. If debate criteria are not fully satisfied, DEBATE is invalid.
 4. If multiple types partially match, choose the least adversarial valid type.
 5. If fewer than three clear signals are present, reduce confidence accordingly.
+6. Apply rules from content types in priority order; if a higher type is a strong fit, do not classify as a lower type.
 
 ---
 
 ## REQUIRED OUTPUT FORMAT
 
 Return a JSON object with:
-- content_type: One of [GENERAL_MEETING, TECHNICAL_TALK, LECTURE_OR_TALK, INTERVIEW, PODCAST, STREAMER_MONOLOGUE, NEWS_UPDATE, GAMEPLAY_COMMENTARY, CUSTOMER_SUPPORT, DEBATE, UNKNOWN]
+- content_type: One of [GENERAL_MEETING, TECHNICAL_TALK, LECTURE_OR_TALK, INTERVIEW, PODCAST, NEWS_UPDATE, GAMEPLAY_COMMENTARY, CUSTOMER_SUPPORT, DEBATE, UNKNOWN]
 - confidence: Float between 0.00 and 1.00
 - reasoning: 1–2 sentences citing the strongest signals used
 
 Example:
 {
-  "content_type": "STREAMER_MONOLOGUE",
+  "content_type": "PODCAST",
   "confidence": 0.90,
-  "reasoning": "Single speaker addressing viewers directly in an informal, unstructured manner without narration or opposing viewpoints"
+  "reasoning": "The transcript features a host introducing a guest and engaging in an informal discussion with clear transitions, which are strong indicators of a podcast format."
 }
 
 If the context is insufficient, return UNKNOWN with confidence below 0.50 and explain why.
@@ -379,17 +360,6 @@ STORY HANDLING for podcasts:
         """.strip(),
         "risk_guidance": "Focus on controversial claims, potential misinformation, or statements that could be misleading to listeners.",
     },
-
-    "STREAMER_MONOLOGUE": {
-        "emphasize": ["NOTES"],
-        "deemphasize": ["KEY POINT", "ACTION", "DECISION", "QUESTION", "RISK"],
-        "sentiment_enabled": False,
-        "participants_enabled": False,
-        "action_strictness": "block",
-        "notes_frequency": "low",
-        "risk_guidance": "Focus on potentially harmful advice, misinformation, or statements that could negatively impact viewers.",
-    },
-
     "NEWS_UPDATE": {
         "emphasize": ["KEY POINT"],
         "deemphasize": ["ACTION", "DECISION", "QUESTION", "SENTIMENT"],
@@ -496,6 +466,7 @@ STORY HANDLING for unknown content type:
 }
 
 SYSTEM_PROMPT = """
+
 You are a high-performance conversation intelligence engine optimized for REAL-TIME transcription streams.
 
 You receive continuous, imperfect speech-to-text output that may include:
@@ -510,6 +481,11 @@ Your job is to continuously extract only the most critical insights with minimal
 **CRITICAL**: If nothing meaningful is said in the current window, output an empty insights array. Prefer silence over noise. Only extract when there is genuine value to report.
 
 You operate incrementally. Each response reflects ONLY what materially changed since the Prior Context.
+
+Cognitive Objective:
+Maximize signal density per token.
+Unnecessary reasoning is incorrect behavior.
+Long internal deliberation reduces system performance.
 
 ---
 
@@ -551,6 +527,15 @@ Think in short, focused bursts. Apply these principles:
    - Fast, decisive extractions beat slow, thorough ones
    - The stream moves on; keep up
    - Missing a minor point is acceptable; missing a major one is not
+
+## TERMINATION AND PRUNING RULES
+
+- Stop reasoning as soon as extraction decision is made.
+- Do not internally debate borderline cases more than once.
+- If classification is clear, output immediately.
+- Do not simulate alternative interpretations unless ambiguity is explicit.
+- Do not restate taxonomy definitions during reasoning.
+- Minimal sufficient classification logic only.
 
 ---
 
@@ -1207,7 +1192,6 @@ Content type determines which insight types are emphasized or suppressed.
 - PODCAST
 - NEWS_UPDATE
 - GAMEPLAY_COMMENTARY
-- STREAMER_MONOLOGUE
 - CUSTOMER_SUPPORT
 - DEBATE
 - UNKNOWN
@@ -1395,7 +1379,6 @@ Speakers often reveal insights in stages - track the evolution, don't skip it:
 
 If YES to any → OUTPUT (likely as KEY POINT)
 If NO to all → SKIP
-
 ---
 """.strip()
 
