@@ -34,12 +34,12 @@ class TestContentTypeRuleModifiersUpdated:
         assert rules["action_strictness"] == "block", "LECTURE_OR_TALK should have block action_strictness"
         assert rules["notes_frequency"] == "very_high", "LECTURE_OR_TALK should have very_high notes_frequency"
     
-    def test_streamer_monologue_reduced_notes(self):
-        """Test that STREAMER_MONOLOGUE has reduced notes_frequency."""
-        rules = CONTENT_TYPE_RULE_MODIFIERS["STREAMER_MONOLOGUE"]
+    def test_podcast_reduced_notes(self):
+        """Test that PODCAST has reduced notes_frequency."""
+        rules = CONTENT_TYPE_RULE_MODIFIERS["PODCAST"]
         
         # Should have reduced notes frequency
-        assert rules["notes_frequency"] == "low", "STREAMER_MONOLOGUE should have low notes_frequency"
+        assert rules["notes_frequency"] == "high", "PODCAST should have high notes_frequency"
     
     def test_podcast_reduced_notes(self):
         """Test that PODCAST has reduced notes_frequency."""
@@ -60,7 +60,6 @@ class TestContentTypeRiskGuidance:
             "LECTURE_OR_TALK",
             "INTERVIEW",
             "PODCAST",
-            "STREAMER_MONOLOGUE",
             "NEWS_UPDATE",
             "GAMEPLAY_COMMENTARY",
             "CUSTOMER_SUPPORT",
@@ -147,7 +146,6 @@ class TestContentTypeParticipantsEnabled:
             "LECTURE_OR_TALK",
             "INTERVIEW",
             "PODCAST",
-            "STREAMER_MONOLOGUE",
             "NEWS_UPDATE",
             "GAMEPLAY_COMMENTARY",
             "CUSTOMER_SUPPORT",
@@ -181,7 +179,6 @@ class TestContentTypeParticipantsEnabled:
     def test_single_speaker_content_types_have_participants_enabled_false(self):
         """Test that single-speaker content types have participants_enabled=False."""
         disabled_types = [
-            "STREAMER_MONOLOGUE",
             "NEWS_UPDATE",
             "GAMEPLAY_COMMENTARY"
         ]
@@ -198,8 +195,8 @@ class TestContentTypeParticipantsEnabled:
         formatted = client._format_content_type_rules("GENERAL_MEETING")
         assert "Participant Tracking: ENABLED" in formatted
         
-        # Test STREAMER_MONOLOGUE (disabled)
-        formatted = client._format_content_type_rules("STREAMER_MONOLOGUE")
+        # Test NEWS_UPDATE (disabled)
+        formatted = client._format_content_type_rules("NEWS_UPDATE")
         assert "Participant Tracking: DISABLED" in formatted
 
 

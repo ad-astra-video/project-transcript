@@ -43,12 +43,6 @@ class TestParticipantsEnabledFiltering:
         client.set_content_type("PODCAST", confidence=0.9, source="AUTO_DETECTED")
         assert client.is_participants_enabled() is True
     
-    def test_is_participants_enabled_returns_false_for_streamer_monologue(self):
-        """Test that is_participants_enabled returns False for STREAMER_MONOLOGUE."""
-        client = self.create_client()
-        client.set_content_type("STREAMER_MONOLOGUE", confidence=0.9, source="AUTO_DETECTED")
-        assert client.is_participants_enabled() is False
-    
     def test_is_participants_enabled_returns_false_for_news_update(self):
         """Test that is_participants_enabled returns False for NEWS_UPDATE."""
         client = self.create_client()

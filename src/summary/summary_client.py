@@ -109,6 +109,7 @@ MonitoringCallback = Callable[[Dict[str, Any], str], Awaitable[None]]
 class ContentTypeState:
     """State for content type tracking."""
     content_type: str = ContentType.UNKNOWN.value
+    previous_content_type: str = ""  # Previous content type before auto-detection
     confidence: float = 0.0
     source: str = ContentTypeSource.INITIAL.value
     last_detection_text: str = ""  # Last N chars used for detection
@@ -1118,6 +1119,7 @@ class SummaryClient:
                     return {
                         "type": "content_type_detection",
                         "content_type": self._user_content_type_override,
+                        "previous_content_type": self._content_type_state.previous_content_type,
                         "confidence": 1.0,
                         "source": "USER_OVERRIDE",
                         "timestamp_utc": datetime.now(timezone.utc).isoformat()
@@ -1143,6 +1145,7 @@ class SummaryClient:
                         return {
                             "type": "content_type_detection",
                             "content_type": result.content_type,
+                            "previous_content_type": self._content_type_state.previous_content_type,
                             "confidence": result.confidence,
                             "source": "AUTO_DETECTED",
                             "timestamp_utc": datetime.now(timezone.utc).isoformat()
@@ -1542,6 +1545,11 @@ class SummaryClient:
             logger.warning(f"Invalid content type: {content_type}")
             return
         
+        # Store previous content type when auto-detecting
+        previous_content_type = ""
+        if source == ContentTypeSource.AUTO_DETECTED.value:
+            previous_content_type = self._content_type_state.content_type
+        
         # Get sentiment_enabled and participants_enabled from rules
         sentiment_enabled = False
         participants_enabled = False
@@ -1551,6 +1559,7 @@ class SummaryClient:
         
         self._content_type_state = ContentTypeState(
             content_type=content_type,
+            previous_content_type=previous_content_type,
             confidence=confidence,
             source=source,
             sentiment_enabled=sentiment_enabled,

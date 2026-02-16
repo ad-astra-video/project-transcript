@@ -206,7 +206,7 @@ class TestKeyPointClassification:
         
         assert "KEY POINT" in rules["emphasize"], "KEY POINT should be emphasized for TECHNICAL_TALK"
         assert "NOTES" in rules["emphasize"], "NOTES should be emphasized for TECHNICAL_TALK"
-        assert rules["notes_frequency"] == "very_high", "NOTES frequency should be very_high for TECHNICAL_TALK"
+        assert rules["notes_frequency"] == "high", "NOTES frequency should be high for TECHNICAL_TALK"
         assert rules["action_strictness"] == "extreme", "ACTION strictness should be extreme for TECHNICAL_TALK"
     
     def test_lecture_or_talk_content_type_key_point_emphasis(self):

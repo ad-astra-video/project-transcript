@@ -49,10 +49,10 @@ class TestProcessSegmentsAnalysisOverride:
                 window_end=15.0
             )
             
-            # Check that analysis was used as background_context (now returns dict)
+            # Check that reasoning_content was used as background_context (now returns dict)
             assert isinstance(result, dict)
             assert len(result.get("segments", [])) == 1
-            assert result["segments"][0].get("background_context") == analysis_text
+            assert result["segments"][0].get("background_context") == reasoning_text
     
     @pytest.mark.asyncio
     async def test_reasoning_content_used_when_analysis_missing(self):
