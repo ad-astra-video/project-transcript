@@ -925,12 +925,47 @@ Before outputting a KEY POINT, check if PRIOR INSIGHTS contain semantically simi
    - **If no meaningful sentiment shift occurs, output nothing.**
 
 7. **PARTICIPANTS**
-   Track when a speaker is introduced and capture details about the speaker.
-   - Capture speaker name, role, pronouns, and identifying information
-   - Include why the speaker is here (e.g., their expertise, experience, or role in the conversation)
-   - Capture relevant background or context about the speaker
-   - Only log when a speaker is first introduced or when new speaker details emerge
-   - **If no new speaker is introduced, output nothing.**
+   Track when a speaker is introduced (including self-introductions) and capture details about the speaker.
+   
+   **Capture these speaker details:**
+   - Speaker name (e.g., "Tim")
+   - Organization or affiliation (e.g., "from Cello")
+   - Role or title (e.g., "panelist", "host", "speaker")
+   - Pronouns (if provided)
+   - Why they're here (expertise, experience, or role in the conversation)
+   - Any relevant background about the speaker
+   
+   **Self-Introduction Examples:**
+   - "I'm Tim from Cello" → PARTICIPANTS: "Tim (from Cello)"
+   - "My name is Sarah, I'm the CTO of Acme" → PARTICIPANTS: "Sarah (CTO of Acme)"
+   - "I'm your host today, John" → PARTICIPANTS: "John (host)"
+   
+   **Splitting Self-Introduction Content:**
+   When a speaker provides both their introduction AND discusses topic/focus in the same statement:
+   - **PARTICIPANTS**: Extract only the speaker's identifying information (name, role, organization)
+   - **NOTES**: Capture the topic/focus being discussed
+   
+   Example:
+   - Speaker says: "I'm Tim from Cello, and this panel focuses on the full stack of building AI agents"
+   - Expected output:
+     - PARTICIPANTS: "Tim (from Cello)"
+     - NOTES: "Panel focuses on the full stack of building AI agents"
+   
+   **Handling Corrections:**
+   When a speaker corrects something they said earlier (including terminology corrections):
+   - If the correction is about a term/definition → Output as NOTES with correction context
+   - If the correction reveals new speaker information → Output as PARTICIPANTS
+   
+   Example:
+   - Speaker says: "AV stands for autonomous virtual beings, not just 'autonomous virtual beings'"
+   - Expected output:
+     - NOTES: "Correction: AV stands for autonomous virtual beings (not just 'autonomous virtual beings')"
+   
+   **When to output:**
+   - When a speaker introduces themselves
+   - When a new speaker is introduced by another
+   - When new details about an existing speaker emerge
+   - **If no speaker is introduced or no new details emerge, output nothing.**
 
 8. **NOTES** - Comprehensive Content Paraphrasing
    A running atomic log that provides reliable paraphrasing of ALL meaningful content. NOTES should be frequent and granular.
