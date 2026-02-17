@@ -252,5 +252,41 @@ class TestParticipantsEnabledFiltering:
         assert len(result["insights"]) == 0
 
 
+class TestSelfIntroductionCapture:
+    """Tests for self-introduction capture behavior in prompts."""
+    
+    def create_client(self):
+        """Create a SummaryClient instance for testing."""
+        return SummaryClient(api_key="test_key", model="test_model")
+    
+    def test_self_introduction_prompt_includes_examples(self):
+        """Test that the system prompt includes self-introduction examples."""
+        from src.summary.prompts import SYSTEM_PROMPT
+        
+        # Check that self-introduction examples are in the prompt
+        assert "I'm Tim from Cello" in SYSTEM_PROMPT or "Self-Introduction" in SYSTEM_PROMPT
+    
+    def test_self_introduction_splitting_guidance(self):
+        """Test that prompt includes guidance for splitting self-introduction content."""
+        from src.summary.prompts import SYSTEM_PROMPT
+        
+        # Check that splitting guidance is in the prompt
+        assert "Splitting Self-Introduction" in SYSTEM_PROMPT or "speaker's identifying information" in SYSTEM_PROMPT
+    
+    def test_correction_handling_guidance(self):
+        """Test that prompt includes guidance for handling corrections."""
+        from src.summary.prompts import SYSTEM_PROMPT
+        
+        # Check that correction handling is in the prompt
+        assert "Handling Corrections" in SYSTEM_PROMPT or "correction" in SYSTEM_PROMPT.lower()
+    
+    def test_participants_definition_includes_self_introductions(self):
+        """Test that PARTICIPANTS definition explicitly mentions self-introductions."""
+        from src.summary.prompts import SYSTEM_PROMPT
+        
+        # Check that self-introductions are mentioned in PARTICIPANTS section
+        assert "self-introduction" in SYSTEM_PROMPT.lower() or "introduces themselves" in SYSTEM_PROMPT.lower()
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
