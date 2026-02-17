@@ -22,6 +22,7 @@ from collections import deque
 import tempfile
 import wave
 import numpy as np
+from datetime import datetime
 
 try:
     from pyannote.audio import Pipeline
@@ -74,11 +75,12 @@ class SpeakerMemory:
     
     def __init__(
         self,
-        threshold: float = 0.91,
+        threshold: float = 0.78,
         recency_boost: float = 0.00,
         history_size: int = 20,
-        min_samples_for_match: int = 1,
+        min_samples_for_match: int = 3,
         min_segment_duration: float = 0.5,
+        ema_alpha: float = 0.28,
         embedding_validator: Optional[EmbeddingQualityValidator] = None,
         on_invalid_embedding: Optional[Callable[[np.ndarray, str, Optional[dict]], None]] = None,
         on_low_confidence: Optional[Callable[[str, float, Optional[dict]], None]] = None
@@ -93,11 +95,13 @@ class SpeakerMemory:
             embedding_validator: Custom embedding validator (uses default if None)
             on_invalid_embedding: Callback for invalid embeddings: (embedding, reason, segment_info)
             on_low_confidence: Callback for low confidence matches: (speaker_id, confidence, segment_info)
+            ema_alpha: EMA smoothing factor for centroid updates (default: 0.28)
         """
         self.threshold = threshold
         self.recency_boost = recency_boost
         self.min_samples_for_match = min_samples_for_match
         self.min_segment_duration = min_segment_duration
+        self.ema_alpha = ema_alpha
         
         # Embedding quality validation
         if embedding_validator is not None:
@@ -123,7 +127,8 @@ class SpeakerMemory:
         self.last_speaker: Optional[str] = None
         
         # Debugging
-        self.match_log: List[dict] = []
+        self._match_log: List[dict] = []
+        self._recent_merges_log: List[dict] = []
         
         # Statistics tracking
         self._stats = {
@@ -143,17 +148,52 @@ class SpeakerMemory:
             return embedding
         return embedding / norm
     
+    def _get_dynamic_threshold(self) -> float:
+        """
+        Lower threshold as speaker count grows to reduce over-segmentation.
+        
+        This dynamic adjustment helps prevent creating too many speakers
+        in meetings with many participants by lowering the similarity
+        threshold when speaker count increases.
+        """
+        n = len(self.centroids)
+        base = self.threshold  # 0.78
+        
+        if n <= 4:
+            return base
+        elif n <= 8:
+            return max(base - 0.06, 0.68)   # 0.72
+        elif n <= 12:
+            return max(base - 0.12, 0.62)   # 0.66
+        else:
+            return max(base - 0.18, 0.58)   # 0.60 (aggressive latch-on)
+    
     def _cosine_similarity(self, a: np.ndarray, b: np.ndarray) -> float:
         """
-        Cosine similarity between normalized embeddings.
+        Robust cosine similarity with full input validation.
         Both inputs should already be normalized.
-        Returns -1.0 if NaN is detected (will fail threshold check).
+        Returns -1.0 if NaN/Inf is detected or inputs are invalid.
         """
-        dot_product = np.dot(a, b)
-        if np.isnan(dot_product) or np.isinf(dot_product):
-            logger.warning(f"Invalid cosine similarity result: {dot_product}")
-            return -1.0  # Return invalid value that will fail threshold
-        return float(dot_product)
+        # Defensive input validation
+        if a is None or b is None or len(a) == 0 or len(b) == 0:
+            return -1.0
+        
+        # Check for NaN/Inf in inputs
+        if not (np.all(np.isfinite(a)) and np.all(np.isfinite(b))):
+            logger.warning("Invalid embedding(s) in cosine similarity")
+            return -1.0
+        
+        # Ensure normalized (defensive)
+        a = self._normalize(a)
+        b = self._normalize(b)
+        
+        dot = np.dot(a, b)
+        if not np.isfinite(dot):
+            return -1.0
+        
+        # Round to 2 decimal places to avoid floating-point precision issues
+        # This prevents cases like 0.7799... < 0.78 threshold comparison
+        return round(float(np.clip(dot, -1.0, 1.0)), 2)
     
     def identify(
         self,
@@ -172,11 +212,24 @@ class SpeakerMemory:
         """
         self._stats["identifications"] += 1
         
-        # Validate embedding quality FIRST
-        if not self.validator.validate(embedding, segment_info):
+        # DEBUG: Log embedding stats before validation
+        embedding_norm = np.linalg.norm(embedding)
+        embedding_mean = np.mean(np.abs(embedding)) if len(embedding) > 0 else 0
+        logger.debug(f"Embedding stats: norm={embedding_norm:.4f}, mean={embedding_mean:.8f}, shape={embedding.shape}")
+        
+        # Validate embedding quality FIRST (use validate() to track statistics and invoke callback)
+        is_valid = self.validator.validate(embedding, segment_info)
+        if not is_valid:
             self._stats["invalid_embeddings"] += 1
+            # Get the reason from validator's last check
+            _, validation_reason = self.validator.is_valid(embedding)
+            logger.warning(f"Embedding validation FAILED: {validation_reason}, norm={embedding_norm:.4f}, mean={embedding_mean:.8f}")
+            # Invalid embedding: skip segment entirely, do NOT assign to last speaker
+            # Note: callback is already invoked by validator.validate()
             logger.debug(f"Invalid embedding rejected for segment: {segment_info}")
             return "unknown", 0.0, {}
+        
+        logger.debug(f"Embedding validation PASSED")
         
         self._stats["valid_embeddings"] += 1
         
@@ -196,9 +249,16 @@ class SpeakerMemory:
         scores = {}
         alt_speakers = {}
 
+        # Dynamic threshold: use min of configured min_samples_for_match or total identifications
+        effective_min = min(self._stats["identifications"], self.min_samples_for_match)
+        
+        # DEBUG: Log speaker state before matching
+        total_samples = sum(self.counts.values())
+        logger.info(f"Matching: {len(self.centroids)} speakers, total_samples={total_samples}, min_samples_for_match={self.min_samples_for_match}, effective_min={effective_min}")
         for speaker_id, centroid in self.centroids.items():
             # Skip speakers with too few samples (unstable centroids)
-            if self.counts[speaker_id] < self.min_samples_for_match:
+            if self.counts[speaker_id] < effective_min:
+                logger.info(f"Skipping {speaker_id}: count={self.counts[speaker_id]} < effective_min={effective_min}")
                 continue
             
             score = self._cosine_similarity(embedding, centroid)
@@ -217,18 +277,26 @@ class SpeakerMemory:
                 best_score = score
                 best_id = speaker_id
         
+        # Get dynamic threshold **before** logging
+        effective_threshold = self._get_dynamic_threshold()
+
         # Log for debugging
-        self.match_log.append({
+        self._match_log.append({
             'scores': scores.copy(),
-            'threshold': self.threshold,
+            'base_threshold': self.threshold,
+            'effective_threshold': effective_threshold,
             'best_id': best_id,
             'best_score': best_score,
+            'decision': 'match' if (best_id and best_score >= effective_threshold) else 'new_speaker',
             'segment_info': segment_info
         })
         logger.info(f"Speaker match scores: {scores}, best: {best_id} ({best_score:.3f})")
         
+        # Get dynamic threshold based on speaker count
+        effective_threshold = self._get_dynamic_threshold()
+        
         # Match or create new speaker
-        if best_id and best_score >= self.threshold:
+        if best_id and best_score >= effective_threshold:
             self._stats["matches"] += 1
             
             # Check for low confidence match
@@ -241,13 +309,33 @@ class SpeakerMemory:
                     except Exception as e:
                         logger.warning(f"Error in on_low_confidence callback: {e}")
             
-            #self._update_speaker(best_id, embedding)
+            # Enable EMA centroid update
+            self._update_speaker(best_id, embedding)
             self.last_speaker = best_id
             self.history.append(best_id)
+            
+            # Periodic consolidation: every 8 identifications or if speaker count exceeds 12
+            if (self._stats["identifications"] % 8 == 0) or len(self.centroids) > 12:
+                merges = self.auto_merge_similar_speakers() #using default threshold and max_merges
+                if merges:
+                    logger.info(f"Periodic consolidation: {merges} merges")
+            
+            # Emergency cap: if speaker count exceeds 20, aggressive merge
+            if len(self.centroids) > 20:
+                self.auto_merge_similar_speakers(similarity_threshold=0.72, max_merges=10)
+                logger.warning("Emergency merge triggered - speaker count exceeded 20")
+            
             return best_id, best_score, alt_speakers
         else:
             self._stats["new_speakers"] += 1
-            speaker_id, confidence, _ = self._create_speaker(embedding, segment_info, confidence=best_score)
+            speaker_id, confidence, _ = self._create_speaker(embedding, segment_info, confidence=1.0)
+            
+            # Proactive merge: check if new speaker should be merged immediately
+            merge_result = self._check_and_merge_after_creation(speaker_id, embedding)
+            if merge_result:
+                # Return the merged speaker ID
+                return merge_result, self._cosine_similarity(embedding, self.centroids[merge_result]), alt_speakers
+            
             return speaker_id, confidence, alt_speakers
             
     def _create_speaker(
@@ -275,15 +363,34 @@ class SpeakerMemory:
         return speaker_id, confidence, {}
     
     def _update_speaker(self, speaker_id: str, embedding: np.ndarray):
-        """Update speaker centroid with running average."""
+        """EMA update with configurable alpha and first-update special case."""
         n = self.counts[speaker_id]
+        alpha = getattr(self, 'ema_alpha', 0.28)  # Make configurable
         
-        # Weighted average: new centroid = (old * n + new) / (n + 1)
-        new_centroid = (self.centroids[speaker_id] * n + embedding) / (n + 1)
+        if n == 1:
+            # First update: blend equally
+            self.centroids[speaker_id] = 0.5 * self.centroids[speaker_id] + 0.5 * embedding
+        else:
+            # EMA update
+            self.centroids[speaker_id] = alpha * embedding + (1 - alpha) * self.centroids[speaker_id]
         
         # Re-normalize to maintain unit length
-        self.centroids[speaker_id] = self._normalize(new_centroid)
+        self.centroids[speaker_id] = self._normalize(self.centroids[speaker_id])
         self.counts[speaker_id] += 1
+    
+    def _check_and_merge_after_creation(self, new_speaker_id: str, new_embedding: np.ndarray) -> Optional[str]:
+        """Check if new speaker should be merged immediately."""
+        for existing_id, centroid in list(self.centroids.items()):
+            if existing_id == new_speaker_id:
+                continue
+            if self.counts.get(existing_id, 0) < 3:
+                continue
+            sim = self._cosine_similarity(new_embedding, centroid)
+            if sim >= 0.84:  # Conservative threshold
+                self._merge_speakers_internal(existing_id, new_speaker_id)
+                logger.info(f"Proactive merge: {new_speaker_id} → {existing_id} (sim={sim:.3f})")
+                return existing_id
+        return None
     
     def merge_speakers(self, speaker_a: str, speaker_b: str):
         """
@@ -330,6 +437,51 @@ class SpeakerMemory:
             "validator_stats": self.validator.get_validation_stats(),
         }
     
+    def _get_similarity_matrix(self) -> List[Dict]:
+        """
+        Get similarity matrix for top similar speaker pairs.
+        
+        Returns:
+            List of dicts with speaker_a, speaker_b, similarity for top pairs.
+        """
+        similar_pairs = self.find_similar_speakers(similarity_threshold=0.7)
+        return [
+            {"speaker_a": a, "speaker_b": b, "similarity": float(sim)}
+            for a, b, sim in similar_pairs[:10]  # Top 10 pairs
+        ]
+    
+    def get_diagnostics(self) -> dict:
+        """
+        Production-grade diagnostics for speaker diarization.
+        
+        Returns comprehensive diagnostic information including:
+        - Speaker count and sample statistics
+        - Dynamic threshold value
+        - Similarity matrix for potential duplicate speakers
+        - Low confidence match rate
+        - Recent merge events
+        """
+        total = self._stats["identifications"]
+        matches = self._stats["matches"]
+        
+        return {
+            "speaker_count": len(self.centroids),
+            "total_samples": sum(self.counts.values()),
+            "avg_samples_per_speaker": (
+                sum(self.counts.values()) / max(1, len(self.centroids))
+            ),
+            "dynamic_threshold": self._get_dynamic_threshold(),
+            "similarity_matrix": self._get_similarity_matrix(),
+            "low_confidence_rate": self._stats["low_confidence_matches"] / max(1, matches),
+            "validator_stats": self.validator.get_validation_stats(),
+            "recent_merges": self._recent_merges_log[-10:],
+            "config": {
+                "threshold": self.threshold,
+                "min_samples_for_match": self.min_samples_for_match,
+                "ema_alpha": self.ema_alpha,
+            }
+        }
+    
     def find_similar_speakers(self, similarity_threshold: float = 0.85) -> List[Tuple[str, str, float]]:
         """
         Find pairs of speakers with high similarity (potential duplicates).
@@ -343,11 +495,15 @@ class SpeakerMemory:
         similar_pairs = []
         speaker_ids = list(self.centroids.keys())
         
+        # DEBUG: Log all centroid-to-centroid similarities
+        all_similarities = []
+        
         for i, speaker_a in enumerate(speaker_ids):
             for speaker_b in speaker_ids[i + 1:]:
                 # Skip if either speaker has too few samples
                 if (self.counts.get(speaker_a, 0) < self.min_samples_for_match or
                     self.counts.get(speaker_b, 0) < self.min_samples_for_match):
+                    logger.debug(f"Skipping merge check {speaker_a} vs {speaker_b}: counts {self.counts.get(speaker_a, 0)}/{self.counts.get(speaker_b, 0)} < min_samples_for_match={self.min_samples_for_match}")
                     continue
                 
                 similarity = self._cosine_similarity(
@@ -355,8 +511,17 @@ class SpeakerMemory:
                     self.centroids[speaker_b]
                 )
                 
+                all_similarities.append((speaker_a, speaker_b, similarity))
+                
                 if similarity >= similarity_threshold:
+                    logger.info(f"Auto-merge candidate: {speaker_a} <-> {speaker_b}, similarity={similarity:.3f}")
                     similar_pairs.append((speaker_a, speaker_b, similarity))
+        
+        # DEBUG: Log top similarities even if below threshold
+        if all_similarities:
+            all_similarities.sort(key=lambda x: x[2], reverse=True)
+            top_3 = all_similarities[:3]
+            logger.info(f"Top centroid similarities: {[(f'{a}<->{b}:{s:.3f}', a, b, s) for a, b, s in top_3]}")
         
         # Sort by similarity (highest first)
         similar_pairs.sort(key=lambda x: x[2], reverse=True)
@@ -365,7 +530,7 @@ class SpeakerMemory:
     
     def auto_merge_similar_speakers(
         self,
-        similarity_threshold: float = 0.85,
+        similarity_threshold: float = 0.80,
         max_merges: int = 5
     ) -> int:
         """
@@ -397,7 +562,7 @@ class SpeakerMemory:
                        f"(similarity: {similarity:.3f})")
             
             # Use speaker_a as the target, merge speaker_b into it
-            self._merge_speakers_internal(speaker_a, speaker_b)
+            self._merge_speakers_internal(speaker_a, speaker_b, similarity)
             merges_performed += 1
             
             # Update history - replace speaker_b with speaker_a
@@ -411,13 +576,29 @@ class SpeakerMemory:
         
         return merges_performed
     
-    def _merge_speakers_internal(self, speaker_a: str, speaker_b: str):
+    def _merge_speakers_internal(self, speaker_a: str, speaker_b: str, similarity: float = 0.0):
         """
         Internal method to merge speaker_b into speaker_a.
+        The speaker created FIRST (lower number) will survive the merge.
         Called by both merge_speakers() and auto_merge_similar_speakers().
         """
         if speaker_a not in self.centroids or speaker_b not in self.centroids:
             raise ValueError("Both speakers must exist")
+        
+        # Extract speaker numbers to determine which was created first
+        def get_speaker_number(speaker_id: str) -> int:
+            try:
+                return int(speaker_id.split('_')[1])
+            except (IndexError, ValueError):
+                return 0
+        
+        num_a = get_speaker_number(speaker_a)
+        num_b = get_speaker_number(speaker_b)
+        
+        # Ensure the first-created speaker (lower number) survives
+        if num_b < num_a:
+            speaker_a, speaker_b = speaker_b, speaker_a
+            num_a, num_b = num_b, num_a
         
         # Weighted average of centroids based on sample counts
         n_a = self.counts[speaker_a]
@@ -430,6 +611,16 @@ class SpeakerMemory:
         # Remove speaker_b
         del self.centroids[speaker_b]
         del self.counts[speaker_b]
+
+        #log merge event for debugging
+        self._recent_merges_log.append({
+            "timestamp": datetime.utcnow().isoformat(),
+            "from": speaker_b,
+            "to": speaker_a,
+            "similarity": similarity
+        })
+        if len(self._recent_merges_log) > 20:
+            self._recent_merges_log.pop(0)
     
     def cleanup_invalid_speakers(self) -> int:
         """
@@ -471,7 +662,8 @@ class SpeakerMemory:
         self.history.clear()
         self.last_speaker = None
         self.speaker_counter = 0
-        self.match_log.clear()
+        self._match_log.clear()
+        self._recent_merges_log.clear()
         
         # Reset statistics
         self._stats = {
@@ -533,8 +725,10 @@ def diarization_worker(hf_token: str, request_queue, result_queue):
     # Minimum segment duration to process (skip very short segments)
     MIN_SEGMENT_DURATION = 0.5  # seconds
     
-    # Initialize speaker memory with validation
-    speakers = SpeakerMemory(threshold=0.70)
+    # Initialize speaker memory with validation (using v2 defaults)
+    # min_samples_for_match=1 allows immediate matching after first sample
+    # Embedding validation and short segment filtering provide safeguards against false positives
+    speakers = SpeakerMemory(threshold=0.78, min_samples_for_match=1, ema_alpha=0.28)
 
     shutdown_received = False
     while True:
@@ -565,8 +759,10 @@ def diarization_worker(hf_token: str, request_queue, result_queue):
             # Handle reset signal for new stream
             if request == RESET_SIGNAL:
                 shutdown_received = False  # Reset for new stream
-                logger.info("Received reset signal - clearing speaker memory for new stream")
+                logger.warning("*** RESET SIGNAL RECEIVED - clearing speaker memory ***")
+                logger.warning(f"Speakers before reset: {list(speakers.centroids.keys())}")
                 speakers.reset()
+                logger.warning(f"Speakers after reset: {list(speakers.centroids.keys())}")
                 # CRITICAL FIX: Do NOT continue loop here - we need to re-check queue state
                 # The issue is that after clearing queues in reset_process(), the queue is empty
                 # If we continue and find queue empty with shutdown_received=False, we won't exit
@@ -579,40 +775,65 @@ def diarization_worker(hf_token: str, request_queue, result_queue):
                 # Run diarization
                 diarization_result = pipeline(request.audio_path)
                 
-                # Get speaker embeddings and identify speakers
-                speaker_ids = {}
-                for s, speaker in enumerate(diarization_result.speaker_diarization.labels()):
-                    speaker_embedding = diarization_result.speaker_embeddings[s]
-                    segment_info = {
-                        "request_id": request.request_id,
-                        "speaker_label": speaker,
-                        "embedding_index": s
-                    }
-                    speaker_id, score, alt_speakers = speakers.identify(speaker_embedding, segment_info)
-                    speaker_ids[speaker] = {"id": speaker_id, "score": score, "alt_speakers": alt_speakers}
+                # Combined loop: validate segment duration BEFORE speaker matching
+                # Build a mapping from speaker label to embedding index
+                speaker_to_embedding_idx = {speaker: idx for idx, speaker in enumerate(diarization_result.speaker_diarization.labels())}
                 
-                # Extract segments with duration filtering
                 segments = []
-                skipped_count = 0
+                skipped_short = 0
+                skipped_invalid = 0
+                speaker_ids = {}  # Track for logging/debugging
+                
                 for turn, speaker in diarization_result.speaker_diarization:
                     segment_duration = turn.end - turn.start
                     
-                    # Skip very short segments (often noise or artifacts)
+                    # STEP 1: Check segment duration FIRST - skip if too short
                     if segment_duration < MIN_SEGMENT_DURATION:
-                        skipped_count += 1
+                        skipped_short += 1
                         logger.debug(f"Skipping short segment: {segment_duration:.2f}s < {MIN_SEGMENT_DURATION}s")
+                        continue  # Skip - do NOT call identify()
+                    
+                    # STEP 2: Get embedding for this speaker
+                    s = speaker_to_embedding_idx.get(speaker)
+                    if s is None:
+                        logger.warning(f"No embedding index found for speaker {speaker}")
                         continue
                     
+                    speaker_embedding = diarization_result.speaker_embeddings[s]
+                    emb_norm = np.linalg.norm(speaker_embedding)
+                    logger.debug(f"Pyannote embedding[{s}] norm={emb_norm:.4f}, shape={speaker_embedding.shape}")
+                    
+                    segment_info = {
+                        "request_id": request.request_id,
+                        "speaker_label": speaker,
+                        "embedding_index": s,
+                        "segment_duration": segment_duration
+                    }
+                    
+                    # STEP 3: Call identify() only for valid-duration segments
+                    speaker_id, score, alt_speakers = speakers.identify(speaker_embedding, segment_info)
+                    speaker_ids[speaker] = {"id": speaker_id, "score": score, "alt_speakers": alt_speakers}
+                    
+                    # STEP 4: Skip if embedding was invalid (returned "unknown")
+                    if speaker_id == "unknown":
+                        skipped_invalid += 1
+                        logger.debug(f"Skipping segment with invalid embedding")
+                        continue
+                    
+                    # STEP 5: Add valid segment to output
                     segments.append(SpeakerSegment(
                         start=turn.start,
                         end=turn.end,
-                        speaker=str(speaker_ids[speaker]["id"]),
-                        confidence=str(speaker_ids[speaker]["score"]),
-                        alt_speakers=speaker_ids[speaker]["alt_speakers"] if len(speaker_ids[speaker]["alt_speakers"]) > 0 else None
+                        speaker=str(speaker_id),
+                        confidence=str(score),
+                        alt_speakers=alt_speakers if len(alt_speakers) > 0 else None
                     ))
                 
-                if skipped_count > 0:
-                    logger.info(f"Skipped {skipped_count} short segments (< {MIN_SEGMENT_DURATION}s)")
+                # Log summary of skipped segments
+                if skipped_short > 0:
+                    logger.info(f"Skipped {skipped_short} short segments (< {MIN_SEGMENT_DURATION}s)")
+                if skipped_invalid > 0:
+                    logger.info(f"Skipped {skipped_invalid} segments with invalid embeddings")
                 
                 logger.info(f"Extracted {len(segments)} speaker segments")
                 if len(segments) > 1:
@@ -649,11 +870,12 @@ class DiarizationClient:
     def __init__(
         self,
         hf_token: str = "",
-        threshold: float = 0.70,
+        threshold: float = 0.78,
         recency_boost: float = 0.00,
         history_size: int = 20,
-        min_samples_for_match: int = 1,
+        min_samples_for_match: int = 3,
         min_segment_duration: float = 0.5,
+        ema_alpha: float = 0.28,
         embedding_validator: Optional[EmbeddingQualityValidator] = None,
         on_invalid_embedding: Optional[Callable[[np.ndarray, str, Optional[dict]], None]] = None,
         on_low_confidence: Optional[Callable[[str, float, Optional[dict]], None]] = None
@@ -678,6 +900,7 @@ class DiarizationClient:
         self.history_size = history_size
         self.min_samples_for_match = min_samples_for_match
         self.min_segment_duration = min_segment_duration
+        self.ema_alpha = ema_alpha
         self.embedding_validator = embedding_validator
         self.on_invalid_embedding = on_invalid_embedding
         self.on_low_confidence = on_low_confidence
@@ -705,6 +928,7 @@ class DiarizationClient:
             history_size=self.history_size,
             min_samples_for_match=self.min_samples_for_match,
             min_segment_duration=self.min_segment_duration,
+            ema_alpha=self.ema_alpha,
             embedding_validator=self.embedding_validator,
             on_invalid_embedding=self.on_invalid_embedding,
             on_low_confidence=self.on_low_confidence

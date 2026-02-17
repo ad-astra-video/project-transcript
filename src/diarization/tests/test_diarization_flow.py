@@ -42,7 +42,7 @@ def test_speaker_memory():
     """Test SpeakerMemory class for speaker identification."""
     print("\n=== Testing SpeakerMemory ===")
     
-    memory = SpeakerMemory(threshold=0.70)
+    memory = SpeakerMemory(threshold=0.70, min_samples_for_match=1)
     
     # Create test embeddings (random vectors)
     embedding1 = np.random.randn(512).astype(np.float32)
@@ -70,7 +70,6 @@ def test_speaker_memory():
     assert speaker1_back == "speaker_0", f"Expected speaker_0, got {speaker1_back}"
     
     print("✓ SpeakerMemory tests passed")
-    return True
 
 
 def test_diarization_result_handling():
@@ -108,15 +107,12 @@ def test_diarization_result_handling():
                 print(f"✓ _send_speakers_message sent data successfully")
                 call_args = mock_processor.send_data.call_args[0][0]
                 print(f"  Sent payload type: {type(call_args)}")
-                return True
             else:
                 print("✗ _send_speakers_message did NOT send data")
-                return False
         finally:
             pipeline.main.PROCESSOR = original_processor
     
-    result = asyncio.run(test_send())
-    return result
+    asyncio.run(test_send())
 
 
 def test_handle_diarization_result_with_empty_segments():
@@ -161,10 +157,8 @@ def test_handle_diarization_result_with_empty_segments():
         
         if not mock_processor.send_data.called:
             print("✓ Empty segments correctly skipped sending (no data sent)")
-            return True
         else:
             print("✗ Empty segments incorrectly triggered sending")
-            return False
             
     finally:
         pipeline.main.PROCESSOR = original_processor
@@ -226,18 +220,14 @@ def test_pipeline_flow():
                     window_samples, start_ts, end_ts = pulled
                     print(f"✓ Pulled diarization samples: {len(window_samples)} samples")
                     print(f"  Time window: {start_ts:.3f}s - {end_ts:.3f}s")
-                    return True
                 else:
                     print("✗ Failed to pull diarization samples")
-                    return False
             else:
                 print(f"✗ Buffer duration {dur:.2f}s < 6.0s threshold")
-                return False
         finally:
             pipeline.main.STATE = original_state
     
-    result = asyncio.run(run_test())
-    return result
+    asyncio.run(run_test())
 
 
 import pytest
@@ -267,7 +257,6 @@ async def test_diarization_client_integration():
     client.remove_in_flight_request("req-2")
     
     print("✓ DiarizationClient basic functionality works")
-    return True
 
 
 def run_all_tests():

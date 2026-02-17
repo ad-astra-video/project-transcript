@@ -81,6 +81,19 @@ class EmbeddingQualityValidator:
         if np.allclose(embedding, 0):
             return False, "all_zeros"
         
+        # NEW: Check for NaN or Inf values
+        if not np.all(np.isfinite(embedding)):
+            return False, "contains_nan_or_inf"
+        
+        # NEW: Self-dot product sanity check
+        dot_self = np.dot(embedding, embedding)
+        if not np.isfinite(dot_self) or dot_self < 1e-8:
+            return False, "invalid_self_dot"
+        
+        # NEW: Extreme values check
+        if np.max(np.abs(embedding)) > 100.0:
+            return False, "extreme_values"
+        
         # Check L2 norm
         norm = np.linalg.norm(embedding)
         if norm < self.min_embedding_norm:

@@ -1427,8 +1427,9 @@ class TestDiarizationClientWithQualityImprovements:
         import asyncio
         asyncio.run(client.initialize())
         
-        # Add some data
+        # Add some data - use min_samples_for_match=1 to allow matching
         if client._speaker_memory:
+            client._speaker_memory.min_samples_for_match = 1
             client._speaker_memory.identify(np.random.randn(512).astype(np.float32))
             client._speaker_memory.identify(np.zeros(512, dtype=np.float32))
         
@@ -1495,6 +1496,217 @@ class TestPyannotePipelineConfiguration:
         
         # Threshold should be between 0 and 1
         assert 0 < threshold < 1
+
+
+class TestDiarizationV2Improvements:
+    """Tests for v2 speaker diarization improvements."""
+    
+    def test_dynamic_threshold_few_speakers(self):
+        """Test that dynamic threshold returns base threshold for few speakers."""
+        memory = SpeakerMemory(threshold=0.78)
+        
+        # With 0-4 speakers, should return base threshold
+        assert len(memory.centroids) == 0
+        assert memory._get_dynamic_threshold() == 0.78
+        
+        # Add a speaker
+        embedding = np.random.randn(512).astype(np.float32)
+        embedding = embedding / np.linalg.norm(embedding)
+        memory.centroids["speaker_0"] = embedding
+        memory.counts["speaker_0"] = 5
+        
+        assert memory._get_dynamic_threshold() == 0.78
+    
+    def test_dynamic_threshold_moderate_speakers(self):
+        """Test that dynamic threshold lowers for moderate speaker count."""
+        memory = SpeakerMemory(threshold=0.78)
+        
+        # Add 6 speakers
+        for i in range(6):
+            embedding = np.random.randn(512).astype(np.float32)
+            embedding = embedding / np.linalg.norm(embedding)
+            memory.centroids[f"speaker_{i}"] = embedding
+            memory.counts[f"speaker_{i}"] = 5
+        
+        # With 5-8 speakers, threshold should lower by 0.06
+        assert memory._get_dynamic_threshold() == 0.72
+    
+    def test_dynamic_threshold_many_speakers(self):
+        """Test that dynamic threshold lowers significantly for many speakers."""
+        memory = SpeakerMemory(threshold=0.78)
+        
+        # Add 10 speakers
+        for i in range(10):
+            embedding = np.random.randn(512).astype(np.float32)
+            embedding = embedding / np.linalg.norm(embedding)
+            memory.centroids[f"speaker_{i}"] = embedding
+            memory.counts[f"speaker_{i}"] = 5
+        
+        # With 9-12 speakers, threshold should lower by 0.12
+        assert memory._get_dynamic_threshold() == 0.66
+    
+    def test_dynamic_threshold_excessive_speakers(self):
+        """Test that dynamic threshold lowers aggressively for excessive speakers."""
+        memory = SpeakerMemory(threshold=0.78)
+        
+        # Add 15 speakers
+        for i in range(15):
+            embedding = np.random.randn(512).astype(np.float32)
+            embedding = embedding / np.linalg.norm(embedding)
+            memory.centroids[f"speaker_{i}"] = embedding
+            memory.counts[f"speaker_{i}"] = 5
+        
+        # With >12 speakers, threshold should lower by 0.18 (capped at 0.58)
+        assert memory._get_dynamic_threshold() == pytest.approx(0.60, rel=1e-9)
+    
+    def test_ema_centroid_update(self):
+        """Test that EMA centroid update works correctly."""
+        memory = SpeakerMemory(ema_alpha=0.5)
+        
+        # Create initial embedding
+        embedding1 = np.random.randn(512).astype(np.float32)
+        embedding1 = embedding1 / np.linalg.norm(embedding1)
+        memory.centroids["speaker_0"] = embedding1.copy()
+        memory.counts["speaker_0"] = 1
+        
+        # Update with second embedding
+        embedding2 = np.random.randn(512).astype(np.float32)
+        embedding2 = embedding2 / np.linalg.norm(embedding2)
+        memory._update_speaker("speaker_0", embedding2)
+        
+        # After first update (n=1), should blend equally
+        # After second update (n=2), should use EMA with alpha=0.5
+        assert memory.counts["speaker_0"] == 2
+        
+        # Centroid should be normalized
+        norm = np.linalg.norm(memory.centroids["speaker_0"])
+        assert abs(norm - 1.0) < 1e-6
+    
+    def test_proactive_merge_on_creation(self):
+        """Test that proactive merge checks happen after speaker creation."""
+        memory = SpeakerMemory(threshold=0.78, min_samples_for_match=1)
+        
+        # Create first speaker
+        embedding1 = np.random.randn(512).astype(np.float32)
+        embedding1 = embedding1 / np.linalg.norm(embedding1)
+        speaker_id1, _, _ = memory.identify(embedding1)
+        
+        # Create second speaker with very similar embedding
+        embedding2 = embedding1.copy()  # Identical embedding
+        speaker_id2, _, _ = memory.identify(embedding2)
+        
+        # Should have been merged (proactive merge checks speakers with >=3 samples)
+        # But with min_samples_for_match=1, we need to add more samples first
+        # Actually, the proactive merge requires existing speaker to have >=3 samples
+        # So we need to add samples to the first speaker first
+        for _ in range(3):
+            memory.identify(embedding1)
+        
+        # Now create a new speaker with identical embedding
+        speaker_id3, _, _ = memory.identify(embedding2)
+        
+        # Should have been merged to speaker_0
+        assert len(memory.centroids) == 1
+        assert speaker_id3 == speaker_id1
+    
+    def test_invalid_embedding_returns_unknown(self):
+        """Test that invalid embeddings return 'unknown' instead of falling back to last speaker."""
+        memory = SpeakerMemory()
+        
+        # Create a valid speaker first
+        valid_embedding = np.random.randn(512).astype(np.float32)
+        valid_embedding = valid_embedding / np.linalg.norm(valid_embedding)
+        speaker_id, _, _ = memory.identify(valid_embedding)
+        
+        # Now try invalid embedding
+        invalid_embedding = np.zeros(512, dtype=np.float32)
+        speaker_id2, confidence, _ = memory.identify(invalid_embedding)
+        
+        # Should return 'unknown' - no fallback to last speaker
+        assert speaker_id2 == "unknown"
+        assert confidence == 0.0
+    
+    def test_invalid_embedding_unknown_without_last_speaker(self):
+        """Test that invalid embeddings return unknown when no last speaker."""
+        memory = SpeakerMemory()
+        
+        # Try invalid embedding without any previous speaker
+        invalid_embedding = np.zeros(512, dtype=np.float32)
+        speaker_id, confidence, _ = memory.identify(invalid_embedding)
+        
+        # Should return unknown
+        assert speaker_id == "unknown"
+        assert confidence == 0.0
+    
+    def test_diagnostics_method(self):
+        """Test that get_diagnostics returns comprehensive information."""
+        memory = SpeakerMemory(threshold=0.78, min_samples_for_match=3, ema_alpha=0.28)
+        
+        # Add some speakers
+        for i in range(3):
+            embedding = np.random.randn(512).astype(np.float32)
+            embedding = embedding / np.linalg.norm(embedding)
+            memory.identify(embedding)
+        
+        diagnostics = memory.get_diagnostics()
+        
+        # Check required fields
+        assert "speaker_count" in diagnostics
+        assert "total_samples" in diagnostics
+        assert "dynamic_threshold" in diagnostics
+        assert "similarity_matrix" in diagnostics
+        assert "low_confidence_rate" in diagnostics
+        assert "validator_stats" in diagnostics
+        assert "config" in diagnostics
+        
+        # Check config values
+        assert diagnostics["config"]["threshold"] == 0.78
+        assert diagnostics["config"]["min_samples_for_match"] == 3
+        assert diagnostics["config"]["ema_alpha"] == 0.28
+    
+    def test_updated_defaults(self):
+        """Test that v2 defaults are applied correctly."""
+        memory = SpeakerMemory()
+        
+        # Check new defaults
+        assert memory.threshold == 0.78  # Was 0.91
+        assert memory.min_samples_for_match == 3  # Was 1
+        assert memory.ema_alpha == 0.28  # New parameter
+    
+    def test_cosine_similarity_handles_nan_inputs(self):
+        """Test that cosine similarity handles NaN inputs gracefully."""
+        memory = SpeakerMemory()
+        
+        # Valid embedding
+        valid = np.random.randn(512).astype(np.float32)
+        valid = valid / np.linalg.norm(valid)
+        
+        # NaN embedding
+        nan_embedding = np.random.randn(512).astype(np.float32)
+        nan_embedding[100] = np.nan
+        
+        # Should return -1.0 for invalid comparison
+        score = memory._cosine_similarity(valid, nan_embedding)
+        assert score == -1.0
+        
+        # Both NaN
+        score = memory._cosine_similarity(nan_embedding, nan_embedding)
+        assert score == -1.0
+    
+    def test_cosine_similarity_handles_empty_inputs(self):
+        """Test that cosine similarity handles empty inputs gracefully."""
+        memory = SpeakerMemory()
+        
+        valid = np.random.randn(512).astype(np.float32)
+        valid = valid / np.linalg.norm(valid)
+        
+        empty = np.array([])
+        
+        score = memory._cosine_similarity(valid, empty)
+        assert score == -1.0
+        
+        score = memory._cosine_similarity(empty, valid)
+        assert score == -1.0
 
 
 if __name__ == "__main__":

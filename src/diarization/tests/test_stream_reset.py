@@ -60,7 +60,6 @@ def test_speaker_memory_reset():
     assert speaker1_after == "speaker_0", f"Expected speaker_0 after reset, got {speaker1_after}"
     
     print("✓ SpeakerMemory.reset() works correctly")
-    return True
 
 
 def test_diarization_client_reset():
@@ -84,7 +83,6 @@ def test_diarization_client_reset():
     assert len(client.in_flight_requests) == 0, "Should have 0 in-flight requests after reset"
     
     print("✓ DiarizationClient.reset() works correctly")
-    return True
 
 
 import pytest
@@ -136,7 +134,6 @@ async def test_on_stream_start_resets_diarization():
         assert state.diarization_buffer_start_ts is None, "diarization_buffer_start_ts should be None"
         
         print("✓ All diarization state was properly reset in on_stream_start()")
-        return True
         
     finally:
         pipeline.main.STATE = original_state
@@ -197,8 +194,6 @@ def test_speaker_id_persistence_across_streams():
     assert speaker_x_with_reset == "speaker_0", f"Expected speaker_0 (fresh), got {speaker_x_with_reset}"
     assert speaker_y_with_reset == "speaker_1", f"Expected speaker_1 (fresh), got {speaker_y_with_reset}"
     print("✓ FIX VERIFIED: Speaker IDs reset correctly with reset() call")
-    
-    return True
 
 
 def run_all_tests():

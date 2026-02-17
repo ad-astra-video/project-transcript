@@ -183,6 +183,52 @@ class TestEmbeddingQualityValidator:
         assert lenient_v.min_embedding_norm == 0.05
         assert lenient_v.min_embedding_mean == 1e-7
         assert lenient_v.max_zero_ratio == 0.7
+    
+    def test_nan_embedding(self):
+        """Test that embeddings containing NaN values are rejected."""
+        validator = EmbeddingQualityValidator()
+        embedding = np.random.randn(512).astype(np.float32)
+        embedding[100] = np.nan
+        is_valid, reason = validator.is_valid(embedding)
+        assert is_valid is False
+        assert reason == "contains_nan_or_inf"
+    
+    def test_inf_embedding(self):
+        """Test that embeddings containing Inf values are rejected."""
+        validator = EmbeddingQualityValidator()
+        embedding = np.random.randn(512).astype(np.float32)
+        embedding[200] = np.inf
+        is_valid, reason = validator.is_valid(embedding)
+        assert is_valid is False
+        assert reason == "contains_nan_or_inf"
+    
+    def test_negative_inf_embedding(self):
+        """Test that embeddings containing -Inf values are rejected."""
+        validator = EmbeddingQualityValidator()
+        embedding = np.random.randn(512).astype(np.float32)
+        embedding[300] = -np.inf
+        is_valid, reason = validator.is_valid(embedding)
+        assert is_valid is False
+        assert reason == "contains_nan_or_inf"
+    
+    def test_invalid_self_dot(self):
+        """Test that embeddings with invalid self-dot product are rejected."""
+        validator = EmbeddingQualityValidator(min_embedding_norm=0.00001)
+        # Create embedding with values that pass norm check but have very low self-dot
+        # 1e-6 * sqrt(512) ≈ 0.0000226, which is > 0.00001
+        # self-dot = 512 * (1e-6)^2 = 5.12e-10, which is < 1e-8
+        embedding = np.ones(512, dtype=np.float32) * 1e-6
+        is_valid, reason = validator.is_valid(embedding)
+        assert is_valid is False
+        assert reason == "invalid_self_dot"
+    
+    def test_extreme_values_embedding(self):
+        """Test that embeddings with extreme values are rejected."""
+        validator = EmbeddingQualityValidator()
+        embedding = np.random.randn(512).astype(np.float32) * 50  # Large values
+        is_valid, reason = validator.is_valid(embedding)
+        assert is_valid is False
+        assert reason == "extreme_values"
 
 
 class TestSpeakerMemoryWithValidation:
@@ -212,7 +258,8 @@ class TestSpeakerMemoryWithValidation:
     
     def test_statistics_tracking(self):
         """Test that SpeakerMemory tracks validation statistics."""
-        memory = SpeakerMemory()
+        # Use min_samples_for_match=1 to allow matching after first sample
+        memory = SpeakerMemory(min_samples_for_match=1)
         
         # Use the same embedding multiple times to get matches
         valid_embedding = np.random.randn(512).astype(np.float32)
@@ -381,7 +428,8 @@ class TestSpeakerMemoryWithValidation:
     
     def test_speaker_matching_with_validation(self):
         """Test that speaker matching works correctly with validation."""
-        memory = SpeakerMemory(threshold=0.70)
+        # Use min_samples_for_match=1 to allow matching after first sample
+        memory = SpeakerMemory(threshold=0.70, min_samples_for_match=1)
         
         # Create first speaker
         embedding1 = np.random.randn(512).astype(np.float32)
@@ -501,6 +549,66 @@ class TestSpeakerMerging:
         # Sample count should be combined
         assert memory.counts[speaker1_id] == 2
     
+    def test_merge_preserves_first_speaker_number(self):
+        """Test that the first-created speaker's number survives the merge."""
+        memory = SpeakerMemory()
+        
+        # Create two speakers: speaker_0 first, then speaker_1
+        embedding1 = np.random.randn(512).astype(np.float32)
+        embedding2 = np.random.randn(512).astype(np.float32) * -1
+        
+        speaker_0, _, _ = memory.identify(embedding1)
+        speaker_1, _, _ = memory.identify(embedding2)
+        
+        assert speaker_0 == "speaker_0"
+        assert speaker_1 == "speaker_1"
+        assert len(memory.centroids) == 2
+        
+        # Merge speaker_0 INTO speaker_1 (higher number into lower number)
+        # The first-created speaker (speaker_0) should survive
+        memory.merge_speakers(speaker_1, speaker_0)
+        
+        # speaker_0 should survive (first created)
+        assert len(memory.centroids) == 1
+        assert "speaker_0" in memory.centroids
+        assert "speaker_1" not in memory.centroids
+        assert memory.counts["speaker_0"] == 2
+    
+    def test_auto_merge_preserves_first_speaker_number(self):
+        """Test that auto-merge keeps the first-created speaker's number."""
+        memory = SpeakerMemory()
+        
+        # Create two very similar speakers (should trigger auto-merge)
+        embedding = np.random.randn(512).astype(np.float32)
+        embedding = embedding / np.linalg.norm(embedding)
+        
+        # Create first speaker
+        speaker_a, _, _ = memory.identify(embedding)
+        # Add more samples to first speaker
+        memory.identify(embedding)
+        memory.identify(embedding)
+        
+        # Create second speaker with very similar embedding
+        embedding_similar = embedding + np.random.randn(512).astype(np.float32) * 0.01
+        embedding_similar = embedding_similar / np.linalg.norm(embedding_similar)
+        speaker_b, _, _ = memory.identify(embedding_similar)
+        
+        # Extract speaker numbers
+        num_a = int(speaker_a.split('_')[1])
+        num_b = int(speaker_b.split('_')[1])
+        
+        # Verify first speaker has lower number
+        assert num_a < num_b, f"Expected first speaker to have lower number: {speaker_a} vs {speaker_b}"
+        
+        # Run auto-merge with high threshold to trigger merge
+        merges = memory.auto_merge_similar_speakers(similarity_threshold=0.95, max_merges=1)
+        
+        # If merged, the first-created speaker (lower number) should survive
+        if merges > 0:
+            surviving_speaker = list(memory.centroids.keys())[0]
+            surviving_num = int(surviving_speaker.split('_')[1])
+            assert surviving_num == num_a, f"Expected first speaker ({speaker_a}) to survive, got {surviving_speaker}"
+    
     def test_find_similar_speakers(self):
         """Test finding similar speakers."""
         memory = SpeakerMemory(threshold=0.50)
@@ -617,7 +725,7 @@ class TestSpeakerMerging:
         This tests the scenario where speaker_4 and speaker_5 have very similar scores
         (~0.71-0.72) - they should be merged into the same speaker.
         """
-        memory = SpeakerMemory(threshold=0.75)  # Higher threshold for this test
+        memory = SpeakerMemory(threshold=0.75, min_samples_for_match=1)  # Higher threshold for this test
         
         # Create first speaker
         np.random.seed(42)
