@@ -375,7 +375,6 @@ class SummaryClient:
         self,
         api_key: str = "",
         base_url: str = "http://byoc-transcription-vllm:5000/v1",
-        history_length: int = 0,
         model: str = "Nanbeige/Nanbeige4-3B-Thinking-2511",
         max_tokens: int = 5750,
         temperature: float = 0.2,
@@ -392,7 +391,6 @@ class SummaryClient:
         Args:
             api_key: API key for authentication
             base_url: Base URL for the OpenAI-compatible API
-            history_length: Number of previous segments to include in context (0 = all history)
             model: Model name to use for summarization
             max_tokens: Maximum tokens to generate
             temperature: Temperature for generation
@@ -405,7 +403,6 @@ class SummaryClient:
         """
         self.base_url = base_url.rstrip("/")
         self.api_key = api_key
-        self.history_length = history_length
         self.model = model
         self.max_tokens = max_tokens
         self.temperature = temperature
@@ -705,7 +702,6 @@ class SummaryClient:
         self,
         base_url: Optional[str] = None,
         api_key: Optional[str] = None,
-        history_length: Optional[int] = None,
         model: Optional[str] = None,
         max_tokens: Optional[int] = None,
         temperature: Optional[float] = None,
@@ -721,7 +717,6 @@ class SummaryClient:
         Args:
             base_url: New base URL for the API
             api_key: New API key
-            history_length: New history length
             model: New model name
             max_tokens: New max tokens
             temperature: New temperature
@@ -735,8 +730,6 @@ class SummaryClient:
             self.base_url = base_url.rstrip("/")
         if api_key is not None:
             self.api_key = api_key
-        if history_length is not None:
-            self.history_length = history_length
         # Allow setting model to None to re-fetch from /models
         if model is not None:
             self.model = model
@@ -761,7 +754,7 @@ class SummaryClient:
             self.initial_summary_delay_seconds = initial_summary_delay_seconds
             logger.info(f"Updated initial_summary_delay_seconds to {initial_summary_delay_seconds}")
         
-        logger.info(f"SummaryClient params updated: base_url={self.base_url}, history_length={self.history_length}, model={self.model}")
+        logger.info(f"SummaryClient params updated: base_url={self.base_url}, model={self.model}")
     
     def get_new_text_for_summary_window(
         self,

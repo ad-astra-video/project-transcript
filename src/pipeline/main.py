@@ -122,7 +122,6 @@ async def load_model(**kwargs):
     # Summary params
     summary_base_url = params.get("summary_base_url", "http://byoc-transcription-vllm:5000/v1")
     summary_api_key = params.get("summary_api_key", "")
-    summary_history_length = int(params.get("summary_history_length", 0))
     summary_model = params.get("summary_model", os.environ.get("LOCAL_SUMMARY_MODEL", ""))
 
     # Init model
@@ -138,7 +137,6 @@ async def load_model(**kwargs):
     STATE.summary_client = SummaryClient(
         base_url=summary_base_url,
         api_key=summary_api_key,
-        history_length=summary_history_length,
         model=summary_model,
         send_monitoring_event_callback=PROCESSOR.send_monitoring_event if PROCESSOR else None,
         send_data_callback=PROCESSOR.send_data if PROCESSOR else None
@@ -749,12 +747,11 @@ async def update_params(params: dict):
         STATE.overlap_seconds = float(params["chunk_overlap"])
     
     # Summary parameters
-    if "summary_base_url" in params or "summary_api_key" in params or "summary_history_length" in params or "summary_model" in params:
+    if "summary_base_url" in params or "summary_api_key" in params or "summary_model" in params:
         if STATE.summary_client is not None:
             STATE.summary_client.update_params(
                 base_url=params.get("summary_base_url"),
                 api_key=params.get("summary_api_key"),
-                history_length=params.get("summary_history_length"),
                 model=params.get("summary_model"),
             )
     
