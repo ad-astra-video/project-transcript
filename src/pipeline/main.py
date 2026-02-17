@@ -76,13 +76,7 @@ class TranscriberState:
         # Temp file tracking for cleanup (when both transcribe and diarize are done)
         self.pending_temp_files: Dict[str, Dict] = {}
 
-        # Summary worker for async processing
-        self.summary_queue: asyncio.Queue = asyncio.Queue()
-        self.summary_results: deque = deque(maxlen=100)  # Bounded deque for summary results
-        self.summary_worker_tasks: list[asyncio.Task] = []
-        self.summary_sender_task: Optional[asyncio.Task] = None  # Background sender task
-        
-        # Stop request flag for graceful shutdown
+        # Stop request flag for graceful shutdown (used by diarization polling)
         self.stop_requested: bool = False  # Flag to signal workers to stop
 
         # Shutdown tracking for graceful shutdown via update_params
@@ -146,7 +140,8 @@ async def load_model(**kwargs):
         api_key=summary_api_key,
         history_length=summary_history_length,
         model=summary_model,
-        send_monitoring_event_callback=PROCESSOR.send_monitoring_event if PROCESSOR else None
+        send_monitoring_event_callback=PROCESSOR.send_monitoring_event if PROCESSOR else None,
+        send_data_callback=PROCESSOR.send_data if PROCESSOR else None
     )
     
     # Initialize and detect model if needed
@@ -276,198 +271,6 @@ def _check_cleanup(audio_path: str):
         del STATE.pending_temp_files[audio_path]
 
 
-async def _summary_worker():
-    """Background task to process summary requests from the queue.
-    
-    This is a thin pass-through worker. The SummaryClient handles all
-    buffering, merging, and payload building. The worker simply:
-    1. Receives transcription windows from the queue
-    2. Calls process_segments() on the client
-    3. Sends the result directly to the results deque
-    """
-    while STATE is not None:
-        try:
-            # Wait for work with timeout to allow checking shutdown state
-            try:
-                work_item = await asyncio.wait_for(STATE.summary_queue.get(), timeout=0.5)
-            except asyncio.TimeoutError:
-                # Timeout is expected - check if we should shutdown
-                if STATE.shutdown_requested and STATE.summary_queue.empty():
-                    logger.info("Summary worker stopping - shutdown requested and queue empty")
-                    break
-                continue
-            except asyncio.CancelledError:
-                # Task was cancelled externally - exit gracefully
-                break
-            
-            # Check for None shutdown signal
-            if work_item is None:
-                logger.info("Summary worker received shutdown signal - exiting")
-                break
-            
-            segments, transcription_window_id, window_start_ts, window_end_ts = work_item
-            
-            # Check if stop is requested before processing
-            if STATE is not None and STATE.stop_requested:
-                logger.info(f"Summary worker skipping window {transcription_window_id} - stop requested")
-                continue
-            
-            # Process through client - it handles all buffering, merging, and payload building
-            try:
-                # Add window to in-flight tracking in summary client
-                STATE.summary_client.add_in_flight_window(transcription_window_id)
-                
-                start = time.perf_counter()
-                result_payload = await asyncio.wait_for(
-                    STATE.summary_client.process_segments(
-                        "context_summary",
-                        segments,
-                        transcription_window_id,
-                        window_start_ts,
-                        window_end_ts
-                    ),
-                    timeout=240.0
-                )
-                end = time.perf_counter()
-                
-                # Log monitoring event
-                if not PROCESSOR is None:
-                    await PROCESSOR.send_monitoring_event(
-                        {
-                            "duration_seconds": end - start,
-                            "window_id": result_payload.get("summary_window_id", transcription_window_id),
-                            "window_start_ms": window_start_ts * 1000,
-                            "window_end_ms": window_end_ts * 1000
-                        },
-                        "llm_summary_request_stats"
-                    )
-                
-                # Send result directly - client already built complete payload
-                if result_payload and result_payload.get("segments"):
-                    STATE.summary_results.append(result_payload)
-                    logger.debug(
-                        f"Staged summary data for window {result_payload.get('summary_window_id', transcription_window_id)} "
-                        f"with transcription_window_ids {result_payload.get('transcription_window_ids', [transcription_window_id])}"
-                    )
-                elif result_payload.get("type") == "content_type_detection":
-                    STATE.summary_results.append(result_payload)
-                    logger.info(
-                        f"Staged content_type_detection: {result_payload.get('content_type')} "
-                        f"(source: {result_payload.get('source')})"
-                    )
-                else:
-                    logger.debug(
-                        f"No summary segments for window {transcription_window_id} "
-                        f"(client is buffering/merging windows)"
-                    )
-                    
-            except asyncio.TimeoutError:
-                logger.warning(
-                    f"Summarization timed out for window {transcription_window_id} "
-                    f"[{window_start_ts:.3f}s - {window_end_ts:.3f}s]"
-                )
-                if not PROCESSOR is None:
-                    await PROCESSOR.send_monitoring_event(
-                        {
-                            "window_id": transcription_window_id,
-                            "window_start_ms": window_start_ts * 1000,
-                            "window_end_ms": window_end_ts * 1000
-                        },
-                        "llm_summary_request_timeout"
-                    )
-            except Exception as e:
-                logger.error(f"Summary processing error: {e}")
-            finally:
-                # Remove from in-flight tracking regardless of success or failure
-                STATE.summary_client.remove_in_flight_window(transcription_window_id)
-                
-        except asyncio.TimeoutError:
-            continue
-        except asyncio.CancelledError:
-            break
-        except Exception as e:
-            logger.error(f"Summary worker error: {e}")
-    
-    logger.info("Summary worker stopped")
-
-
-async def _start_summary_worker(self):
-    """Start multiple summary worker tasks and the sender task."""
-    # Reset stop flag for new stream
-    self.stop_requested = False
-    logger.info("Summary worker stop flag reset for new stream")
-    
-    num_workers = int(os.environ.get("MAX_CONCURRENT_SUMMARIES", 4))  # Default number of concurrent workers
-    if not self.summary_worker_tasks or all(t.done() for t in self.summary_worker_tasks):
-        self.summary_worker_tasks = [
-            asyncio.create_task(_summary_worker())
-            for _ in range(num_workers)
-        ]
-        logger.info(f"Started {num_workers} summary worker tasks")
-    
-    # Start summary sender task if not already running
-    if self.summary_sender_task is None or self.summary_sender_task.done():
-        self.summary_sender_task = asyncio.create_task(_summary_sender())
-        logger.info("Started summary sender task")
-
-
-async def _summary_sender():
-    """Background task that monitors deque and sends results to client."""
-    logger.info("Starting summary sender")
-    while STATE is not None:
-        try:
-            if len(STATE.summary_results) == 0:
-                await asyncio.sleep(0.1)  # Sleep if empty
-                continue
-            
-            # Drain all results and send
-            while len(STATE.summary_results) > 0:
-                result = STATE.summary_results.popleft()
-                result_type = result.get("type", "unknown")
-                result_msg = f"SENDING from summary_results: type='{result_type}'"
-                if result_type == "content_type_detection":
-                    result_msg += f"  content_type='{result.get('content_type')}', confidence={result.get('confidence')}, previous='{result.get('previous_content_type')}'"
-                logger.info(result_msg)
-                try:
-                    if PROCESSOR is not None:
-                        await PROCESSOR.send_data(json.dumps(result))
-                        logger.debug(f"Sent summary result")
-                except Exception as e:
-                    logger.error(f"Error sending summary result: {e}")
-            
-            await asyncio.sleep(0.05)  # Small pause between batches
-            
-        except asyncio.CancelledError:
-            break
-        except Exception as e:
-            logger.error(f"Summary sender error: {e}")
-    logger.info("Summary sender stopped")
-
-
-def add_content_type_detection_to_results(content_type: str, confidence: float, source: str, previous_content_type: str = None):
-    """Add content type detection result to summary_results deque for sending.
-    
-    Args:
-        content_type: Detected content type (e.g., "GENERAL_MEETING", "TECHNICAL_TALK")
-        confidence: Confidence level (0.0-1.0)
-        source: Source of detection ("AUTO_DETECTED", "USER_OVERRIDE")
-        previous_content_type: Previous content type if it changed
-    """
-    if STATE is None:
-        logger.warning("Cannot add content type detection - STATE is None")
-        return
-    
-    payload = {
-        "type": "content_type_detection",
-        "timestamp_utc": datetime.now(timezone.utc).isoformat(),
-        "content_type": content_type,
-        "confidence": confidence,
-        "source": source,
-        "previous_content_type": previous_content_type
-    }
-    STATE.summary_results.append(payload)
-    logger.info(f"ADDED to summary_results: content_type_detection - type='{content_type}', confidence={confidence:.2f}, previous='{previous_content_type}'")
-    logger.debug(f"Added content_type_detection to results: {content_type}")
 
 
 async def _send_speakers_message(segments: list[SpeakerSegment], window_start_ts: float, window_end_ts: float):
@@ -638,7 +441,7 @@ async def _process_transcription_async(window_samples: np.ndarray, window_start_
                 # Put work on queue for background processing
                 # Worker will handle skip logic and content type detection
                 # transcription_window_id comes from whisper's internal counter
-                STATE.summary_queue.put_nowait((segments_payload, transcription_window_id, window_start_ts, end_ts))
+                STATE.summary_client.queue_segments(segments_payload, transcription_window_id, window_start_ts, end_ts)
             except Exception as e:
                 logger.error(f"Failed to queue summary work: {e}")
 
@@ -846,11 +649,9 @@ async def _handle_graceful_shutdown():
     # Phase 2: Flush remaining buffered audio
     await _flush_audio_buffers()
     
-    # Phase 3: Send shutdown signals to workers (None per worker)
-    num_workers = len(STATE.summary_worker_tasks)
-    for _ in range(num_workers):
-        STATE.summary_queue.put_nowait(None)
-    logger.info(f"Sent {num_workers} shutdown signals to summary workers")
+    # Phase 3: Stop summary workers gracefully
+    if STATE.summary_client is not None:
+        await STATE.summary_client.stop()
     
     STATE.diarization_client.send_shutdown_signal()
     
@@ -859,8 +660,8 @@ async def _handle_graceful_shutdown():
     timeout = 180.0
     
     while time.time() - start_time < timeout:
-        # Check summary workers
-        all_workers_done = all(t.done() for t in STATE.summary_worker_tasks)
+        # Summary workers are already stopped in Phase 3 via SummaryClient.stop()
+        all_workers_done = True
         
         # Check diarization
         diarization_idle = STATE.diarization_client.is_idle()
@@ -1019,12 +820,12 @@ async def on_stream_start(params: dict):
             STATE.shutdown_completed = False
             
             # Clear summary queues to prevent stale data from previous stream
-            STATE.summary_queue._queue.clear()
-            STATE.summary_results.clear()
-            logger.info("Summary queues cleared")
+            if STATE.summary_client is not None:
+                STATE.summary_client.clear()
             
             # Start summary worker for this stream
-            await _start_summary_worker(STATE)
+            if STATE.summary_client is not None:
+                await STATE.summary_client.start()
             
             # Start diarization polling task for this stream
             if STATE.diarization_client is not None:
@@ -1045,38 +846,20 @@ async def on_stream_stop():
     stop_requested_at = datetime.now(timezone.utc).isoformat()
     logger.info(f"Stop request received at {stop_requested_at}")
     
-    # Signal workers to stop accepting new work
-    STATE.stop_requested = True
-    logger.info("Summary client stop requested")
-    
-    # Wait for summary worker tasks to complete (up to 5 seconds)
-    workers_completed_at = None
-    wait_duration_seconds = 0.0
-    
-    if STATE.summary_worker_tasks:
-        try:
-            # Wait for all worker tasks to complete with 5 second timeout
-            done, pending = await asyncio.wait(
-                STATE.summary_worker_tasks,
-                timeout=5.0
-            )
-            workers_completed_at = datetime.now(timezone.utc).isoformat()
-            wait_duration_seconds = (datetime.fromisoformat(workers_completed_at.replace('+00:00', '')) -
-                                   datetime.fromisoformat(stop_requested_at.replace('+00:00', ''))).total_seconds()
-            
-            logger.info(f"All summary workers completed in {wait_duration_seconds:.2f}s")
-            
-            # Cancel any pending tasks
-            for task in pending:
-                task.cancel()
-        except Exception as e:
-            logger.error(f"Error waiting for summary workers: {e}")
-            # Cancel all tasks on error
-            for task in STATE.summary_worker_tasks:
-                task.cancel()
-            workers_completed_at = datetime.now(timezone.utc).isoformat()
-            wait_duration_seconds = (datetime.fromisoformat(workers_completed_at.replace('+00:00', '')) -
-                                   datetime.fromisoformat(stop_requested_at.replace('+00:00', ''))).total_seconds()
+    # Signal workers to stop accepting new work via SummaryClient
+    if STATE.summary_client is not None:
+        STATE.summary_client._stop_requested = True
+        logger.info("Summary client stop requested")
+        
+        # Stop the workers gracefully
+        await STATE.summary_client.stop(timeout=5.0)
+        workers_completed_at = datetime.now(timezone.utc).isoformat()
+        wait_duration_seconds = (datetime.fromisoformat(workers_completed_at.replace('+00:00', '')) -
+                               datetime.fromisoformat(stop_requested_at.replace('+00:00', ''))).total_seconds()
+        logger.info(f"All summary workers completed in {wait_duration_seconds:.2f}s")
+    else:
+        workers_completed_at = stop_requested_at
+        wait_duration_seconds = 0.0
     
     # Send worker stop timing payload before closing
     if PROCESSOR is not None:
@@ -1115,9 +898,6 @@ async def on_stream_stop():
     STATE.stream_start_media_ts = None
     STATE.pending_temp_files = {}
     
-    # Clear worker tasks list
-    STATE.summary_worker_tasks = []
-    logger.info("Summary worker tasks cleared")
     
     # Reset summary client state (clear windows, insights, timestamps)
     if STATE.summary_client is not None:
