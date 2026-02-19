@@ -83,6 +83,7 @@ class WindowManager:
         self.transcription_windows_per_summary_window = transcription_windows_per_summary_window  # Number of transcription windows per summary window
         self._first_window_timestamp: Optional[float] = None  # Track first window timestamp for self-contained delay logic
         self._next_insight_id: int = 0  # Counter for unique insight IDs
+        self._last_processed_timestamp_end: Optional[float] = None  # Track last processed timestamp end for deduplication
     
     def add_summary_window(
         self,
@@ -350,34 +351,125 @@ class WindowManager:
     
     # === Transcription Window Management Methods ===
     
+    def _extract_text_from_segments(self, segments: List[Dict[str, Any]]) -> str:
+        """Extract text from transcription segments."""
+        return " ".join(seg.get("text", "") for seg in segments if seg.get("text"))
+    
+    def _deduplicate_text(self, segments: List[Dict[str, Any]]) -> str:
+        """Remove overlapping text from current transcription."""
+        # First window - no deduplication needed
+        if self._last_processed_timestamp_end is None:
+            return self._extract_text_from_segments(segments)
+        
+        # Check if word timestamps available
+        has_timestamps = any(
+            isinstance(seg.get("words"), list) and len(seg.get("words", [])) > 0
+            for seg in segments
+        )
+        
+        if has_timestamps:
+            return self._deduplicate_with_timestamps(segments)
+        else:
+            return self._deduplicate_with_word_matching(segments)
+    
+    def _deduplicate_with_timestamps(self, segments: List[Dict[str, Any]]) -> str:
+        """Filter words where start_ms/1000 < _last_processed_timestamp_end."""
+        ref_ts = self._last_processed_timestamp_end
+        
+        filtered_segments = []
+        for seg in segments:
+            if not isinstance(seg.get("words"), list):
+                filtered_segments.append(seg)
+                continue
+            
+            filtered_words = []
+            for word in seg["words"]:
+                word_start = word.get("start_ms", 0) / 1000
+                if word_start >= ref_ts:
+                    filtered_words.append(word)
+            
+            new_seg = dict(seg)
+            new_seg["words"] = filtered_words
+            filtered_segments.append(new_seg)
+        
+        return self._extract_text_from_segments(filtered_segments)
+    
+    def _deduplicate_with_word_matching(self, segments: List[Dict[str, Any]]) -> str:
+        """Fallback word matching deduplication."""
+        # Get last transcription window id
+        pending_ids = self.get_pending_transcription_ids()
+        last_id = None
+        
+        if pending_ids:
+            last_id = pending_ids[-1]
+        elif self._summary_windows:
+            last_summary = self._summary_windows[-1]
+            trans_ids = last_summary.transcription_window_ids
+            if trans_ids:
+                last_id = trans_ids[-1]
+        
+        if last_id is None:
+            return self._extract_text_from_segments(segments)
+        
+        last_window = self._transcription_windows.get(last_id)
+        if not last_window:
+            return self._extract_text_from_segments(segments)
+        
+        previous_text = last_window.new_text
+        current_text = self._extract_text_from_segments(segments)
+        
+        if not previous_text or not current_text:
+            return current_text
+        
+        prev_words = previous_text.split()
+        curr_words = current_text.split()
+        
+        # Find overlap
+        overlap_count = 0
+        for i in range(1, min(len(prev_words), len(curr_words)) + 1):
+            if prev_words[-i].lower() == curr_words[i-1].lower():
+                overlap_count = i
+            else:
+                break
+        
+        if overlap_count > 0:
+            return " ".join(curr_words[overlap_count:])
+        
+        return current_text
+    
     def add_transcription_window(
         self,
         transcription_window_id: int,
-        new_text: str,
-        timestamp_start: float,
-        timestamp_end: float,
-        segments: List[Dict[str, Any]]
+        segments: List[Dict[str, Any]],
+        window_start_ts: float,
+        window_end_ts: float
     ) -> None:
         """
         Add a transcription window to the dict and track ID for summary creation.
         
         Args:
             transcription_window_id: Unique ID for this transcription window
-            new_text: Text after removing overlap from previous window
-            timestamp_start: Start timestamp in seconds
-            timestamp_end: End timestamp in seconds
-            segments: Original segments for reference
+            segments: Original segments from transcription
+            window_start_ts: Start timestamp in seconds
+            window_end_ts: End timestamp in seconds
         """
+        # Extract and deduplicate text
+        new_text = self._deduplicate_text(segments)
+        
         trans_window = TranscriptionWindow(
             transcription_window_id=transcription_window_id,
             new_text=new_text,
-            timestamp_start=timestamp_start,
-            timestamp_end=timestamp_end,
+            timestamp_start=window_start_ts,
+            timestamp_end=window_end_ts,
             segments=segments,
             char_count=len(new_text)
         )
         self._transcription_windows[transcription_window_id] = trans_window
         self._pending_transcription_ids.append(transcription_window_id)
+        
+        # Update last processed timestamp end
+        self._last_processed_timestamp_end = window_end_ts
+        
         logger.debug(f"Added transcription window {transcription_window_id}, pending count={len(self._pending_transcription_ids)}")
     
     def get_transcription_window(self, transcription_window_id: int) -> Optional[TranscriptionWindow]:
@@ -391,6 +483,26 @@ class WindowManager:
     def clear_pending_transcription_ids(self) -> None:
         """Clear pending transcription IDs after summary window is created."""
         self._pending_transcription_ids.clear()
+    
+    def maybe_create_summary_window(self) -> Optional[int]:
+        """Create summary window if threshold reached, clear pending IDs."""
+        if len(self._pending_transcription_ids) >= self.transcription_windows_per_summary_window:
+            transcription_ids = self._pending_transcription_ids.copy()
+            
+            merged_text = self.get_merged_text_for_transcription_ids(transcription_ids)
+            timestamp_start, timestamp_end = self.get_merged_timing_for_transcription_ids(transcription_ids)
+            
+            window_id = self.add_summary_window(
+                text=merged_text,
+                timestamp_start=timestamp_start,
+                timestamp_end=timestamp_end,
+                transcription_window_ids=transcription_ids
+            )
+            
+            self.clear_pending_transcription_ids()
+            return window_id
+        
+        return None
     
     def get_transcription_windows_for_ids(self, transcription_window_ids: List[int]) -> List[TranscriptionWindow]:
         """Get transcription windows for a list of IDs."""

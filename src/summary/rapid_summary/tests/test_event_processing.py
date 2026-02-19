@@ -63,7 +63,7 @@ class TestRapidSummaryEventProcessing:
         """Create a RapidSummaryPlugin instance for testing."""
         return RapidSummaryPlugin(
             window_manager=mock_window_manager,
-            llm=mock_llm,
+            llm_manager=mock_llm,
             result_callback=result_callback,
             summary_client=mock_summary_client
         )
@@ -206,7 +206,7 @@ class TestRapidSummaryPluginRegistration:
         init_plugin(
             plugin_name="rapid_summary",
             window_manager=mock_window_manager,
-            llm=mock_llm,
+            llm_manager=mock_llm,
             result_callback=mock_result_callback,
             summary_client=mock_summary_client
         )
@@ -258,7 +258,7 @@ class TestRapidSummaryContextTracking:
         """Create a RapidSummaryPlugin instance."""
         return RapidSummaryPlugin(
             window_manager=mock_window_manager,
-            llm=mock_llm,
+            llm_manager=mock_llm,
             result_callback=AsyncMock(),
             summary_client=None
         )

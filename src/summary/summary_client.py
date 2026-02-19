@@ -28,7 +28,7 @@ class SummaryClient:
     
     def __init__(
         self,
-        reasoning_base_url: str = "http://byoc-transcription-vllm:5000/v1",
+        reasoning_base_url: str = "http://byoc-transcription-vllm-insights:5000/v1",
         reasoning_api_key: str = "",
         reasoning_model: str = "",
         rapid_base_url: str = "http://byoc-transcription-vllm-rapid-summary:5050/v1",
@@ -105,8 +105,7 @@ class SummaryClient:
         self._plugins: Dict[str, Any] = {}  # plugin_name -> plugin instance
         self._event_callbacks: Dict[str, Dict[str, Callable]] = {}  # plugin_name -> {event_name: callback}
         
-        # Discover and initialize plugins
-        self._discover_plugins()
+        # Note: Plugins are loaded in initialize() after LLMManager is ready
     
     # ==================== Plugin System Methods ====================
     
@@ -163,34 +162,7 @@ class SummaryClient:
         self._summary_results.append(payload)
     
     # ==================== End Plugin System ====================
-    
-    async def summarize_text(
-        self,
-        text: str,
-        context: str = ""
-    ) -> Tuple[str, str, int]:
-        """
-        Summarize text using the context summary task.
         
-        This method provides backward compatibility for tests and external code
-        that expects a summarize_text method on the client.
-        
-        Args:
-            text: Text to summarize
-            context: Additional context from previous segments
-            
-        Returns:
-            Tuple of (summary_json_string, reasoning_content, input_tokens)
-        """
-        # Use the context_summary plugin for summarization
-        if "context_summary" in self._plugins:
-            plugin = self._plugins["context_summary"]
-            result = await plugin.process_summary(text=text, context=context)
-            return result.get("summary_text", "{}"), result.get("reasoning_content", ""), result.get("input_tokens", 0)
-        
-        # Fallback: return empty response if plugin not available
-        return "{}", "", 0
-    
     async def initialize(self) -> Optional[str]:
         """
         Initialize the lock for async operations and detect model if needed.
@@ -207,6 +179,10 @@ class SummaryClient:
         detected = await self.llm.initialize()
         
         # Note: warm_up() is now called inside llm.initialize() - failures will propagate
+        
+        # Load plugins after LLMManager is initialized (LLMClient instances are ready)
+        self._discover_plugins()
+        
         logger.info("SummaryClient initialized")
         
         return detected
@@ -447,6 +423,43 @@ class SummaryClient:
         self._summary_results.append(payload)
         logger.info(f"ADDED to summary_results: content_type_detection - type='{content_type}', confidence={confidence:.2f}, previous='{previous_content_type}'")
     
+    async def process_transcription(
+        self,
+        segments: List[Any],
+        transcription_window_id: int,
+        window_start_ts: float,
+        window_end_ts: float
+    ) -> Dict[str, Any]:
+        """Process transcription window with deduplication and plugin notification."""
+        # Add transcription window to manager
+        self._window_manager.add_transcription_window(
+            transcription_window_id=transcription_window_id,
+            segments=segments,
+            window_start_ts=window_start_ts,
+            window_end_ts=window_end_ts
+        )
+        
+        # Check if summary window should be created
+        summary_window_id = self._window_manager.maybe_create_summary_window()
+        
+        # Notify plugins of transcription window available
+        await self._notify_plugins(
+            "transcription_window_available",
+            transcription_window_id=transcription_window_id
+        )
+        
+        # If summary window created, notify plugins
+        if summary_window_id is not None:
+            await self._notify_plugins(
+                "summary_window_available",
+                summary_window_id=summary_window_id
+            )
+        
+        return {
+            "transcription_window_id": transcription_window_id,
+            "summary_window_id": summary_window_id
+        }
+    
     async def _summary_worker_task(self):
         """Background task to process summary requests from the queue.
         
@@ -492,14 +505,13 @@ class SummaryClient:
                     
                     start = time.perf_counter()
                     result_payload = await asyncio.wait_for(
-                        self.process_segments(
-                            "context_summary",
+                        self.process_transcription(
                             segments,
                             transcription_window_id,
                             window_start_ts,
                             window_end_ts
                         ),
-                        timeout=240.0
+                        timeout=360.0
                     )
                     end = time.perf_counter()
                     
@@ -508,32 +520,13 @@ class SummaryClient:
                         await self._send_monitoring_event_callback(
                             {
                                 "duration_seconds": end - start,
-                                "window_id": result_payload.get("summary_window_id", transcription_window_id),
+                                "transcription_window_id": result_payload.get("transcription_window_id", ""),
+                                "summary_window_id": result_payload.get("summary_window_id", ""),
                                 "window_start_ms": window_start_ts * 1000,
                                 "window_end_ms": window_end_ts * 1000
                             },
-                            "llm_summary_request_stats"
-                        )
-                    
-                    # Send result directly - client already built complete payload
-                    if result_payload and result_payload.get("segments"):
-                        self._summary_results.append(result_payload)
-                        logger.debug(
-                            f"Staged summary data for window {result_payload.get('summary_window_id', transcription_window_id)} "
-                            f"with transcription_window_ids {result_payload.get('transcription_window_ids', [transcription_window_id])}"
-                        )
-                    elif result_payload.get("type") == "content_type_detection":
-                        self._summary_results.append(result_payload)
-                        logger.info(
-                            f"Staged content_type_detection: {result_payload.get('content_type')} "
-                            f"(source: {result_payload.get('source')})"
-                        )
-                    else:
-                        logger.debug(
-                            f"No summary segments for window {transcription_window_id} "
-                            f"(client is buffering/merging windows)"
-                        )
-                        
+                            "process_transcription_request_stats"
+                        )                       
                 except asyncio.TimeoutError:
                     logger.warning(
                         f"Summarization timed out for window {transcription_window_id} "
@@ -542,11 +535,12 @@ class SummaryClient:
                     if self._send_monitoring_event_callback is not None:
                         await self._send_monitoring_event_callback(
                             {
-                                "window_id": transcription_window_id,
+                                "transcription_window_id": result_payload.get("transcription_window_id", ""),
+                                "summary_window_id": result_payload.get("summary_window_id", ""),
                                 "window_start_ms": window_start_ts * 1000,
                                 "window_end_ms": window_end_ts * 1000
                             },
-                            "llm_summary_request_timeout"
+                            "process_transcription_request_stats"
                         )
                 except Exception as e:
                     logger.error(f"Summary processing error: {e}")

@@ -20,9 +20,9 @@ _result_callback = None
 class RapidSummaryPlugin:
     """Plugin for rapid summarization."""
     
-    def __init__(self, window_manager, llm, result_callback, summary_client=None, **kwargs):
+    def __init__(self, window_manager, llm_manager, result_callback, summary_client=None, **kwargs):
         self._window_manager = window_manager
-        self._llm = llm
+        self._llm = llm_manager
         self._result_callback = result_callback
         self._summary_client = summary_client  # Keep for non-LLM operations
         
@@ -145,7 +145,7 @@ class RapidSummaryPlugin:
         logger.debug("RapidSummaryPlugin reset - context timestamp cleared")
 
 
-def init_plugin(plugin_name: str, window_manager, llm, result_callback: Callable, summary_client=None):
+def init_plugin(plugin_name: str, window_manager, llm_manager, result_callback: Callable, summary_client=None):
     """Initialize the plugin and register with summary_client."""
     global _window_manager, _summary_client, _result_callback
     
@@ -155,7 +155,7 @@ def init_plugin(plugin_name: str, window_manager, llm, result_callback: Callable
     
     plugin_instance = RapidSummaryPlugin(
         window_manager=window_manager,
-        llm=llm,
+        llm_manager=llm_manager,
         result_callback=result_callback,
         summary_client=summary_client,
     )

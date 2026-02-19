@@ -169,13 +169,13 @@ class ContextSummaryPlugin:
             logger.info(f"Updated initial_summary_delay_seconds to {initial_summary_delay_seconds}")
 
 
-def init_plugin(plugin_name: str, window_manager, llm, result_callback: Callable, summary_client=None):
+def init_plugin(plugin_name: str, window_manager, llm_manager, result_callback: Callable, summary_client=None):
     """Initialize the plugin and register with summary_client."""
     initial_delay = summary_client.initial_summary_delay_seconds if summary_client else 0.0
     
     plugin_instance = ContextSummaryPlugin(
         window_manager=window_manager,
-        llm=llm,
+        llm_manager=llm_manager,
         result_callback=result_callback,
         summary_client=summary_client,
         initial_summary_delay_seconds=initial_delay

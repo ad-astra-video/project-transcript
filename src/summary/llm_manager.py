@@ -352,6 +352,7 @@ class LLMManager:
                 detected = self._rapid_model
             except Exception as e:
                 logger.warning(f"Failed to auto-detect rapid model: {e}")
+                raise RuntimeError(f"Failed to auto-detect rapid model: {e}")
         
         # Auto-detect reasoning model if not specified
         if not self._reasoning_model:
@@ -362,9 +363,10 @@ class LLMManager:
                     api_key=self._reasoning_api_key
                 )
                 logger.info(f"Auto-detected reasoning model: {self._reasoning_model}")
-                detected = self._reasoning_model
+                detected += f", {self._reasoning_model}"
             except Exception as e:
                 logger.warning(f"Failed to auto-detect reasoning model: {e}")
+                raise RuntimeError(f"Failed to auto-detect reasoning model: {e}")
         
         # Create LLMClient instances after model detection
         self._create_llm_clients()

@@ -24,16 +24,15 @@ class TestWindowManagerTextDeduplication:
         # Add first transcription window
         wm.add_transcription_window(
             transcription_window_id=1,
-            new_text="Hello world How are you",
-            timestamp_start=0.0,
-            timestamp_end=2.0,
             segments=[
                 {"text": "Hello world", "start_ms": 0, "end_ms": 1000},
                 {"text": "How are you", "start_ms": 1000, "end_ms": 2000}
-            ]
+            ],
+            window_start_ts=0.0,
+            window_end_ts=2.0
         )
         
-        # Verify text was stored
+        # Verify text was stored (deduplicated internally)
         assert wm._transcription_windows[1].new_text == "Hello world How are you"
     
     def test_add_transcription_window_with_overlap(self):
@@ -43,25 +42,24 @@ class TestWindowManagerTextDeduplication:
         # Add first transcription window
         wm.add_transcription_window(
             transcription_window_id=1,
-            new_text="Hello world How are you",
-            timestamp_start=0.0,
-            timestamp_end=2.0,
             segments=[
                 {"text": "Hello world", "start_ms": 0, "end_ms": 1000},
                 {"text": "How are you", "start_ms": 1000, "end_ms": 2000}
-            ]
+            ],
+            window_start_ts=0.0,
+            window_end_ts=2.0
         )
         
         # Add second transcription window with overlap
-        # The new_text should already be deduplicated
+        # The new_text should be deduplicated internally
         wm.add_transcription_window(
             transcription_window_id=2,
-            new_text="Goodbye",  # Already deduplicated
-            timestamp_start=2.0,
-            timestamp_end=3.0,
             segments=[
+                {"text": "How are you", "start_ms": 1000, "end_ms": 2000},
                 {"text": "Goodbye", "start_ms": 2000, "end_ms": 3000}
-            ]
+            ],
+            window_start_ts=1.0,
+            window_end_ts=3.0
         )
         
         # Verify both windows stored
@@ -100,10 +98,9 @@ class TestSummaryClientTextHandling:
         # Add transcription window
         client._window_manager.add_transcription_window(
             transcription_window_id=1,
-            new_text="Test text",
-            timestamp_start=0.0,
-            timestamp_end=5.0,
-            segments=[{"id": "1", "text": "Test text"}]
+            segments=[{"id": "1", "text": "Test text"}],
+            window_start_ts=0.0,
+            window_end_ts=5.0
         )
         
         # Verify stored
