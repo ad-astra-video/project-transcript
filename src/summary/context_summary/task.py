@@ -1,0 +1,697 @@
+"""
+Context summary task implementation.
+
+This module contains the core logic for processing context summaries,
+including text summarization, insight extraction, and context building.
+"""
+
+import json
+import logging
+from typing import Dict, Any, Optional, List, Tuple
+from datetime import datetime, timezone
+from enum import Enum
+
+from openai import AsyncOpenAI
+from openai.types.chat.chat_completion import ChatCompletion
+from pydantic import BaseModel
+
+from ..llm_manager import LLMClient
+from ..window_manager import WindowInsight
+from .prompts import SYSTEM_PROMPT, SYSTEM_PROMPT_OUTPUT_CONSTRAINTS, CONTENT_TYPE_RULE_MODIFIERS
+
+logger = logging.getLogger(__name__)
+
+
+# ==================== Types and Schemas ====================
+
+class InsightType(str, Enum):
+    """Enumeration of possible insight types."""
+    ACTION = "ACTION"
+    DECISION = "DECISION"
+    QUESTION = "QUESTION"
+    KEY_POINT = "KEY POINT"
+    RISK = "RISK"
+    SENTIMENT = "SENTIMENT"
+    PARTICIPANTS = "PARTICIPANTS"
+    NOTES = "NOTES"
+
+
+class ClassificationField(str, Enum):
+    """Classification markers for insights - general and reusable across all insight types."""
+    POSITIVE = "+"
+    NEUTRAL = "~"
+    NEGATIVE = "-"
+
+
+class InsightResponseItemSchema(BaseModel):
+    """Schema for a single insight item."""
+    insight_type: InsightType
+    insight_text: str
+    confidence: float
+    classification: ClassificationField
+    continuation_of: Optional[int] = None
+    correction_of: Optional[int] = None
+
+
+class InsightsResponseSchema(BaseModel):
+    """Schema for insights response from LLM."""
+    analysis: str
+    insights: List[InsightResponseItemSchema]
+
+
+# ==================== End Types and Schemas ====================
+
+
+class ContextSummaryTask:
+    """
+    Task for processing context summaries.
+    
+    Handles text summarization, insight extraction, and context building
+    for the summary client.
+    """
+    
+    def __init__(
+        self,
+        llm_client: Optional[LLMClient] = None,
+        max_tokens: int = 8192,
+        temperature: float = 0.2,
+        system_prompt: str = SYSTEM_PROMPT,
+        content_type_state: Any = None,
+        window_manager: Any = None
+    ):
+        """Initialize the context summary task.
+        
+        Args:
+            llm_client: Optional LLMClient for LLM calls (includes model and message building)
+            max_tokens: Maximum tokens to generate
+            temperature: Temperature for generation
+            system_prompt: System prompt for the LLM
+            content_type_state: Content type state object
+            window_manager: Window manager for tracking windows
+        """
+        self._llm_client = llm_client
+        self.max_tokens = max_tokens
+        self.temperature = temperature
+        self.system_prompt = system_prompt
+        self.insights_response_json_schema = InsightsResponseSchema.model_json_schema()
+        self._content_type_state = content_type_state
+        self._window_manager = window_manager
+        
+        # Store last raw LLM response for debugging
+        self._last_summary_raw_response: Optional[str] = None
+    
+    def _format_content_type_rules(self, content_type: str) -> str:
+        """
+        Format content type rules as prompt text for injection into system prompt.
+        
+        Args:
+            content_type: The active content type string
+            
+        Returns:
+            Formatted rules string for inclusion in system prompt
+        """
+        if content_type not in CONTENT_TYPE_RULE_MODIFIERS:
+            return ""
+        
+        rules = CONTENT_TYPE_RULE_MODIFIERS[content_type]
+        
+        # Build RISK guidance section if present
+        risk_guidance = rules.get("risk_guidance", "")
+        risk_section = ""
+        if risk_guidance:
+            risk_section = f"""
+### RISK Definition (Content-Type-Specific):
+{risk_guidance}"""
+        
+        # Build KEY POINT guidance section if present
+        key_point_guidance = rules.get("key_point_guidance", "")
+        key_point_section = ""
+        if key_point_guidance:
+            key_point_section = f"""
+### KEY POINT Guidance:
+{key_point_guidance}"""
+        
+        # Build STORY guidance section if present
+        story_guidance = rules.get("story_guidance", "")
+        story_section = ""
+        if story_guidance:
+            story_section = f"""
+### STORY Handling:
+{story_guidance}"""
+        
+        # Format the rules into a clear, actionable prompt section
+        formatted = f"""
+
+## CONTENT TYPE RULES: {content_type}
+
+### Priority Insight Types (Emphasize):
+{chr(10).join(f'- {t}' for t in rules["emphasize"])}
+
+### Suppressed Insight Types (Deemphasize):
+{chr(10).join(f'- {t}' for t in rules["deemphasize"])}
+
+{risk_section}
+
+{key_point_section}
+
+{story_section}
+
+### Processing Guidelines:
+- Sentiment Tracking: {"ENABLED" if rules["sentiment_enabled"] else "DISABLED"}
+- Participant Tracking: {"ENABLED" if rules["participants_enabled"] else "DISABLED"}
+- Action Strictness: {rules["action_strictness"].upper()}
+- Notes Frequency: {rules["notes_frequency"].upper()}
+
+### Application Rules:
+- Apply these modifiers strictly to guide extraction focus
+- Do NOT compensate by inventing other insight types
+- Prefer omission over speculation when rules suppress insight types
+"""
+        return formatted
+    
+    def _get_effective_content_type(self) -> Tuple[str, float, str]:
+        """
+        Get effective content type considering user override.
+        
+        Returns:
+            Tuple of (content_type, confidence, source)
+        """
+        if self._content_type_state:
+            return (
+                self._content_type_state.content_type,
+                self._content_type_state.confidence,
+                self._content_type_state.source
+            )
+        return ("UNKNOWN", 0.0, "INITIAL")
+    
+    def _build_messages(
+        self,
+        system_prompt: str,
+        context: str = "",
+        user_content: str = ""
+    ) -> List[Dict[str, str]]:
+        """
+        Build system prompt and user content for LLMClient to format.
+        
+        The LLMClient handles message formatting based on its configured mode
+        (SYSTEM_PROMPT or USER_PREFIX).
+        
+        Args:
+            system_prompt: The system prompt text
+            context: Optional context from previous segments
+            user_content: The user message content
+            
+        Returns:
+            List of message dictionaries in the correct format
+        """
+        # Get active content type for dynamic rule injection
+        content_type, confidence, source = self._get_effective_content_type()
+        logger.debug(f"Building messages with content_type={content_type}, confidence={confidence}, source={source}")
+        
+        # Format content type rules for this content type
+        content_type_rules = self._format_content_type_rules(content_type)
+        
+        # Build system prompt with dynamic content type rules
+        combined_system = system_prompt
+        
+        # Add content type rules after system prompt, before output constraints
+        if content_type_rules:
+            combined_system += content_type_rules
+        
+        # Add output constraints ALWAYS before PRIOR CONTEXT
+        combined_system += f"\n{SYSTEM_PROMPT_OUTPUT_CONSTRAINTS}"
+        
+        if context:
+            combined_system += f"\n\n## PRIOR CONTEXT\nThe following context is from previous transcript windows. Use it for understanding references only. Do not extract new insights from this context unless the current window transcript provides new information that builds on or contradicts it.\n\n{context}"
+        
+        combined_system += "\n\nAnalyze the following current window transcript text and report only new or changed insights since the previous context.:"
+        
+        # Use LLMClient's build_messages for final message construction
+        # LLMClient handles the message format based on its configured mode
+        if self._llm_client is not None:
+            return self._llm_client.build_messages(
+                system_prompt=combined_system,
+                user_content=user_content
+            )
+        
+        # Fallback if no LLMClient - use standard system/user format
+        return [
+            {"role": "system", "content": combined_system},
+            {"role": "user", "content": user_content}
+        ]
+    
+    async def process_context_summary(
+        self,
+        summary_window_id: int,
+    ) -> Dict[str, Any]:
+        """
+        Process a summary window through context summary LLM for cleaning and summarization.
+        
+        Args:
+            summary_window_id: The ID of the summary window to process
+            
+        Returns:
+            Full payload dictionary with summary results
+        """
+        if self._window_manager is None:
+            raise RuntimeError("WindowManager not initialized")
+        
+        # Build context using the pre-created task
+        context, prior_insights, context_text_length, insights_per_window = self.build_context(
+            include_insights=True
+        )
+        
+        # Get text to analyze based on whether this is the first summary
+        # (This logic should be coordinated with the plugin's _has_performed_summary state)
+        # For now, we'll get the text from the window manager
+        content_to_analyze = self._window_manager.get_window_text(summary_window_id)
+        
+        if not content_to_analyze:
+            logger.warning(f"No text found for summary_window_id={summary_window_id}")
+            return {"summary_text": "{}", "reasoning_content": "", "input_tokens": 0, "output_tokens": 0}
+        
+        logger.debug(f"process_context_summary called with text length={len(content_to_analyze)}, context length={len(context)}")
+        
+        messages = self._build_messages(
+            system_prompt=self.system_prompt,
+            context=context,
+            user_content=content_to_analyze
+        )
+        
+        try:
+            logger.debug(f"Sending to LLM for analysis")
+            
+            if self._llm_client is None:
+                raise RuntimeError("LLMClient not initialized")
+            
+            reasoning, content, input_tokens, output_tokens = await self._llm_client.create_completion(
+                messages=messages,
+                max_tokens=self.max_tokens,
+                temperature=self.temperature,
+                response_format={"type": "json_schema", "json_schema": {"name": "insights", "schema": self.insights_response_json_schema}}
+            )
+
+            summary_text_raw = content
+            summary_text = content.replace("```json", "").replace("```", "").strip()
+            reasoning_content = reasoning or ""
+
+            logger.info(f"process_context_summary received response, length={len(summary_text)}, input_tokens={input_tokens}")
+            self._last_summary_raw_response = summary_text_raw
+            
+        except Exception as e:
+            logger.error(f"Error calling LLM API: {e}")
+            raise
+
+        # Get window timing
+        window_start = self._window_manager.get_window_start(summary_window_id)
+        window_end = self._window_manager.get_window_end(summary_window_id)
+        
+        # Get content type settings for filtering
+        sentiment_enabled = True
+        participants_enabled = True
+        if self._content_type_state and self._content_type_state.content_type in CONTENT_TYPE_RULE_MODIFIERS:
+            rules = CONTENT_TYPE_RULE_MODIFIERS[self._content_type_state.content_type]
+            sentiment_enabled = rules.get("sentiment_enabled", True)
+            participants_enabled = rules.get("participants_enabled", True)
+        
+        # Process the LLM result: parse JSON, extract insights, filter by content type
+        processed = await self.process_result(
+            summary_text=summary_text,
+            summary_window_id=summary_window_id,
+            window_start=window_start,
+            window_end=window_end,
+            prior_insights=prior_insights,
+            sentiment_enabled=sentiment_enabled,
+            participants_enabled=participants_enabled
+        )
+        
+        payload = {
+            "summary_text": processed.get("summary_text", summary_text),
+            "reasoning_content": reasoning_content,
+            "input_tokens": input_tokens,
+            "output_tokens": output_tokens,
+            "insights": processed.get("insights", []),
+        }
+        
+        if result_callback is not None:
+            await result_callback(payload)
+        
+        return payload
+    
+    def build_context(self, include_insights: bool = True) -> Tuple[str, List[Any], int, float]:
+        """
+        Build context string with text and optionally insights from accumulated windows.
+        Single-pass: loops through accumulated windows once to get both text and insights.
+        
+        Returns:
+            Tuple of (formatted_context_string, list_of_insights_from_accumulated_windows, text_length, insights_per_window_metric)
+        """
+        if self._window_manager is None:
+            return "", [], 0, 0.0
+        
+        # Single-pass accumulation from same windows
+        accumulated_text, insights, text_length, insights_per_window = self._window_manager.get_accumulated_text_and_insights()
+        
+        parts = []
+        
+        # Add accumulated text
+        if accumulated_text:
+            parts.append(f"## PRIOR TEXT\n{accumulated_text}")
+        
+        # Add insights from same accumulated windows
+        if include_insights and insights:
+            insights_text = self._format_insights_for_context(insights)
+            parts.append(f"## PRIOR INSIGHTS\n{insights_text}")
+        
+        context_string = "\n\n".join(parts) if parts else ""
+        return context_string, insights, text_length, insights_per_window
+    
+    def _format_insights_for_context(self, insights: List[Any]) -> str:
+        """Format insights for inclusion in Prior Context with IDs and timing hints."""
+        formatted = []
+        for insight in insights:
+            # Format with ID and timing hints
+            # ID is included so LLM can reference it in continuation_of/correction_of
+            id_hint = f"[#{insight.insight_id}]"
+            timing_hint = f"[{insight.timestamp_start:.1f}s - {insight.timestamp_end:.1f}s]"
+            
+            # Add continuation/correction markers if present
+            markers = []
+            if insight.continuation_of:
+                markers.append(f"CONTINUATION of insight #{insight.continuation_of}")
+            if insight.correction_of:
+                markers.append(f"CORRECTION of insight #{insight.correction_of}")
+            
+            marker_text = f" ({', '.join(markers)})" if markers else ""
+            
+            formatted.append(
+                f"- **{insight.insight_type}** {id_hint} {timing_hint}: "
+                f"{insight.insight_text}{marker_text}"
+            )
+        
+        return "\n".join(formatted)
+    
+    # ==================== Insight Processing Methods ====================
+    
+    def _parse_reference_id(self, value: Any, field_name: str) -> Optional[int]:
+        """
+        Parse and validate a reference ID field from LLM response.
+        
+        Args:
+            value: The raw value from LLM response
+            field_name: Name of the field for logging purposes
+        
+        Returns:
+            Valid integer ID or None if invalid/missing
+        """
+        if value is None:
+            return None
+        
+        try:
+            # Handle string representations (LLM may return "42" instead of 42)
+            if isinstance(value, str):
+                parsed = int(value)
+                if parsed <= 0:
+                    logger.warning(f"Invalid {field_name}: '{value}' (must be positive integer)")
+                    return None
+                return parsed
+            
+            # Handle numeric types
+            if isinstance(value, (int, float)):
+                if value <= 0 or not float(value).is_integer():
+                    logger.warning(f"Invalid {field_name}: {value} (must be positive integer)")
+                    return None
+                return int(value)
+            
+            # Log unexpected types
+            logger.warning(f"Unexpected {field_name} type: {type(value).__name__} (value: {value})")
+            return None
+            
+        except (ValueError, TypeError) as e:
+            logger.warning(f"Failed to parse {field_name}: {value} ({e})")
+            return None
+    
+    def _validate_insight_reference(
+        self,
+        ref_id: Optional[int],
+        prior_insights: List[WindowInsight],
+        field_name: str
+    ) -> Optional[int]:
+        """
+        Validate that a reference ID exists in prior insights and resolve to root.
+        
+        If the referenced insight is itself a continuation/correction of another
+        insight, this traverses the chain to find the root (original) insight ID.
+        
+        Example:
+            - Insight #5: "Fix the bug" (root - no continuation/correction)
+            - Insight #1: "We should fix the bug" - continuation_of=5
+            - Insight #2: "We decided to fix the bug" - continuation_of=1
+            
+            If current insight references #1, returns #5 (root), not #1.
+        
+        Args:
+            ref_id: The reference ID to validate
+            prior_insights: List of prior insights to check against
+            field_name: Name of the field for logging purposes
+        
+        Returns:
+            Root insight ID or None if invalid/not found
+        """
+        if ref_id is None:
+            return None
+        
+        # Build lookup map for prior insights by ID
+        insights_by_id = {insight.insight_id: insight for insight in prior_insights}
+        
+        # Check if the referenced insight exists
+        if ref_id not in insights_by_id:
+            valid_ids = set(insights_by_id.keys())
+            logger.warning(
+                f"Invalid {field_name}: {ref_id} not found in prior insights. "
+                f"Valid IDs: {sorted(valid_ids)[:10]}"
+            )
+            return None
+        
+        # Traverse the chain to find the root
+        return self._resolve_to_root(ref_id, insights_by_id)
+    
+    def _resolve_to_root(
+        self,
+        insight_id: int,
+        insights_by_id: Dict[int, WindowInsight]
+    ) -> int:
+        """
+        Resolve an insight ID to its root by following continuation/correction chain.
+        
+        Args:
+            insight_id: The starting insight ID
+            insights_by_id: Map of insight_id -> WindowInsight
+        
+        Returns:
+            The root insight ID (the original insight that is not a continuation/correction)
+        """
+        visited = set()  # Prevent infinite loops
+        current_id = insight_id
+        
+        while current_id is not None:
+            # Prevent infinite loop
+            if current_id in visited:
+                logger.warning(
+                    f"Circular reference detected at insight {current_id}, "
+                    f"stopping chain resolution"
+                )
+                return current_id
+            
+            visited.add(current_id)
+            
+            # Get the current insight
+            current_insight = insights_by_id.get(current_id)
+            if current_insight is None:
+                # Shouldn't happen if validation passed, but handle gracefully
+                return current_id
+            
+            # Check if this insight continues or corrects another
+            next_id = current_insight.continuation_of or current_insight.correction_of
+            
+            if next_id is None:
+                # This is the root - no more continuation/correction
+                return current_id
+            
+            # Continue traversing
+            current_id = next_id
+        
+        return insight_id  # Fallback
+    
+    def _extract_insights(
+        self,
+        parsed_data: Dict,
+        window_id: int,
+        window_start: float,
+        window_end: float,
+        prior_insights: Optional[List[WindowInsight]] = None,
+        sentiment_enabled: bool = True,
+        participants_enabled: bool = True
+    ) -> Dict:
+        """
+        Extract insights from parsed JSON data, assign IDs, and insert into parsed_data.
+        Filters out SENTIMENT insights when sentiment_enabled is False for the content type.
+        
+        Args:
+            parsed_data: Parsed JSON data from LLM response (dict with "insights" key or list)
+            window_id: The window these insights belong to
+            window_start: Start timestamp of the window
+            window_end: End timestamp of the window
+            prior_insights: Optional list of prior insights for reference validation
+            sentiment_enabled: Whether to include SENTIMENT insights
+            participants_enabled: Whether to include PARTICIPANTS insights
+        
+        Returns:
+            Parsed data with insights array updated to include assigned insight_ids
+        """
+        if not parsed_data:
+            return parsed_data
+        
+        # Handle both dict with "insights" key and list format
+        if isinstance(parsed_data, list):
+            # List format: insights are the list items themselves
+            insights_list = parsed_data
+            is_list_format = True
+        else:
+            # Dict format: insights are in "insights" key
+            insights_list = parsed_data.get("insights", [])
+            is_list_format = False
+        
+        insights_for_summary = []
+        
+        for item in insights_list:
+            if not isinstance(item, dict):
+                continue
+            
+            # Check if this is a SENTIMENT insight that should be filtered
+            insight_type = item.get("insight_type", "")
+            if insight_type == InsightType.SENTIMENT.value and not sentiment_enabled:
+                logger.debug(
+                    f"Filtering SENTIMENT insight for content type with sentiment_enabled=False: "
+                    f"{item.get('insight_text', '')[:50]}..."
+                )
+                continue  # Skip this insight
+            
+            # Check if this is a PARTICIPANTS insight that should be filtered
+            if insight_type == InsightType.PARTICIPANTS.value and not participants_enabled:
+                logger.debug(
+                    f"Filtering PARTICIPANTS insight for content type with participants_enabled=False: "
+                    f"{item.get('insight_text', '')[:50]}..."
+                )
+                continue  # Skip this insight
+            
+            # Parse and validate continuation_of and correction_of
+            continuation_of_raw = item.get("continuation_of")
+            correction_of_raw = item.get("correction_of")
+            
+            continuation_of = self._parse_reference_id(continuation_of_raw, "continuation_of")
+            correction_of = self._parse_reference_id(correction_of_raw, "correction_of")
+            
+            # Validate against prior insights if available
+            if prior_insights is not None:
+                continuation_of = self._validate_insight_reference(
+                    continuation_of, prior_insights, "continuation_of"
+                )
+                correction_of = self._validate_insight_reference(
+                    correction_of, prior_insights, "correction_of"
+                )
+            
+            # Assign ID using system function
+            insight_id = self._window_manager._get_next_insight_id()
+            
+            # Create WindowInsight with system-assigned ID
+            insight = WindowInsight(
+                insight_id=insight_id,
+                insight_type=item.get("insight_type", "NOTES"),
+                insight_text=item.get("insight_text", ""),
+                confidence=item.get("confidence", 0.0),
+                window_id=window_id,
+                timestamp_start=window_start,
+                timestamp_end=window_end,
+                classification=item.get("classification", "~"),
+                continuation_of=continuation_of,
+                correction_of=correction_of,
+            )
+            
+            # Add insight to window via WindowManager
+            result = self._window_manager.add_insight_to_window(window_id, insight)
+            if result == -1:
+                logger.error(
+                    f"Failed to add insight {insight_id} (type={insight.insight_type}) to window {window_id}. "
+                    f"Insight text: {insight.insight_text[:100]}..."
+                )
+            
+            # Use as_dict() for clean export to summary
+            insights_for_summary.append(insight.as_dict())
+        
+        # Update parsed_data with assigned insight_ids
+        if is_list_format:
+            # Return list format
+            return insights_for_summary
+        else:
+            # Return dict format
+            parsed_data["insights"] = insights_for_summary
+            return parsed_data
+    
+    async def process_result(
+        self,
+        summary_text: str,
+        summary_window_id: int,
+        window_start: float,
+        window_end: float,
+        prior_insights: Optional[List[WindowInsight]] = None,
+        sentiment_enabled: bool = True,
+        participants_enabled: bool = True
+    ) -> Dict[str, Any]:
+        """
+        Process the LLM result: parse JSON, extract insights, and build final payload.
+        
+        Args:
+            summary_text: Raw JSON string from LLM response
+            summary_window_id: The window ID these insights belong to
+            window_start: Start timestamp of the window
+            window_end: End timestamp of the window
+            prior_insights: Optional list of prior insights for reference validation
+            sentiment_enabled: Whether to include SENTIMENT insights
+            participants_enabled: Whether to include PARTICIPANTS insights
+        
+        Returns:
+            Processed payload with summary_text and insights
+        """
+        # Parse the JSON from LLM response
+        try:
+            parsed_data = json.loads(summary_text)
+        except json.JSONDecodeError as e:
+            logger.error(f"Failed to parse summary JSON: {e}")
+            return {
+                "summary_text": "{}",
+                "insights": [],
+                "error": str(e)
+            }
+        
+        # Extract and process insights
+        processed_data = self._extract_insights(
+            parsed_data=parsed_data,
+            window_id=summary_window_id,
+            window_start=window_start,
+            window_end=window_end,
+            prior_insights=prior_insights,
+            sentiment_enabled=sentiment_enabled,
+            participants_enabled=participants_enabled
+        )
+        
+        # Build the final payload
+        payload = {
+            "summary_text": json.dumps(processed_data) if isinstance(processed_data, dict) else summary_text,
+            "insights": processed_data.get("insights", []) if isinstance(processed_data, dict) else processed_data,
+        }
+        
+        return payload
+
+
+__all__ = ["ContextSummaryTask", "InsightsResponseSchema"]

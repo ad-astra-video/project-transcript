@@ -122,7 +122,12 @@ async def load_model(**kwargs):
     # Summary params
     summary_base_url = params.get("summary_base_url", "http://byoc-transcription-vllm:5000/v1")
     summary_api_key = params.get("summary_api_key", "")
-    summary_model = params.get("summary_model", os.environ.get("LOCAL_SUMMARY_MODEL", ""))
+    summary_model = params.get("summary_model", os.environ.get("LOCAL_REASONING_MODEL", ""))
+    
+    # Rapid summary params
+    rapid_summary_base_url = params.get("rapid_summary_base_url", "http://byoc-transcription-vllm-rapid-summary:5050/v1")
+    rapid_summary_api_key = params.get("rapid_summary_api_key", "")
+    rapid_summary_model = params.get("rapid_summary_model", os.environ.get("LOCAL_RAPID_SUMMARY_MODEL", ""))
 
     # Init model
     STATE.whisper_client = WhisperClient(
@@ -139,7 +144,10 @@ async def load_model(**kwargs):
         api_key=summary_api_key,
         model=summary_model,
         send_monitoring_event_callback=PROCESSOR.send_monitoring_event if PROCESSOR else None,
-        send_data_callback=PROCESSOR.send_data if PROCESSOR else None
+        send_data_callback=PROCESSOR.send_data if PROCESSOR else None,
+        rapid_base_url=rapid_summary_base_url,
+        rapid_api_key=rapid_summary_api_key,
+        rapid_model=rapid_summary_model
     )
     
     # Initialize and detect model if needed
