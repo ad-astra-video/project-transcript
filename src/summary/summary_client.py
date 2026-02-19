@@ -52,13 +52,6 @@ class SummaryClient:
             send_monitoring_event_callback: Optional callback for sending monitoring events
             send_data_callback: Optional callback for sending data to client (async function that takes JSON string)
         """
-        self.reasoning_base_url = reasoning_base_url.rstrip("/")
-        self.reasoning_api_key = reasoning_api_key
-        self.reasoning_model = reasoning_model
-        self.rapid_base_url = rapid_base_url.rstrip("/")
-        self.rapid_api_key = rapid_api_key
-        self.rapid_model = rapid_model
-        
         # Window-based state management with configurable accumulation
         self._window_manager: WindowManager = WindowManager()
         # In-flight tracking for graceful shutdown
@@ -74,20 +67,15 @@ class SummaryClient:
 
         # Track last processed timestamp (global, not per-window)
         self._last_processed_timestamp: float = 0.0
-        
-        # Rapid summary client settings
-        self.rapid_base_url = rapid_base_url.rstrip("/")
-        self.rapid_api_key = rapid_api_key
-        self.rapid_model = rapid_model
-        
+                
         # LLM Manager for plugins - handles all LLM client creation
         self.llm = LLMManager(
-            fast_base_url=self.rapid_base_url,
-            fast_api_key=self.rapid_api_key,
-            reasoning_base_url=self.reasoning_base_url,
-            reasoning_api_key=self.reasoning_api_key,
-            rapid_model=self.rapid_model,
-            reasoning_model=self.reasoning_model,
+            fast_base_url=rapid_base_url,
+            fast_api_key=rapid_api_key,
+            reasoning_base_url=reasoning_base_url,
+            reasoning_api_key=reasoning_api_key,
+            rapid_model=rapid_model,
+            reasoning_model=reasoning_model,
         )
         
         # Initial summary delay configuration
@@ -225,45 +213,49 @@ class SummaryClient:
     
     def update_params(
         self,
-        base_url: Optional[str] = None,
-        api_key: Optional[str] = None,
-        model: Optional[str] = None,
-        max_tokens: Optional[int] = None,
-        temperature: Optional[float] = None,
-        system_prompt: Optional[str] = None,
+        reasoning_base_url: Optional[str] = None,
+        reasoning_api_key: Optional[str] = None,
+        reasoning_model: Optional[str] = None,
+        rapid_base_url: Optional[str] = None,
+        rapid_api_key: Optional[str] = None,
+        rapid_model: Optional[str] = None,
+        reasoning_max_tokens: Optional[int] = None,
+        rapid_max_tokens: Optional[int] = None,
+        reasoning_temperature: Optional[float] = None,
+        rapid_temperature: Optional[float] = None,
+        reasoning_system_prompt: Optional[str] = None,
+        rapid_system_prompt: Optional[str] = None,
         transcription_windows_per_summary_window: Optional[int] = None,
         raw_text_context_limit: Optional[int] = None,
-        initial_summary_delay_seconds: Optional[float] = None
+        initial_summary_delay_seconds: Optional[float] = None,
+        content_type_context_limit: Optional[int] = None
     ):
         """
         Update client parameters dynamically.
         
         Args:
-            base_url: New base URL for the API
-            api_key: New API key
-            model: New model name
-            max_tokens: New max tokens
-            temperature: New temperature
-            system_prompt: New system prompt
+            reasoning_base_url: New base URL for the reasoning API
+            reasoning_api_key: New API key for the reasoning API
+            reasoning_model: New model name for the reasoning API
+            rapid_base_url: New base URL for the rapid API
+            rapid_api_key: New API key for the rapid API
+            rapid_model: New model name for the rapid API
+            reasoning_max_tokens: New max tokens for the reasoning API
+            rapid_max_tokens: New max tokens for the rapid API
+            reasoning_temperature: New temperature for the reasoning API
+            rapid_temperature: New temperature for the rapid API
+            reasoning_system_prompt: New system prompt for the reasoning API
+            rapid_system_prompt: New system prompt for the rapid API
             transcription_windows_per_summary_window: New number of transcription windows per summary window
             raw_text_context_limit: New max characters for raw text in LLM context
             initial_summary_delay_seconds: New delay before first summary (default: 10.0)
+            content_type_context_limit: New character limit for content type detection
         
         Note:
             message_format_mode is managed by LLMManager and cannot be updated here.
             Use LLMManager's message_format_mode property instead.
         """
-        if base_url is not None:
-            self.reasoning_base_url = base_url.rstrip("/")
-        if api_key is not None:
-            self.reasoning_api_key = api_key
-        # Allow setting model to None to re-fetch from /models
-        if model is not None:
-            self.reasoning_model = model
-        elif model is None:
-            # Explicitly allow setting model to None to re-fetch
-            self.reasoning_model = None
-        # message_format_mode is now managed by LLMManager - do not set here
+        # Values SummaryClient uses - update directly
         if transcription_windows_per_summary_window is not None:
             self._window_manager.transcription_windows_per_summary_window = transcription_windows_per_summary_window
         if raw_text_context_limit is not None:
@@ -273,7 +265,34 @@ class SummaryClient:
             self.initial_summary_delay_seconds = initial_summary_delay_seconds
             logger.info(f"Updated initial_summary_delay_seconds to {initial_summary_delay_seconds}")
         
-        logger.info(f"SummaryClient params updated: reasoning_base_url={self.reasoning_base_url}, reasoning_model={self.reasoning_model}")
+        # Pass to LLMManager (sync call) - values SummaryClient doesn't store
+        self.llm.update_params(
+            reasoning_base_url=reasoning_base_url,
+            reasoning_api_key=reasoning_api_key,
+            reasoning_model=reasoning_model,
+            rapid_base_url=rapid_base_url,
+            rapid_api_key=rapid_api_key,
+            rapid_model=rapid_model,
+        )
+        
+        # Notify plugins directly (sync call) - call on_update_params if it exists
+        for plugin_name, plugin_instance in self._plugins.items():
+            if hasattr(plugin_instance, 'on_update_params'):
+                try:
+                    # Call the sync version - plugins handle both sync and async internally
+                    plugin_instance.on_update_params(
+                        reasoning_max_tokens=reasoning_max_tokens,
+                        rapid_max_tokens=rapid_max_tokens,
+                        reasoning_temperature=reasoning_temperature,
+                        rapid_temperature=rapid_temperature,
+                        reasoning_system_prompt=reasoning_system_prompt,
+                        initial_summary_delay_seconds=initial_summary_delay_seconds,
+                        content_type_context_limit=content_type_context_limit,
+                    )
+                except Exception as e:
+                    logger.warning(f"Failed to update params for plugin {plugin_name}: {e}")
+        
+        logger.info(f"SummaryClient params updated")
     
     def reset(self):
         """Reset all accumulated state for a new stream."""

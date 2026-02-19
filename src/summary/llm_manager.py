@@ -434,3 +434,74 @@ class LLMManager:
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": user_content}
         ]
+    
+    def update_params(
+        self,
+        reasoning_base_url: Optional[str] = None,
+        reasoning_api_key: Optional[str] = None,
+        reasoning_model: Optional[str] = None,
+        rapid_base_url: Optional[str] = None,
+        rapid_api_key: Optional[str] = None,
+        rapid_model: Optional[str] = None,
+    ):
+        """Update LLMManager parameters dynamically.
+        
+        Args:
+            reasoning_base_url: New base URL for the reasoning API
+            reasoning_api_key: New API key for the reasoning API
+            reasoning_model: New model name for the reasoning API
+            rapid_base_url: New base URL for the rapid API
+            rapid_api_key: New API key for the rapid API
+            rapid_model: New model name for the rapid API
+        """
+        # Update fast/rapid client settings
+        if rapid_base_url is not None:
+            self._fast_base_url = rapid_base_url.rstrip("/")
+            # Recreate the client with new base URL
+            self._fast_client = AsyncOpenAI(
+                api_key=self._fast_api_key or "dummy",
+                base_url=self._fast_base_url
+            )
+            logger.info(f"Updated rapid base URL to {self._fast_base_url}")
+        
+        if rapid_api_key is not None:
+            self._fast_api_key = rapid_api_key
+            # Recreate the client with new API key
+            self._fast_client = AsyncOpenAI(
+                api_key=self._fast_api_key or "dummy",
+                base_url=self._fast_base_url
+            )
+            logger.info("Updated rapid API key")
+        
+        if rapid_model is not None:
+            self._rapid_model = rapid_model
+            # Update the LLMClient if it exists
+            if self._rapid_llm_client is not None:
+                self._rapid_llm_client._model = rapid_model
+            logger.info(f"Updated rapid model to {rapid_model}")
+        
+        # Update reasoning client settings
+        if reasoning_base_url is not None:
+            self._reasoning_base_url = reasoning_base_url.rstrip("/")
+            # Recreate the client with new base URL
+            self._reasoning_client = AsyncOpenAI(
+                api_key=self._reasoning_api_key or "dummy",
+                base_url=self._reasoning_base_url
+            )
+            logger.info(f"Updated reasoning base URL to {self._reasoning_base_url}")
+        
+        if reasoning_api_key is not None:
+            self._reasoning_api_key = reasoning_api_key
+            # Recreate the client with new API key
+            self._reasoning_client = AsyncOpenAI(
+                api_key=self._reasoning_api_key or "dummy",
+                base_url=self._reasoning_base_url
+            )
+            logger.info("Updated reasoning API key")
+        
+        if reasoning_model is not None:
+            self._reasoning_model = reasoning_model
+            # Update the LLMClient if it exists
+            if self._reasoning_llm_client is not None:
+                self._reasoning_llm_client._model = reasoning_model
+            logger.info(f"Updated reasoning model to {reasoning_model}")

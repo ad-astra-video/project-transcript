@@ -43,15 +43,21 @@ class RapidSummaryTask:
         self,
         llm_client: LLMClient,
         rapid_summary_response_json_schema: Dict[str, Any] = None,
+        max_tokens: int = 500,
+        temperature: float = 0.3,
     ):
         """Initialize the rapid summary task.
         
         Args:
             llm_client: LLMClient for rapid summary LLM calls (includes model and message building)
             rapid_summary_response_json_schema: JSON schema for response validation
+            max_tokens: Maximum tokens to generate (default: 500)
+            temperature: Temperature for generation (default: 0.3)
         """
         self._llm_client = llm_client
         self.rapid_summary_response_json_schema = rapid_summary_response_json_schema if rapid_summary_response_json_schema is not None else self._rapid_summary_response_json_schema
+        self.max_tokens = max_tokens
+        self.temperature = temperature
     
     async def process_rapid_summary(self, text: str) -> str:
         """Process text through rapid summary LLM.
@@ -71,8 +77,8 @@ class RapidSummaryTask:
         reasoning, content, input_tokens, output_tokens = await self._llm_client.create_completion(
             system_prompt=RAPID_SUMMARY_SYSTEM_PROMPT,
             user_content=user_content,
-            temperature=0.3,
-            max_tokens=500,
+            temperature=self.temperature,
+            max_tokens=self.max_tokens,
             response_format={"type": "json_schema", "json_schema": {"name": "rapid_summary", "schema": self.rapid_summary_response_json_schema}}
         )
         

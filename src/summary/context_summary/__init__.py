@@ -4,7 +4,7 @@ Context summary task module.
 
 import logging
 from datetime import datetime, timezone
-from typing import Dict, Any, Callable, List
+from typing import Dict, Any, Callable, List, Optional
 
 from .task import ContextSummaryTask
 from .prompts import SYSTEM_PROMPT, SYSTEM_PROMPT_OUTPUT_CONSTRAINTS, CONTENT_TYPE_RULE_MODIFIERS
@@ -128,6 +128,38 @@ class ContextSummaryPlugin:
         return payload
 
 
+    def on_update_params(
+        self,
+        reasoning_max_tokens: Optional[int] = None,
+        reasoning_temperature: Optional[float] = None,
+        reasoning_system_prompt: Optional[str] = None,
+        initial_summary_delay_seconds: Optional[float] = None,
+    ):
+        """Handle on_update_params event from SummaryClient.
+        
+        Args:
+            reasoning_max_tokens: New max tokens for reasoning API
+            reasoning_temperature: New temperature for reasoning API
+            reasoning_system_prompt: New system prompt for reasoning API
+            initial_summary_delay_seconds: New delay before first summary
+        """
+        if reasoning_max_tokens is not None:
+            self._task.max_tokens = reasoning_max_tokens
+            logger.info(f"Updated reasoning_max_tokens to {reasoning_max_tokens}")
+        
+        if reasoning_temperature is not None:
+            self._task.temperature = reasoning_temperature
+            logger.info(f"Updated reasoning_temperature to {reasoning_temperature}")
+        
+        if reasoning_system_prompt is not None:
+            self._task.system_prompt = reasoning_system_prompt
+            logger.info("Updated reasoning_system_prompt")
+        
+        if initial_summary_delay_seconds is not None:
+            self._initial_summary_delay_seconds = initial_summary_delay_seconds
+            logger.info(f"Updated initial_summary_delay_seconds to {initial_summary_delay_seconds}")
+
+
 def init_plugin(plugin_name: str, window_manager, llm, result_callback: Callable, summary_client=None):
     """Initialize the plugin and register with summary_client."""
     initial_delay = summary_client.initial_summary_delay_seconds if summary_client else 0.0
@@ -146,7 +178,8 @@ def init_plugin(plugin_name: str, window_manager, llm, result_callback: Callable
             plugin_instance=plugin_instance,
             events={
                 "summary_window_available": plugin_instance.process,
-                "on_content_type_detected": plugin_instance.handle_content_type_detected
+                "on_content_type_detected": plugin_instance.handle_content_type_detected,
+                "on_update_params": plugin_instance.on_update_params
             }
         )
 

@@ -23,7 +23,7 @@ sys.path.insert(0, str(src_path))
 
 from diarization.diarization_client import DiarizationClient, DiarizationResult, SpeakerSegment
 from transcription.whisper_client import WhisperClient, TranscriptionSegment, WordTimestamp
-from summary.summary_client import SummaryClient, SummarySegment
+from summary.summary_client import SummaryClient
 from pytrickle import StreamProcessor
 from pytrickle import AudioFrame
 import numpy as np
@@ -140,9 +140,9 @@ async def load_model(**kwargs):
 
     # Initialize summary client
     STATE.summary_client = SummaryClient(
-        base_url=summary_base_url,
-        api_key=summary_api_key,
-        model=summary_model,
+        reasoning_base_url=summary_base_url,
+        reasoning_api_key=summary_api_key,
+        reasoning_model=summary_model,
         send_monitoring_event_callback=PROCESSOR.send_monitoring_event if PROCESSOR else None,
         send_data_callback=PROCESSOR.send_data if PROCESSOR else None,
         rapid_base_url=rapid_summary_base_url,
@@ -758,11 +758,17 @@ async def update_params(params: dict):
     if "summary_base_url" in params or "summary_api_key" in params or "summary_model" in params:
         if STATE.summary_client is not None:
             STATE.summary_client.update_params(
-                base_url=params.get("summary_base_url"),
-                api_key=params.get("summary_api_key"),
-                model=params.get("summary_model"),
+                reasoning_base_url=params.get("summary_base_url"),
+                reasoning_api_key=params.get("summary_api_key"),
+                reasoning_model=params.get("summary_model"),
             )
-    
+    if "rapid_base_url" in params or "rapid_api_key" in params or "rapid_model" in params:
+        if STATE.summary_client is not None:
+            STATE.summary_client.update_params(
+                rapid_base_url=params.get("rapid_base_url"),
+                rapid_api_key=params.get("rapid_api_key"),
+                rapid_model=params.get("rapid_model"),
+            )
     # Initial summary delay parameter
     if "initial_summary_delay_seconds" in params:
         delay = float(params["initial_summary_delay_seconds"])

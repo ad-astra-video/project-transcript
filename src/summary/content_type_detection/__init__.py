@@ -4,7 +4,7 @@ Content type detection task module.
 
 import logging
 from datetime import datetime, timezone
-from typing import Dict, Any, Callable
+from typing import Dict, Any, Callable, Optional
 
 from .task import ContentTypeDetectionTask
 from .prompts import CONTENT_TYPE_DETECTION_PROMPT
@@ -132,6 +132,33 @@ class ContentTypeDetectionPlugin:
             return payload
         finally:
             self._in_progress = False
+    
+    def on_update_params(
+        self,
+        reasoning_max_tokens: Optional[int] = None,
+        reasoning_temperature: Optional[float] = None,
+        content_type_context_limit: Optional[int] = None,
+    ):
+        """Handle on_update_params event from SummaryClient.
+        
+        Args:
+            reasoning_max_tokens: New max tokens for reasoning API
+            reasoning_temperature: New temperature for reasoning API
+            content_type_context_limit: New character limit for content type detection
+        """
+        if reasoning_max_tokens is not None:
+            self._max_tokens = reasoning_max_tokens
+            self._task.max_tokens = reasoning_max_tokens
+            logger.info(f"Updated reasoning_max_tokens to {reasoning_max_tokens}")
+        
+        if reasoning_temperature is not None:
+            self._temperature = reasoning_temperature
+            self._task.temperature = reasoning_temperature
+            logger.info(f"Updated reasoning_temperature to {reasoning_temperature}")
+        
+        if content_type_context_limit is not None:
+            self._content_type_context_limit = content_type_context_limit
+            logger.info(f"Updated content_type_context_limit to {content_type_context_limit}")
 
 
 def init_plugin(plugin_name: str, window_manager, llm_manager, result_callback: Callable, summary_client=None):
@@ -150,7 +177,8 @@ def init_plugin(plugin_name: str, window_manager, llm_manager, result_callback: 
             plugin_name=plugin_name,
             plugin_instance=plugin_instance,
             events={
-                "summary_window_available": plugin_instance.process
+                "summary_window_available": plugin_instance.process,
+                "on_update_params": plugin_instance.on_update_params
             }
         )
 

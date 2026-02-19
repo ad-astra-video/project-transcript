@@ -103,6 +103,26 @@ class RapidSummaryPlugin:
             return {}
 
 
+    def on_update_params(
+        self,
+        rapid_max_tokens: Optional[int] = None,
+        rapid_temperature: Optional[float] = None,
+    ):
+        """Handle on_update_params event from SummaryClient.
+        
+        Args:
+            rapid_max_tokens: New max tokens for rapid summary API
+            rapid_temperature: New temperature for rapid summary API
+        """
+        if rapid_max_tokens is not None:
+            self._task.max_tokens = rapid_max_tokens
+            logger.info(f"Updated rapid_max_tokens to {rapid_max_tokens}")
+        
+        if rapid_temperature is not None:
+            self._task.temperature = rapid_temperature
+            logger.info(f"Updated rapid_temperature to {rapid_temperature}")
+
+
 def init_plugin(plugin_name: str, window_manager, llm, result_callback: Callable, summary_client=None):
     """Initialize the plugin and register with summary_client."""
     global _window_manager, _summary_client, _result_callback
@@ -123,7 +143,8 @@ def init_plugin(plugin_name: str, window_manager, llm, result_callback: Callable
             plugin_name=plugin_name,
             plugin_instance=plugin_instance,
             events={
-                "summary_window_available": plugin_instance.process
+                "summary_window_available": plugin_instance.process,
+                "on_update_params": plugin_instance.on_update_params
             }
         )
 
