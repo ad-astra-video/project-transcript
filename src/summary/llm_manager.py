@@ -363,7 +363,10 @@ class LLMManager:
                     api_key=self._reasoning_api_key
                 )
                 logger.info(f"Auto-detected reasoning model: {self._reasoning_model}")
-                detected += f", {self._reasoning_model}"
+                if detected is None:
+                    detected = self._reasoning_model
+                else:
+                    detected += f", {self._reasoning_model}"
             except Exception as e:
                 logger.warning(f"Failed to auto-detect reasoning model: {e}")
                 raise RuntimeError(f"Failed to auto-detect reasoning model: {e}")
