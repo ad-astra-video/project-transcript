@@ -131,7 +131,7 @@ class SummaryClient:
                         module.init_plugin(
                             plugin_name=entry,
                             window_manager=self._window_manager,
-                            llm=self.llm,
+                            llm_manager=self.llm,
                             result_callback=self._queue_payload,
                             summary_client=self,
                         )
@@ -328,12 +328,12 @@ class SummaryClient:
             self._sender_task = asyncio.create_task(self._summary_sender_task())
             logger.info("Started summary sender task")
     
-    async def stop(self, timeout: float = 5.0):
+    async def stop(self, timeout: float = 240.0):
         """
         Stop all worker and sender tasks gracefully.
         
         Args:
-            timeout: Maximum seconds to wait for workers to complete
+            timeout: Maximum seconds to wait for workers to complete (default: 240s / 4 minutes)
         """
         # Signal workers to stop
         self._shutdown_requested = True

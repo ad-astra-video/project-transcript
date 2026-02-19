@@ -298,6 +298,17 @@ class ContextSummaryTask:
             logger.info(f"process_context_summary received response, length={len(summary_text)}, input_tokens={input_tokens}")
             self._last_summary_raw_response = summary_text_raw
             
+            # Handle empty response from LLM
+            if not summary_text:
+                logger.warning("LLM returned empty response, returning empty insights")
+                return {
+                    "summary_text": "{}",
+                    "reasoning_content": reasoning_content,
+                    "input_tokens": input_tokens,
+                    "output_tokens": output_tokens,
+                    "insights": [],
+                }
+            
         except Exception as e:
             logger.error(f"Error calling LLM API: {e}")
             raise
@@ -332,10 +343,7 @@ class ContextSummaryTask:
             "output_tokens": output_tokens,
             "insights": processed.get("insights", []),
         }
-        
-        if result_callback is not None:
-            await result_callback(payload)
-        
+
         return payload
     
     def build_context(self, include_insights: bool = True) -> Tuple[str, List[Any], int, float]:

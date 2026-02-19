@@ -124,6 +124,8 @@ class ContextSummaryPlugin:
         }
         
         self._has_performed_summary = True
+        
+        # Send result via callback (like RapidSummaryPlugin does)
         await self._result_callback(payload)
         
         # Emit event with timestamp for other plugins (e.g., rapid_summary)

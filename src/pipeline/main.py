@@ -660,7 +660,7 @@ async def _handle_graceful_shutdown():
     
     # Phase 4: Wait for completion with timeout
     start_time = time.time()
-    timeout = 180.0
+    timeout = 300.0  # 5 minutes
     
     while time.time() - start_time < timeout:
         # Summary workers are already stopped in Phase 3 via SummaryClient.stop()
@@ -860,7 +860,7 @@ async def on_stream_stop():
         logger.info("Summary client stop requested")
         
         # Stop the workers gracefully
-        await STATE.summary_client.stop(timeout=5.0)
+        await STATE.summary_client.stop(timeout=240.0)
         workers_completed_at = datetime.now(timezone.utc).isoformat()
         wait_duration_seconds = (datetime.fromisoformat(workers_completed_at.replace('+00:00', '')) -
                                datetime.fromisoformat(stop_requested_at.replace('+00:00', ''))).total_seconds()
@@ -928,14 +928,15 @@ if __name__ == "__main__":
         format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
     )
 
-    loop = asyncio.get_event_loop()
-    loop.run_until_complete(load_model())
+    #loop = asyncio.get_event_loop()
+    #loop.run_until_complete(load_model())
 
     port = int(os.getenv("PORT", "8000"))
     logger.info("Starting StreamProcessor on port %d", port)
     # Instantiate global processor so helper funcs can send data
     PROCESSOR = StreamProcessor(
         audio_processor=process_audio_async,
+        model_loader=load_model,
         param_updater=update_params,
         on_stream_start=on_stream_start,
         on_stream_stop=on_stream_stop,
