@@ -26,6 +26,9 @@ class RapidSummaryPlugin:
         self._result_callback = result_callback
         self._summary_client = summary_client  # Keep for non-LLM operations
         
+        # Track the highest context_summary timestamp (for out-of-order windows)
+        self._context_summary_timestamp: float = 0.0
+        
         # Create task once at init and reuse for all processing
         self._task = RapidSummaryTask(
             llm_client=self._llm.rapid_llm_client,
@@ -58,10 +61,14 @@ class RapidSummaryPlugin:
         if not self._llm.fast_client:
             return {}
         
-        # Get context for rapid summary - need to get from somewhere
-        # For now, pass empty context - plugins can enhance this
-        rapid_context = ""
-        rapid_window_ids = []
+        # Get context from tracked timestamp forward (set by on_context_summary_complete event)
+        if self._context_summary_timestamp > 0:
+            rapid_context, rapid_window_ids = self._window_manager.get_text_and_window_ids_since_timestamp(
+                self._context_summary_timestamp
+            )
+        else:
+            rapid_context = ""
+            rapid_window_ids = []
         
         # Get the summary window by accessing _windows directly
         window = self._get_window_by_id(summary_window_id)
@@ -93,9 +100,6 @@ class RapidSummaryPlugin:
                 transcription_window_ids=transcription_window_ids
             )
             
-            # Update tracker so next rapid summary knows what text has been processed
-            self._summary_client._update_context_summary_tracker(window_end)
-            
             await result_callback(result)
             return result
         except Exception as e:
@@ -103,6 +107,19 @@ class RapidSummaryPlugin:
             return {}
 
 
+    async def handle_context_summary_complete(self, summary_window_id: int, timestamp: float):
+        """Handle on_context_summary_complete event from context_summary plugin.
+        
+        Track the highest timestamp since windows can arrive out of order.
+        
+        Args:
+            summary_window_id: The ID of the processed summary window
+            timestamp: The window_end timestamp from context_summary
+        """
+        if timestamp > self._context_summary_timestamp:
+            self._context_summary_timestamp = timestamp
+            logger.debug(f"Updated context summary timestamp to {timestamp}")
+    
     def on_update_params(
         self,
         fast_max_tokens: Optional[int] = None,
@@ -121,6 +138,11 @@ class RapidSummaryPlugin:
         if fast_temperature is not None:
             self._task.temperature = fast_temperature
             logger.info(f"Updated fast_temperature to {fast_temperature}")
+    
+    def reset(self):
+        """Reset tracked timestamp for new stream."""
+        self._context_summary_timestamp = 0.0
+        logger.debug("RapidSummaryPlugin reset - context timestamp cleared")
 
 
 def init_plugin(plugin_name: str, window_manager, llm, result_callback: Callable, summary_client=None):
@@ -144,6 +166,7 @@ def init_plugin(plugin_name: str, window_manager, llm, result_callback: Callable
             plugin_instance=plugin_instance,
             events={
                 "summary_window_available": plugin_instance.process,
+                "on_context_summary_complete": plugin_instance.handle_context_summary_complete,
                 "on_update_params": plugin_instance.on_update_params
             }
         )

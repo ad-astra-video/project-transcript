@@ -125,6 +125,15 @@ class ContextSummaryPlugin:
         
         self._has_performed_summary = True
         await self._result_callback(payload)
+        
+        # Emit event with timestamp for other plugins (e.g., rapid_summary)
+        if self._summary_client:
+            await self._summary_client._notify_plugins(
+                "on_context_summary_complete",
+                summary_window_id=summary_window_id,
+                timestamp=window_end
+            )
+        
         return payload
 
 
