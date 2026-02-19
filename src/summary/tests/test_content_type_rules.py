@@ -4,7 +4,7 @@ Unit tests for content type rule modifiers.
 
 import pytest
 from src.summary.summary_client import SummaryClient
-from src.summary.prompts import CONTENT_TYPE_RULE_MODIFIERS
+from src.summary.context_summary.prompts import CONTENT_TYPE_RULE_MODIFIERS
 
 
 class TestContentTypeRuleModifiersUpdated:
@@ -104,32 +104,53 @@ class TestContentTypeRiskGuidance:
     
     def test_format_content_type_rules_includes_risk_guidance(self):
         """Test that _format_content_type_rules includes RISK guidance."""
-        client = SummaryClient(api_key="test_key", model="test_model")
+        from src.summary.context_summary.task import ContextSummaryTask
+        from unittest.mock import MagicMock
+        
+        # Create a mock LLM client
+        mock_llm_client = MagicMock()
+        
+        # Create task instance
+        task = ContextSummaryTask(llm_client=mock_llm_client)
         
         # Test GENERAL_MEETING
         rules = CONTENT_TYPE_RULE_MODIFIERS["GENERAL_MEETING"]
-        formatted = client._format_content_type_rules("GENERAL_MEETING")
+        formatted = task._format_content_type_rules("GENERAL_MEETING")
         
         assert "RISK Definition" in formatted or "RISK" in formatted
         assert rules["risk_guidance"] in formatted or "project blockers" in formatted.lower()
     
     def test_format_content_type_rules_includes_key_point_guidance(self):
         """Test that _format_content_type_rules includes KEY POINT guidance when present."""
-        client = SummaryClient(api_key="test_key", model="test_model")
+        from src.summary.context_summary.task import ContextSummaryTask
+        from unittest.mock import MagicMock
+        
+        # Create a mock LLM client
+        mock_llm_client = MagicMock()
+        
+        # Create task instance
+        task = ContextSummaryTask(llm_client=mock_llm_client)
         
         # Test TECHNICAL_TALK which has key_point_guidance
         rules = CONTENT_TYPE_RULE_MODIFIERS["TECHNICAL_TALK"]
-        formatted = client._format_content_type_rules("TECHNICAL_TALK")
+        formatted = task._format_content_type_rules("TECHNICAL_TALK")
         
         assert "KEY POINT Guidance" in formatted
         assert rules["key_point_guidance"] in formatted
     
     def test_format_content_type_rules_handles_missing_guidance(self):
         """Test that _format_content_type_rules handles content types without extra guidance."""
-        client = SummaryClient(api_key="test_key", model="test_model")
+        from src.summary.context_summary.task import ContextSummaryTask
+        from unittest.mock import MagicMock
+        
+        # Create a mock LLM client
+        mock_llm_client = MagicMock()
+        
+        # Create task instance
+        task = ContextSummaryTask(llm_client=mock_llm_client)
         
         # Test NEWS_UPDATE which has risk_guidance but no key_point_guidance
-        formatted = client._format_content_type_rules("NEWS_UPDATE")
+        formatted = task._format_content_type_rules("NEWS_UPDATE")
         
         assert "NEWS_UPDATE" in formatted
         assert "RISK Definition" in formatted or "NEWS_UPDATE" in formatted
@@ -189,14 +210,21 @@ class TestContentTypeParticipantsEnabled:
     
     def test_format_content_type_rules_includes_participants_tracking(self):
         """Test that _format_content_type_rules includes participant tracking status."""
-        client = SummaryClient(api_key="test_key", model="test_model")
+        from src.summary.context_summary.task import ContextSummaryTask
+        from unittest.mock import MagicMock
+        
+        # Create a mock LLM client
+        mock_llm_client = MagicMock()
+        
+        # Create task instance
+        task = ContextSummaryTask(llm_client=mock_llm_client)
         
         # Test GENERAL_MEETING (enabled)
-        formatted = client._format_content_type_rules("GENERAL_MEETING")
+        formatted = task._format_content_type_rules("GENERAL_MEETING")
         assert "Participant Tracking: ENABLED" in formatted
         
         # Test NEWS_UPDATE (disabled)
-        formatted = client._format_content_type_rules("NEWS_UPDATE")
+        formatted = task._format_content_type_rules("NEWS_UPDATE")
         assert "Participant Tracking: DISABLED" in formatted
 
 

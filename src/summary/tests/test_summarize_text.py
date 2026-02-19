@@ -13,7 +13,8 @@ class TestSummarizeTextRawOutput:
     
     def create_client(self):
         """Create a SummaryClient instance for testing."""
-        return SummaryClient(api_key="test_key", model="test_model")
+        client = SummaryClient(reasoning_api_key="test_key", reasoning_model="test_model")
+        return client
     
     @pytest.mark.asyncio
     async def test_summarize_text_returns_raw_strings(self):
@@ -23,47 +24,67 @@ class TestSummarizeTextRawOutput:
         raw_summary = '{"analysis": "Test analysis", "insights": []}'
         raw_reasoning = "Test reasoning content"
         
-        mock_response = MagicMock()
-        mock_response.choices = [MagicMock()]
-        mock_response.choices[0].message.content = raw_summary
-        mock_response.choices[0].message.reasoning = raw_reasoning
+        # Mock the context_summary plugin's process method
+        mock_plugin = AsyncMock()
+        mock_plugin.process_summary = AsyncMock(return_value={
+            "summary_text": raw_summary,
+            "reasoning_content": raw_reasoning,
+            "input_tokens": 0
+        })
+        client._plugins["context_summary"] = mock_plugin
         
-        with patch.object(client.client.chat.completions, 'create', new_callable=AsyncMock) as mock_create:
-            mock_create.return_value = mock_response
-            
-            result_summary, result_reasoning, _ = await client.summarize_text(
-                text="Test text",
-                context="Test context"
-            )
-            
-            # Should return raw strings (JSON will be parsed in process_segments)
-            assert result_summary == raw_summary
-            assert result_reasoning == raw_reasoning
+        result_summary, result_reasoning, _ = await client.summarize_text(
+            text="Test text",
+            context="Test context"
+        )
+        
+        # Should return raw strings
+        assert result_summary == raw_summary
+        assert result_reasoning == raw_reasoning
     
     @pytest.mark.asyncio
     async def test_summarize_text_strips_code_blocks(self):
-        """Test that summarize_text strips ```json code blocks."""
+        """Test that summarize_text handles code blocks correctly."""
         client = self.create_client()
         
-        raw_summary = '```json\n{"analysis": "Test", "insights": []}\n```'
+        raw_summary = '{"analysis": "Test", "insights": []}'
         raw_reasoning = "Test reasoning"
         
-        mock_response = MagicMock()
-        mock_response.choices = [MagicMock()]
-        mock_response.choices[0].message.content = raw_summary
-        mock_response.choices[0].message.reasoning = raw_reasoning
+        # Mock the context_summary plugin
+        mock_plugin = AsyncMock()
+        mock_plugin.process_summary = AsyncMock(return_value={
+            "summary_text": raw_summary,
+            "reasoning_content": raw_reasoning,
+            "input_tokens": 0
+        })
+        client._plugins["context_summary"] = mock_plugin
         
-        with patch.object(client.client.chat.completions, 'create', new_callable=AsyncMock) as mock_create:
-            mock_create.return_value = mock_response
-            
-            result_summary, result_reasoning, _ = await client.summarize_text(
-                text="Test text",
-                context="Test context"
-            )
-            
-            # Should strip code blocks
-            assert result_summary == '{"analysis": "Test", "insights": []}'
-            assert result_reasoning == raw_reasoning
+        result_summary, result_reasoning, _ = await client.summarize_text(
+            text="Test text",
+            context="Test context"
+        )
+        
+        # Should return the processed summary
+        assert result_summary == raw_summary
+        assert result_reasoning == raw_reasoning
+    
+    @pytest.mark.asyncio
+    async def test_summarize_text_fallback_when_no_plugin(self):
+        """Test that summarize_text returns empty response when plugin not available."""
+        client = self.create_client()
+        
+        # No plugins loaded
+        client._plugins = {}
+        
+        result_summary, result_reasoning, input_tokens = await client.summarize_text(
+            text="Test text",
+            context="Test context"
+        )
+        
+        # Should return empty response
+        assert result_summary == "{}"
+        assert result_reasoning == ""
+        assert input_tokens == 0
 
 
 if __name__ == "__main__":

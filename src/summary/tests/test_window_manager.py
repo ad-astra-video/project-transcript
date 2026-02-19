@@ -3,7 +3,7 @@ Unit tests for WindowManager functionality.
 """
 
 import pytest
-from src.summary.summary_client import WindowManager
+from src.summary.window_manager import WindowManager
 
 
 class TestWindowManager:
@@ -14,7 +14,7 @@ class TestWindowManager:
         manager = WindowManager()
         assert manager._first_window_timestamp is None
         
-        manager.add_window("test text 1", 10.0, 15.0)
+        manager.add_summary_window("test text 1", 10.0, 15.0, [])
         
         assert manager._first_window_timestamp == 10.0
     
@@ -22,10 +22,10 @@ class TestWindowManager:
         """Test that _first_window_timestamp is not updated on subsequent windows."""
         manager = WindowManager()
         
-        manager.add_window("test text 1", 10.0, 15.0)
+        manager.add_summary_window("test text 1", 10.0, 15.0, [])
         first_timestamp = manager._first_window_timestamp
         
-        manager.add_window("test text 2", 20.0, 25.0)
+        manager.add_summary_window("test text 2", 20.0, 25.0, [])
         
         assert manager._first_window_timestamp == first_timestamp
     
@@ -33,9 +33,9 @@ class TestWindowManager:
         """Test first window timestamp tracking with multiple windows."""
         manager = WindowManager()
         
-        manager.add_window("first window", 5.0, 10.0)
-        manager.add_window("second window", 15.0, 20.0)
-        manager.add_window("third window", 25.0, 30.0)
+        manager.add_summary_window("first window", 5.0, 10.0, [])
+        manager.add_summary_window("second window", 15.0, 20.0, [])
+        manager.add_summary_window("third window", 25.0, 30.0, [])
         
         assert manager._first_window_timestamp == 5.0
 
@@ -48,8 +48,8 @@ class TestWindowManagerReset:
         manager = WindowManager()
         
         # Add some windows and insights
-        manager.add_window("text1", 0.0, 5.0)
-        manager.add_window("text2", 5.0, 10.0)
+        manager.add_summary_window("text1", 0.0, 5.0, [])
+        manager.add_summary_window("text2", 5.0, 10.0, [])
         manager._next_insight_id = 5  # Simulate some insights
         
         # Verify initial state
@@ -73,7 +73,7 @@ class TestWindowManagerReset:
         assert manager._next_window_id == 0
         assert manager._next_insight_id == 0
         assert manager._first_window_timestamp is None
-        assert len(manager._windows) == 0
+        assert len(manager._summary_windows) == 0
         
         # Clear empty manager
         manager.clear()
@@ -88,7 +88,7 @@ class TestWindowManagerReset:
         manager = WindowManager()
         
         # Add a window to set first timestamp
-        manager.add_window("test text", 10.0, 15.0)
+        manager.add_summary_window("test text", 10.0, 15.0, [])
         assert manager._first_window_timestamp == 10.0
         
         # Clear

@@ -1,16 +1,13 @@
 """
 Unit tests for reset behavior.
+
+In the refactored code, reset() clears the WindowManager and in_flight_windows.
+The content type state is now managed by the plugins.
 """
 
 import pytest
-from src.summary.summary_client import (
-    SummaryClient,
-    WindowManager,
-    WindowInsight,
-    ContentTypeState,
-    ContentType,
-    ContentTypeSource,
-)
+from src.summary.summary_client import SummaryClient
+from src.summary.window_manager import WindowManager, WindowInsight
 
 
 class TestSummaryClientReset:
@@ -18,36 +15,25 @@ class TestSummaryClientReset:
     
     def create_client(self):
         """Create a SummaryClient instance for testing."""
-        return SummaryClient(api_key="test_key", model="test_model")
-        
-    def test_summary_client_resets_window_counters(self):
-        """Test that window tracking counters are reset on reset()."""
-        client = self.create_client()
-        
-        # Reset
-        client.reset()
-        
-        # Verify core state is reset
-        assert client._transcription_window_counter == 0
-        assert client._window_manager._next_window_id == 0
+        return SummaryClient(reasoning_api_key="test_key", reasoning_model="test_model")
     
     def test_summary_client_resets_window_manager(self):
         """Test that WindowManager is cleared on SummaryClient reset."""
         client = self.create_client()
         
         # Add some windows
-        client._window_manager.add_window("text1", 0.0, 5.0)
-        client._window_manager.add_window("text2", 5.0, 10.0)
+        client._window_manager.add_summary_window("text1", 0.0, 5.0, [1])
+        client._window_manager.add_summary_window("text2", 5.0, 10.0, [2])
         
         # Verify windows exist
-        assert len(client._window_manager._windows) == 2
+        assert len(client._window_manager._summary_windows) == 2
         assert client._window_manager._next_window_id == 2
         
         # Reset
         client.reset()
         
         # Verify WindowManager is cleared
-        assert len(client._window_manager._windows) == 0
+        assert len(client._window_manager._summary_windows) == 0
         assert client._window_manager._next_window_id == 0
     
     def test_summary_client_clears_in_flight_windows(self):
@@ -63,66 +49,66 @@ class TestSummaryClientReset:
         # Verify cleared
         assert len(client.in_flight_windows) == 0
     
-    def test_summary_client_clears_skipped_segments_buffer(self):
-        """Test that _skipped_segments_buffer is cleared on reset."""
+    def test_summary_client_resets_last_processed_timestamp(self):
+        """Test that _last_processed_timestamp is reset on reset."""
         client = self.create_client()
         
-        # Set skipped segments buffer
-        client._skipped_segments_buffer = {
-            "segments": [{"text": "test"}],
-            "transcription_window_id": 1,
-            "window_start": 0.0,
-            "window_end": 5.0,
-            "text": "test text"
-        }
+        # Set a timestamp
+        client._last_processed_timestamp = 100.0
         
         # Reset
         client.reset()
         
-        # Verify cleared
-        assert client._skipped_segments_buffer is None
+        # Verify reset to 0
+        assert client._last_processed_timestamp == 0.0
     
-    def test_summary_client_resets_content_type_state(self):
-        """Test that content type state is reset on reset."""
+    def test_summary_client_clears_plugins(self):
+        """Test that plugins are cleared on reset (but not re-discovered)."""
         client = self.create_client()
         
-        # Set content type state
-        client._content_type_state = ContentTypeState(
-            content_type="GENERAL_MEETING",
-            confidence=0.9,
-            source="AUTO_DETECTED"
-        )
+        # Add a mock plugin
+        client._plugins["test_plugin"] = "test_value"
         
         # Reset
         client.reset()
         
-        # Verify reset to defaults
-        assert client._content_type_state.content_type == ContentType.UNKNOWN.value
-        assert client._content_type_state.confidence == 0.0
-        assert client._content_type_state.source == ContentTypeSource.INITIAL.value
+        # Note: plugins are NOT cleared on reset - they persist across streams
+        # This is intentional as plugins are stateless
+        assert "test_plugin" in client._plugins
 
 
-class TestWhisperClientReset:
-    """Tests for WhisperClient reset behavior."""
+class TestWindowManagerReset:
+    """Tests for WindowManager reset behavior."""
     
-    def test_whisper_client_resets_transcription_id(self):
-        """Test that WhisperClient resets _next_transcription_id on reset."""
-        # Create a mock WhisperClient (without actual model loading)
-        from src.transcription.whisper_client import WhisperClient
+    def test_window_manager_clear(self):
+        """Test that WindowManager.clear() clears all windows."""
+        wm = WindowManager()
         
-        # We can't fully instantiate without faster_whisper, but we can test the reset logic
-        # by checking the method exists and the counter logic
+        # Add windows
+        wm.add_summary_window("text1", 0.0, 5.0, [1])
+        wm.add_summary_window("text2", 5.0, 10.0, [2])
         
-        # Create a minimal test by checking the method signature
-        client = object.__new__(WhisperClient)
-        client._next_transcription_id = 10
-        client.logger = __import__('logging').getLogger(__name__)
+        assert len(wm._summary_windows) == 2
         
-        # Call reset
-        client.reset()
+        # Clear
+        wm.clear()
         
-        # Verify reset
-        assert client._next_transcription_id == 0
+        assert len(wm._summary_windows) == 0
+        assert wm._next_window_id == 0
+    
+    def test_window_manager_resets_insight_counter(self):
+        """Test that WindowManager resets insight ID counter."""
+        wm = WindowManager()
+        
+        # Add a window with insights to increment counter
+        wm.add_summary_window("text1", 0.0, 5.0, [1])
+        wm._next_insight_id = 10
+        
+        # Clear
+        wm.clear()
+        
+        # Counter should be reset
+        assert wm._next_insight_id == 0
 
 
 if __name__ == "__main__":

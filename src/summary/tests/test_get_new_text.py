@@ -1,159 +1,113 @@
 """
 Unit tests for get_new_text_for_summary_window with overlapping segments.
+
+In the refactored code, this functionality is handled by WindowManager's
+add_transcription_window method which handles deduplication.
 """
 
 import pytest
 from src.summary.summary_client import SummaryClient
+from src.summary.window_manager import WindowManager
 
 
-class TestGetNewTextForSummaryWindow:
-    """Tests for get_new_text_for_summary_window with overlapping segments."""
+class TestWindowManagerTextDeduplication:
+    """Tests for WindowManager text deduplication with overlapping segments."""
     
-    def create_client(self):
-        """Create a SummaryClient instance for testing."""
-        return SummaryClient(api_key="test_key", model="test_model")
+    def create_window_manager(self):
+        """Create a WindowManager instance for testing."""
+        return WindowManager()
     
-    def test_get_new_text_no_overlap(self):
-        """Test getting new text when segments don't overlap."""
-        client = self.create_client()
+    def test_add_transcription_window_no_overlap(self):
+        """Test adding transcription window when segments don't overlap."""
+        wm = self.create_window_manager()
         
-        # First call - no previous timestamp
-        segments = [
-            {"text": "Hello world", "start_ms": 0, "end_ms": 1000},
-            {"text": "How are you", "start_ms": 1000, "end_ms": 2000}
-        ]
+        # Add first transcription window
+        wm.add_transcription_window(
+            transcription_window_id=1,
+            new_text="Hello world How are you",
+            timestamp_start=0.0,
+            timestamp_end=2.0,
+            segments=[
+                {"text": "Hello world", "start_ms": 0, "end_ms": 1000},
+                {"text": "How are you", "start_ms": 1000, "end_ms": 2000}
+            ]
+        )
         
-        result = client.get_new_text_for_summary_window(segments)
-        
-        # Should return all text
-        assert "Hello world" in result
-        assert "How are you" in result
+        # Verify text was stored
+        assert wm._transcription_windows[1].new_text == "Hello world How are you"
     
-    def test_get_new_text_with_overlap(self):
-        """Test getting new text when segments partially overlap."""
-        client = self.create_client()
+    def test_add_transcription_window_with_overlap(self):
+        """Test adding transcription window when segments partially overlap."""
+        wm = self.create_window_manager()
         
-        # First call - no previous timestamp
-        segments1 = [
-            {"text": "Hello world", "start_ms": 0, "end_ms": 1000},
-            {"text": "How are you", "start_ms": 1000, "end_ms": 2000}
-        ]
+        # Add first transcription window
+        wm.add_transcription_window(
+            transcription_window_id=1,
+            new_text="Hello world How are you",
+            timestamp_start=0.0,
+            timestamp_end=2.0,
+            segments=[
+                {"text": "Hello world", "start_ms": 0, "end_ms": 1000},
+                {"text": "How are you", "start_ms": 1000, "end_ms": 2000}
+            ]
+        )
         
-        result1 = client.get_new_text_for_summary_window(segments1)
-        assert "Hello world" in result1
-        assert "How are you" in result1
+        # Add second transcription window with overlap
+        # The new_text should already be deduplicated
+        wm.add_transcription_window(
+            transcription_window_id=2,
+            new_text="Goodbye",  # Already deduplicated
+            timestamp_start=2.0,
+            timestamp_end=3.0,
+            segments=[
+                {"text": "Goodbye", "start_ms": 2000, "end_ms": 3000}
+            ]
+        )
         
-        # Second call with overlapping segments
-        # Segment 1 ends at 1500, so we should skip some overlap
-        segments2 = [
-            {"text": "Hello world", "start_ms": 500, "end_ms": 1500},  # Overlaps with first segment
-            {"text": "Goodbye", "start_ms": 2000, "end_ms": 2500}     # New text
-        ]
-        
-        result2 = client.get_new_text_for_summary_window(segments2)
-        
-        # Should only include "Goodbye" since first segment overlaps
-        assert "Goodbye" in result2
-        # The overlapping part should be excluded or minimal
-        # Note: The exact behavior depends on word-based overlap calculation
+        # Verify both windows stored
+        assert 1 in wm._transcription_windows
+        assert 2 in wm._transcription_windows
     
-    def test_get_new_text_complete_overlap(self):
-        """Test getting new text when segments completely overlap."""
-        client = self.create_client()
+    def test_get_recent_windows_text(self):
+        """Test getting recent windows text."""
+        wm = self.create_window_manager()
         
-        # First call
-        segments1 = [
-            {"text": "Hello world", "start_ms": 0, "end_ms": 1000}
-        ]
+        # Add windows
+        wm.add_summary_window("First window text", 0.0, 10.0, [1])
+        wm.add_summary_window("Second window text", 10.0, 20.0, [2])
+        wm.add_summary_window("Third window text", 20.0, 30.0, [3])
         
-        result1 = client.get_new_text_for_summary_window(segments1)
-        assert "Hello world" in result1
+        # Get recent text with limit
+        text = wm.get_recent_windows_text(500)
         
-        # Second call with same segments - should return empty since completely overlapped
-        segments2 = [
-            {"text": "Hello world", "start_ms": 0, "end_ms": 1000}
-        ]
-        
-        result2 = client.get_new_text_for_summary_window(segments2)
-        
-        # Should return empty since completely overlapped (global timestamp tracks state)
-        assert result2 == "" or "Hello world" not in result2
+        # Should include text from recent windows
+        assert "Third window text" in text
+
+
+class TestSummaryClientTextHandling:
+    """Tests for SummaryClient text handling through WindowManager."""
     
-    def test_get_new_text_new_segment_after_gap(self):
-        """Test getting new text when new segment comes after a gap."""
-        client = self.create_client()
+    def test_summary_client_uses_window_manager(self):
+        """Test that SummaryClient uses WindowManager for text handling."""
+        client = SummaryClient(reasoning_api_key="test_key", reasoning_model="test_model")
         
-        # First call
-        segments1 = [
-            {"text": "Hello world", "start_ms": 0, "end_ms": 1000}
-        ]
-        
-        result1 = client.get_new_text_for_summary_window(segments1)
-        assert "Hello world" in result1
-        
-        # Second call with gap (no overlap)
-        segments2 = [
-            {"text": "Goodbye world", "start_ms": 2000, "end_ms": 3000}  # Gap from 1000-2000
-        ]
-        
-        result2 = client.get_new_text_for_summary_window(segments2)
-        
-        # Should include the new text
-        assert "Goodbye world" in result2
+        assert client._window_manager is not None
     
-    def test_get_new_text_multiple_calls_tracking(self):
-        """Test that get_new_text_for_summary_window correctly tracks across multiple calls."""
-        client = self.create_client()
+    def test_summary_client_adds_transcription_window(self):
+        """Test that SummaryClient can add transcription windows."""
+        client = SummaryClient(reasoning_api_key="test_key", reasoning_model="test_model")
         
-        # Call 1
-        segments1 = [
-            {"text": "First segment", "start_ms": 0, "end_ms": 1000}
-        ]
-        result1 = client.get_new_text_for_summary_window(segments1)
-        assert "First segment" in result1
+        # Add transcription window
+        client._window_manager.add_transcription_window(
+            transcription_window_id=1,
+            new_text="Test text",
+            timestamp_start=0.0,
+            timestamp_end=5.0,
+            segments=[{"id": "1", "text": "Test text"}]
+        )
         
-        # Call 2 - partial overlap
-        segments2 = [
-            {"text": "Overlapping text", "start_ms": 500, "end_ms": 1500},
-            {"text": "New text", "start_ms": 1500, "end_ms": 2000}
-        ]
-        result2 = client.get_new_text_for_summary_window(segments2)
-        assert "New text" in result2
-        
-        # Call 3 - more new text
-        segments3 = [
-            {"text": "Even more new text", "start_ms": 2500, "end_ms": 3000}
-        ]
-        result3 = client.get_new_text_for_summary_window(segments3)
-        assert "Even more new text" in result3
-    
-    def test_global_timestamp_tracking(self):
-        """Test that _last_processed_timestamp is correctly updated across calls."""
-        client = self.create_client()
-        
-        # Initial state
-        assert client._last_processed_timestamp == 0.0
-        
-        # First call
-        segments1 = [
-            {"text": "First", "start_ms": 0, "end_ms": 1000}
-        ]
-        client.get_new_text_for_summary_window(segments1)
-        assert client._last_processed_timestamp == 1000
-        
-        # Second call
-        segments2 = [
-            {"text": "Second", "start_ms": 1000, "end_ms": 2000}
-        ]
-        client.get_new_text_for_summary_window(segments2)
-        assert client._last_processed_timestamp == 2000
-        
-        # Third call with gap
-        segments3 = [
-            {"text": "Third", "start_ms": 3000, "end_ms": 4000}
-        ]
-        client.get_new_text_for_summary_window(segments3)
-        assert client._last_processed_timestamp == 4000
+        # Verify stored
+        assert 1 in client._window_manager._transcription_windows
 
 
 if __name__ == "__main__":

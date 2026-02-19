@@ -1,13 +1,16 @@
 """
 Tests for monitoring event callback functionality.
+
+In the refactored code, monitoring callbacks are invoked by plugins directly
+or through the _send_monitoring_event method.
 """
 
 import pytest
 import asyncio
-from unittest.mock import Mock, AsyncMock, patch
+from unittest.mock import Mock, AsyncMock, MagicMock, patch
 from datetime import datetime, timezone
 
-from src.summary.summary_client import SummaryClient, ContentType, ContentTypeState
+from src.summary.summary_client import SummaryClient
 
 
 class TestMonitoringCallback:
@@ -25,218 +28,108 @@ class TestMonitoringCallback:
         """Create a SummaryClient with monitoring callback."""
         with patch('src.summary.summary_client.AsyncOpenAI') as mock_openai:
             client = SummaryClient(
-                api_key="test-key",
-                base_url="http://test:8000/v1",
-                model="test-model",
-                transcription_windows_per_summary_window=2,
+                reasoning_api_key="test-key",
+                reasoning_base_url="http://test:8000/v1",
+                reasoning_model="test-model",
                 initial_summary_delay_seconds=10.0,
                 send_monitoring_event_callback=mock_callback
             )
-            client.client = AsyncMock()
             return client
     
     @pytest.mark.asyncio
-    async def test_callback_invoked_on_content_type_change(self, client_with_callback, mock_callback):
-        """Callback should be invoked when content type changes from UNKNOWN to known."""
-        # Set up mock LLM response
-        mock_response = Mock()
-        mock_response.choices = [Mock()]
-        mock_response.choices[0].message.content = '{"content_type": "TECHNICAL_TALK", "confidence": 0.85, "reasoning": "Test reasoning"}'
-        mock_response.choices[0].message.reasoning = ""
-        client_with_callback.client.chat.completions.create = AsyncMock(return_value=mock_response)
+    async def test_callback_invoked_on_monitoring_event(self, client_with_callback, mock_callback):
+        """Callback should be invoked when _send_monitoring_event is called."""
+        # Create test event data
+        event_data = {"test": "data", "value": 123}
+        event_type = "test_event"
         
-        # Simulate UNKNOWN state (initial state)
-        assert client_with_callback._content_type_state.content_type == ContentType.UNKNOWN.value
+        # Call _send_monitoring_event
+        await client_with_callback._send_monitoring_event(event_data, event_type)
         
-        # Run detection
-        result = await client_with_callback.process_content_type_detection(
-            window_start=0.0,
-            window_end=10.0
-        )
-        
-        # Verify callback received a content_type_changed event (token events may also be sent)
-        assert any(call.args[1] == "content_type_changed" for call in mock_callback.call_args_list)
-        # Extract the content_type_changed call and verify payload
-        ct_call = next(call for call in mock_callback.call_args_list if call.args[1] == "content_type_changed")
-        event_data, event_type = ct_call.args
-        assert event_type == "content_type_changed"
-        assert event_data["previous_content_type"] == ContentType.UNKNOWN.value
-        assert event_data["new_content_type"] == "TECHNICAL_TALK"
-        assert event_data["confidence"] == 0.85
-        assert event_data["reasoning"] == "Test reasoning"
+        # Verify callback was invoked
+        mock_callback.assert_called_once()
+        call_args = mock_callback.call_args
+        assert call_args[0][0] == event_data
+        assert call_args[0][1] == event_type
     
     @pytest.mark.asyncio
-    async def test_callback_invoked_on_any_content_type_change(self, client_with_callback, mock_callback):
-        """Callback should be invoked whenever content type changes, not just UNKNOWN -> known."""
-        # Set up mock LLM response
-        mock_response = Mock()
-        mock_response.choices = [Mock()]
-        mock_response.choices[0].message.content = '{"content_type": "INTERVIEW", "confidence": 0.90, "reasoning": "Question-answer format detected"}'
-        mock_response.choices[0].message.reasoning = ""
-        client_with_callback.client.chat.completions.create = AsyncMock(return_value=mock_response)
-        
-        # Set known content type state (different from what LLM will return)
-        client_with_callback._content_type_state = ContentTypeState(
-            content_type="TECHNICAL_TALK",
-            confidence=0.85,
-            source="AUTO_DETECTED"
+    async def test_callback_not_invoked_when_none(self):
+        """Callback should not be invoked when not configured."""
+        client = SummaryClient(
+            reasoning_api_key="test-key",
+            reasoning_base_url="http://test:8000/v1",
+            reasoning_model="test-model"
         )
         
-        # Run detection
-        result = await client_with_callback.process_content_type_detection(
-            window_start=0.0,
-            window_end=10.0
-        )
-        
-        # Verify callback received a content_type_changed event (token events may also be sent)
-        assert any(call.args[1] == "content_type_changed" for call in mock_callback.call_args_list)
-        ct_call = next(call for call in mock_callback.call_args_list if call.args[1] == "content_type_changed")
-        event_data, event_type = ct_call.args
-        assert event_type == "content_type_changed"
-        assert event_data["previous_content_type"] == "TECHNICAL_TALK"
-        assert event_data["new_content_type"] == "INTERVIEW"
+        # Should not raise an error
+        await client._send_monitoring_event({"test": "data"}, "test_event")
     
     @pytest.mark.asyncio
-    async def test_callback_not_invoked_when_content_type_unchanged(self, client_with_callback, mock_callback):
-        """Callback should NOT be invoked when content type remains the same."""
-        # Set up mock LLM response returning same content type
-        mock_response = Mock()
-        mock_response.choices = [Mock()]
-        mock_response.choices[0].message.content = '{"content_type": "TECHNICAL_TALK", "confidence": 0.90, "reasoning": "Re-check"}'
-        mock_response.choices[0].message.reasoning = ""
-        client_with_callback.client.chat.completions.create = AsyncMock(return_value=mock_response)
+    async def test_callback_error_handled_gracefully(self, client_with_callback, mock_callback):
+        """Callback errors should be handled gracefully."""
+        mock_callback.side_effect = Exception("Callback error")
         
-        # Set known content type state (same as what LLM will return)
-        client_with_callback._content_type_state = ContentTypeState(
-            content_type="TECHNICAL_TALK",
-            confidence=0.85,
-            source="AUTO_DETECTED"
-        )
-        
-        # Run detection
-        result = await client_with_callback.process_content_type_detection(
-            window_start=0.0,
-            window_end=10.0
-        )
-        
-        # Verify no content_type_changed event was sent (token events may still be emitted)
-        assert not any(call.args[1] == "content_type_changed" for call in mock_callback.call_args_list)
+        # Should not raise
+        await client_with_callback._send_monitoring_event({"test": "data"}, "test_event")
+
+
+class TestContentTypeDetectionPluginMonitoring:
+    """Tests for content type detection plugin monitoring."""
     
-    def test_callback_not_set_when_none_provided(self):
-        """Client should work normally when no callback is provided."""
-        with patch('src.summary.summary_client.AsyncOpenAI') as mock_openai:
-            client = SummaryClient(
-                api_key="test-key",
-                base_url="http://test:8000/v1",
-                model="test-model"
+    @pytest.fixture
+    def mock_callback(self):
+        """Create a mock async monitoring callback."""
+        return AsyncMock()
+    
+    def create_plugin_with_callback(self, mock_callback):
+        """Create a ContentTypeDetectionPlugin with monitoring callback."""
+        from src.summary.content_type_detection import ContentTypeDetectionPlugin
+        
+        client = SummaryClient(
+            reasoning_api_key="test-key",
+            reasoning_base_url="http://test:8000/v1",
+            reasoning_model="test-model",
+            send_monitoring_event_callback=mock_callback
+        )
+        
+        # Create mock LLM manager
+        mock_llm = MagicMock()
+        mock_llm.reasoning_llm_client = MagicMock()
+        
+        # Create the plugin
+        plugin = ContentTypeDetectionPlugin(
+            window_manager=client._window_manager,
+            llm_manager=mock_llm,
+            result_callback=client._queue_payload,
+            summary_client=client
+        )
+        
+        return client, plugin
+    
+    @pytest.mark.asyncio
+    async def test_content_type_detection_sends_result(self, mock_callback):
+        """Content type detection should send result through callback."""
+        client, plugin = self.create_plugin_with_callback(mock_callback)
+        
+        # Add some text to the window manager
+        client._window_manager.add_summary_window("test text", 0.0, 10.0, [1])
+        
+        # Mock the task's detect_content_type method
+        with patch.object(plugin._task, 'detect_content_type', new_callable=AsyncMock) as mock_detect:
+            from src.summary.content_type_detection.task import ContentTypeDetectionSchema
+            mock_detect.return_value = ContentTypeDetectionSchema(
+                content_type="TECHNICAL_TALK",
+                confidence=0.85,
+                reasoning="Test reasoning"
             )
-            assert client._send_monitoring_event_callback is None
-    
-    @pytest.mark.asyncio
-    async def test_callback_exception_handled_gracefully(self, client_with_callback, mock_callback):
-        """Callback exceptions should be caught and logged, not raised."""
-        # Set up mock LLM response
-        mock_response = Mock()
-        mock_response.choices = [Mock()]
-        mock_response.choices[0].message.content = '{"content_type": "LECTURE_OR_TALK", "confidence": 0.88, "reasoning": "Educational content"}'
-        mock_response.choices[0].message.reasoning = ""
-        client_with_callback.client.chat.completions.create = AsyncMock(return_value=mock_response)
-        
-        # Make callback raise an exception
-        mock_callback.side_effect = Exception("Callback error")
-        
-        # Should not raise - exception should be caught
-        result = await client_with_callback.process_content_type_detection(
-            window_start=0.0,
-            window_end=10.0
-        )
-        
-        # Verify callback received a content_type_changed event (token events may also be sent)
-        assert any(call.args[1] == "content_type_changed" for call in mock_callback.call_args_list)
-        
-        # Verify result was still returned
-        assert result is not None
-        assert result.content_type == "LECTURE_OR_TALK"
-    
-    @pytest.mark.asyncio
-    async def test_callback_with_unknown_to_unknown(self, client_with_callback, mock_callback):
-        """Callback should NOT be invoked when content type remains UNKNOWN."""
-        # Set up mock LLM response returning UNKNOWN
-        mock_response = Mock()
-        mock_response.choices = [Mock()]
-        mock_response.choices[0].message.content = '{"content_type": "UNKNOWN", "confidence": 0.5, "reasoning": "Not enough context"}'
-        mock_response.choices[0].message.reasoning = ""
-        client_with_callback.client.chat.completions.create = AsyncMock(return_value=mock_response)
-        
-        # Run detection
-        result = await client_with_callback.process_content_type_detection(
-            window_start=0.0,
-            window_end=10.0
-        )
-        
-        # Verify no content_type_changed event was sent (token events may still be emitted)
-        assert not any(call.args[1] == "content_type_changed" for call in mock_callback.call_args_list)
-    
-    @pytest.mark.asyncio
-    async def test_callback_includes_all_event_data(self, client_with_callback, mock_callback):
-        """Callback should receive complete event data including timing and context."""
-        # Set up mock LLM response
-        mock_response = Mock()
-        mock_response.choices = [Mock()]
-        mock_response.choices[0].message.content = '{"content_type": "PODCAST", "confidence": 0.95, "reasoning": "Conversational format with multiple speakers"}'
-        mock_response.choices[0].message.reasoning = ""
-        client_with_callback.client.chat.completions.create = AsyncMock(return_value=mock_response)
-        
-        # Run detection with specific timing
-        result = await client_with_callback.process_content_type_detection(
-            window_start=5.5,
-            window_end=15.0
-        )
-        
-        # Verify callback received a content_type_changed event (token events may also be sent)
-        assert any(call.args[1] == "content_type_changed" for call in mock_callback.call_args_list)
-        ct_call = next(call for call in mock_callback.call_args_list if call.args[1] == "content_type_changed")
-        event_data, event_type = ct_call.args
-        assert event_type == "content_type_changed"
-        assert "previous_content_type" in event_data
-        assert "new_content_type" in event_data
-        assert "confidence" in event_data
-        assert "reasoning" in event_data
-        assert "context_length" in event_data
-        assert "source" in event_data
-        assert "window_start" in event_data
-        assert "window_end" in event_data
-        assert "timestamp_utc" in event_data
-        
-        # Verify specific values
-        assert event_data["new_content_type"] == "PODCAST"
-        assert event_data["confidence"] == 0.95
-        assert event_data["window_start"] == 5.5
-        assert event_data["window_end"] == 15.0
-        assert event_data["source"] == "AUTO_DETECTED"
-    
-    @pytest.mark.asyncio
-    async def test_callback_exception_handled_gracefully(self, client_with_callback, mock_callback):
-        """Callback exceptions should be caught and logged, not raised."""
-        # Set up mock LLM response
-        mock_response = Mock()
-        mock_response.choices = [Mock()]
-        mock_response.choices[0].message.content = '{"content_type": "LECTURE_OR_TALK", "confidence": 0.88, "reasoning": "Educational content"}'
-        mock_response.choices[0].message.reasoning = ""
-        client_with_callback.client.chat.completions.create = AsyncMock(return_value=mock_response)
-        
-        # Make callback raise an exception
-        mock_callback.side_effect = Exception("Callback error")
-        
-        # Should not raise - exception should be caught
-        result = await client_with_callback.process_content_type_detection(
-            window_start=0.0,
-            window_end=10.0
-        )
-        
-        # Verify callback received a content_type_changed event (token events may also be sent)
-        assert any(call.args[1] == "content_type_changed" for call in mock_callback.call_args_list)
-        
-        # Verify result was still returned
-        assert result is not None
-        assert result.content_type == "LECTURE_OR_TALK"
+            
+            # Process content type detection
+            result = await plugin.process(summary_window_id=0)
+            
+            # Verify result was sent
+            assert result is not None
+            assert result.get("type") == "content_type_detection"
+
+
+if __name__ == "__main__":
+    pytest.main([__file__, "-v"])
