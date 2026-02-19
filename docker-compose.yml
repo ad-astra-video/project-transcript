@@ -24,7 +24,7 @@ services:
       - HF_TOKEN=${HF_TOKEN}
       - MAX_CONCURRENT_SUMMARIES=${MAX_CONCURRENT_SUMMARIES}
       - LOCAL_REASONING_MODEL_USES_SYSTEM_PROMPT=${LOCAL_REASONING_MODEL_USES_SYSTEM_PROMPT}
-      - LOCAL_RAPID_MODEL_USES_SYSTEM_PROMPT=${LOCAL_RAPID_MODEL_USES_SYSTEM_PROMPT}
+      - LOCAL_FAST_MODEL_USES_SYSTEM_PROMPT=${LOCAL_FAST_MODEL_USES_SYSTEM_PROMPT}
     volumes:
       - ./models:/models
       #- ./src:/app/src
@@ -32,7 +32,7 @@ services:
       - ${AI_RUNNER_PORT}:8000
     depends_on:
       - vllm-insights
-      - vllm-rapid-summary
+      - vllm-fast-summary
   vllm-insights:
     image: vllm/vllm-openai:latest
     container_name: byoc-transcription-vllm-insights
@@ -48,10 +48,10 @@ services:
     command: >
       --model ${LOCAL_REASONING_MODEL}
       --port ${LOCAL_REASONING_MODEL_PORT:-5000}
-      --gpu-memory-utilization 0.71
+      --gpu-memory-utilization 0.59
       --kv-cache-dtype fp8
       --max-num-batched-tokens 512
-      --max-num-seqs 20
+      --max-num-seqs 10
       --max-model-len 32768
       ${LOCAL_REASONING_MODEL_VLLM_SETTINGS}
     healthcheck:
@@ -60,29 +60,29 @@ services:
       timeout: 10s
       retries: 5
       start_period: 60s
-  vllm-rapid-summary:
+  vllm-fast-summary:
     image: vllm/vllm-openai:latest
-    container_name: byoc-transcription-vllm-rapid-summary
+    container_name: byoc-transcription-vllm-fast-summary
     runtime: nvidia
     environment:
-      - CUDA_VISIBLE_DEVICES=${LOCAL_RAPID_VLLM_CUDA_VISIBLE_DEVICES}
       - CUDA_DEVICE_ORDER=PCI_BUS_ID
+      - CUDA_VISIBLE_DEVICES=${LOCAL_FAST_VLLM_CUDA_VISIBLE_DEVICES}
       - HUGGING_FACE_HUB_TOKEN=${HF_TOKEN}
     volumes:
       - ./models:/root/.cache/huggingface
     ports:
-      - ${LOCAL_RAPID_MODEL_PORT:-5050}:${LOCAL_RAPID_MODEL_PORT:-5050}
+      - ${LOCAL_FAST_MODEL_PORT:-5050}:${LOCAL_FAST_MODEL_PORT:-5050}
     command: >
-      --model ${LOCAL_RAPID_MODEL}
-      --port ${LOCAL_RAPID_MODEL_PORT:-5050}
-      --gpu-memory-utilization 0.15
+      --model ${LOCAL_FAST_MODEL}
+      --port ${LOCAL_FAST_MODEL_PORT:-5050}
+      --gpu-memory-utilization 0.31
       --kv-cache-dtype fp8
       --max-num-batched-tokens 512
-      --max-num-seqs 20
-      --max-model-len 32768
-      ${LOCAL_RAPID_MODEL_VLLM_SETTINGS}
+      --max-num-seqs 2
+      --max-model-len 16384
+      ${LOCAL_FAST_MODEL_VLLM_SETTINGS}
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:${LOCAL_RAPID_MODEL_PORT:-5050}/v1/models"]
+      test: ["CMD", "curl", "-f", "http://localhost:${LOCAL_FAST_MODEL_PORT:-5050}/v1/models"]
       interval: 30s
       timeout: 10s
       retries: 5

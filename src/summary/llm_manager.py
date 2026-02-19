@@ -440,9 +440,9 @@ class LLMManager:
         reasoning_base_url: Optional[str] = None,
         reasoning_api_key: Optional[str] = None,
         reasoning_model: Optional[str] = None,
-        rapid_base_url: Optional[str] = None,
-        rapid_api_key: Optional[str] = None,
-        rapid_model: Optional[str] = None,
+        fast_base_url: Optional[str] = None,
+        fast_api_key: Optional[str] = None,
+        fast_model: Optional[str] = None,
     ):
         """Update LLMManager parameters dynamically.
         
@@ -450,35 +450,35 @@ class LLMManager:
             reasoning_base_url: New base URL for the reasoning API
             reasoning_api_key: New API key for the reasoning API
             reasoning_model: New model name for the reasoning API
-            rapid_base_url: New base URL for the rapid API
-            rapid_api_key: New API key for the rapid API
-            rapid_model: New model name for the rapid API
+            fast_base_url: New base URL for the fast API
+            fast_api_key: New API key for the fast API
+            fast_model: New model name for the fast API
         """
-        # Update fast/rapid client settings
-        if rapid_base_url is not None:
-            self._fast_base_url = rapid_base_url.rstrip("/")
+        # Update fast client settings
+        if fast_base_url is not None:
+            self._fast_base_url = fast_base_url.rstrip("/")
             # Recreate the client with new base URL
             self._fast_client = AsyncOpenAI(
                 api_key=self._fast_api_key or "dummy",
                 base_url=self._fast_base_url
             )
-            logger.info(f"Updated rapid base URL to {self._fast_base_url}")
+            logger.info(f"Updated fast base URL to {self._fast_base_url}")
         
-        if rapid_api_key is not None:
-            self._fast_api_key = rapid_api_key
+        if fast_api_key is not None:
+            self._fast_api_key = fast_api_key
             # Recreate the client with new API key
             self._fast_client = AsyncOpenAI(
                 api_key=self._fast_api_key or "dummy",
                 base_url=self._fast_base_url
             )
-            logger.info("Updated rapid API key")
+            logger.info("Updated fast API key")
         
-        if rapid_model is not None:
-            self._rapid_model = rapid_model
+        if fast_model is not None:
+            self._rapid_model = fast_model
             # Update the LLMClient if it exists
             if self._rapid_llm_client is not None:
-                self._rapid_llm_client._model = rapid_model
-            logger.info(f"Updated rapid model to {rapid_model}")
+                self._rapid_llm_client._model = fast_model
+            logger.info(f"Updated fast model to {fast_model}")
         
         # Update reasoning client settings
         if reasoning_base_url is not None:

@@ -216,15 +216,15 @@ class SummaryClient:
         reasoning_base_url: Optional[str] = None,
         reasoning_api_key: Optional[str] = None,
         reasoning_model: Optional[str] = None,
-        rapid_base_url: Optional[str] = None,
-        rapid_api_key: Optional[str] = None,
-        rapid_model: Optional[str] = None,
+        fast_base_url: Optional[str] = None,
+        fast_api_key: Optional[str] = None,
+        fast_model: Optional[str] = None,
         reasoning_max_tokens: Optional[int] = None,
-        rapid_max_tokens: Optional[int] = None,
+        fast_max_tokens: Optional[int] = None,
         reasoning_temperature: Optional[float] = None,
-        rapid_temperature: Optional[float] = None,
+        fast_temperature: Optional[float] = None,
         reasoning_system_prompt: Optional[str] = None,
-        rapid_system_prompt: Optional[str] = None,
+        fast_system_prompt: Optional[str] = None,
         transcription_windows_per_summary_window: Optional[int] = None,
         raw_text_context_limit: Optional[int] = None,
         initial_summary_delay_seconds: Optional[float] = None,
@@ -237,15 +237,15 @@ class SummaryClient:
             reasoning_base_url: New base URL for the reasoning API
             reasoning_api_key: New API key for the reasoning API
             reasoning_model: New model name for the reasoning API
-            rapid_base_url: New base URL for the rapid API
-            rapid_api_key: New API key for the rapid API
-            rapid_model: New model name for the rapid API
+            fast_base_url: New base URL for the fast API
+            fast_api_key: New API key for the fast API
+            fast_model: New model name for the fast API
             reasoning_max_tokens: New max tokens for the reasoning API
-            rapid_max_tokens: New max tokens for the rapid API
+            fast_max_tokens: New max tokens for the fast API
             reasoning_temperature: New temperature for the reasoning API
-            rapid_temperature: New temperature for the rapid API
+            fast_temperature: New temperature for the fast API
             reasoning_system_prompt: New system prompt for the reasoning API
-            rapid_system_prompt: New system prompt for the rapid API
+            fast_system_prompt: New system prompt for the fast API
             transcription_windows_per_summary_window: New number of transcription windows per summary window
             raw_text_context_limit: New max characters for raw text in LLM context
             initial_summary_delay_seconds: New delay before first summary (default: 10.0)
@@ -270,9 +270,9 @@ class SummaryClient:
             reasoning_base_url=reasoning_base_url,
             reasoning_api_key=reasoning_api_key,
             reasoning_model=reasoning_model,
-            rapid_base_url=rapid_base_url,
-            rapid_api_key=rapid_api_key,
-            rapid_model=rapid_model,
+            fast_base_url=fast_base_url,
+            fast_api_key=fast_api_key,
+            fast_model=fast_model,
         )
         
         # Notify plugins directly (sync call) - call on_update_params if it exists
@@ -282,9 +282,9 @@ class SummaryClient:
                     # Call the sync version - plugins handle both sync and async internally
                     plugin_instance.on_update_params(
                         reasoning_max_tokens=reasoning_max_tokens,
-                        rapid_max_tokens=rapid_max_tokens,
+                        fast_max_tokens=fast_max_tokens,
                         reasoning_temperature=reasoning_temperature,
-                        rapid_temperature=rapid_temperature,
+                        fast_temperature=fast_temperature,
                         reasoning_system_prompt=reasoning_system_prompt,
                         initial_summary_delay_seconds=initial_summary_delay_seconds,
                         content_type_context_limit=content_type_context_limit,
