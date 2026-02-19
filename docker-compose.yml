@@ -20,6 +20,7 @@ services:
     container_name: byoc-transcription-1
     runtime: nvidia
     environment:
+      - CUDA_DEVICE_ORDER=PCI_BUS_ID
       - CUDA_VISIBLE_DEVICES=${TRANSCRIPTION_CUDA_VISIBLE_DEVICES}
       - HF_TOKEN=${HF_TOKEN}
       - MAX_CONCURRENT_SUMMARIES=${MAX_CONCURRENT_SUMMARIES}
@@ -27,14 +28,13 @@ services:
       - LOCAL_FAST_MODEL_USES_SYSTEM_PROMPT=${LOCAL_FAST_MODEL_USES_SYSTEM_PROMPT}
     volumes:
       - ./models:/models
-      #- ./src:/app/src
     ports:
       - ${AI_RUNNER_PORT}:8000
     depends_on:
       - vllm-insights
       - vllm-fast-summary
   vllm-insights:
-    image: vllm/vllm-openai:latest
+    image: vllm/vllm-openai:v0.15.1
     container_name: byoc-transcription-vllm-insights
     runtime: nvidia
     environment:
@@ -48,7 +48,7 @@ services:
     command: >
       --model ${LOCAL_REASONING_MODEL}
       --port ${LOCAL_REASONING_MODEL_PORT:-5000}
-      --gpu-memory-utilization 0.59
+      --gpu-memory-utilization 0.60
       --kv-cache-dtype fp8
       --max-num-batched-tokens 512
       --max-num-seqs 10
@@ -61,7 +61,7 @@ services:
       retries: 5
       start_period: 60s
   vllm-fast-summary:
-    image: vllm/vllm-openai:latest
+    image: vllm/vllm-openai:v0.15.1
     container_name: byoc-transcription-vllm-fast-summary
     runtime: nvidia
     environment:
@@ -75,7 +75,7 @@ services:
     command: >
       --model ${LOCAL_FAST_MODEL}
       --port ${LOCAL_FAST_MODEL_PORT:-5050}
-      --gpu-memory-utilization 0.31
+      --gpu-memory-utilization 0.17
       --kv-cache-dtype fp8
       --max-num-batched-tokens 512
       --max-num-seqs 2
