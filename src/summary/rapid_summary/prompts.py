@@ -13,6 +13,7 @@ Your task is to summarize what has been discussed in the current conversation wi
 2. Focus on the main topics and key points
 3. Capture any decisions, actions, or important information
 4. If nothing significant was discussed, return an empty summary
+5. Avoid fluff phrases - do NOT start summaries with phrases like "The discussion centers on", "The discussion revolves around", "In this conversation", "During this segment", or similar introductory fillers. Go directly to the content.
 
 ## Output Format
 
