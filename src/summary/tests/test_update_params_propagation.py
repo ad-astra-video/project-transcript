@@ -183,7 +183,7 @@ class TestPluginUpdateParams:
         
         plugin = RapidSummaryPlugin(
             window_manager=WindowManager(),
-            llm=mock_llm,
+            llm_manager=mock_llm,
             result_callback=MagicMock(),
             summary_client=None
         )
@@ -201,7 +201,7 @@ class TestPluginUpdateParams:
         
         plugin = RapidSummaryPlugin(
             window_manager=WindowManager(),
-            llm=mock_llm,
+            llm_manager=mock_llm,
             result_callback=MagicMock(),
             summary_client=None
         )

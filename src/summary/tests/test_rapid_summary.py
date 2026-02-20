@@ -176,7 +176,7 @@ class TestRapidSummaryPlugin:
         # Create plugin - note: RapidSummaryPlugin uses 'llm' not 'llm_manager'
         plugin = RapidSummaryPlugin(
             window_manager=mock_summary_client._window_manager,
-            llm=mock_llm,
+            llm_manager=mock_llm,
             result_callback=mock_summary_client._queue_payload,
             summary_client=mock_summary_client
         )
