@@ -32,7 +32,7 @@ You must output valid JSON matching this schema:
 ```json
 {
   "summary": [
-    {"item": "The team discussed the Q4 roadmap and decided to prioritize the mobile app launch. Action items include finalizing the design by Friday and scheduling user testing next week."}
+    {"item": "Q4 roadmap discussed and decided to prioritize the mobile app launch. Action items include finalizing the design by Friday and scheduling user testing next week."}
   ]
 }
 ```
