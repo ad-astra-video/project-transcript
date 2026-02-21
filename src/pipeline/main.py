@@ -346,6 +346,7 @@ async def _poll_diarization_results():
     """Background task to poll diarization results from the separate process."""
     logger.info("Starting diarization result polling")
     poll_count = 0
+    poll_start_time = time.monotonic()
     while STATE is not None and STATE.diarization_client is not None and not STATE.stop_requested:
         is_running = STATE.diarization_client.is_running
         if not is_running:
@@ -354,11 +355,15 @@ async def _poll_diarization_results():
             continue
         poll_count += 1
         if poll_count % 50 == 0:
-            logger.info(f"Diarization polling cycle {poll_count}")
+            elapsed = time.monotonic() - poll_start_time
+            logger.info(f"Diarization polling cycle {poll_count} ({elapsed:.1f}s elapsed)")
         result = await STATE.diarization_client.get_result(timeout=0.05)
         if result is not None:
             logger.debug(f"Got diarization result: {result.request_id}")
             await _handle_diarization_result(result)
+            # Reset poll count and timer after receiving result
+            poll_count = 0
+            poll_start_time = time.monotonic()
         else:
             logger.debug(f"No diarization result in poll cycle {poll_count}")
         await asyncio.sleep(0.1)
