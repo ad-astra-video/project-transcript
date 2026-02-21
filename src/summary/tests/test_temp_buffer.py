@@ -24,12 +24,12 @@ class TestWindowManagerTranscriptionTracking:
         wm = self.create_window_manager()
         
         # Add a transcription window
+        # New signature: add_transcription_window(transcription_window_id, segments, window_start_ts, window_end_ts)
         wm.add_transcription_window(
             transcription_window_id=1,
-            new_text="Hello world",
-            timestamp_start=0.0,
-            timestamp_end=2.5,
-            segments=[{"id": "1", "text": "Hello world"}]
+            segments=[{"id": "1", "text": "Hello world"}],
+            window_start_ts=0.0,
+            window_end_ts=2.5
         )
         
         # Verify it was stored
@@ -40,9 +40,10 @@ class TestWindowManagerTranscriptionTracking:
         """Test adding multiple transcription windows."""
         wm = self.create_window_manager()
         
-        wm.add_transcription_window(1, "Hello", 0.0, 2.5, [{"id": "1"}])
-        wm.add_transcription_window(2, "World", 2.5, 5.0, [{"id": "2"}])
-        wm.add_transcription_window(3, "Test", 5.0, 7.5, [{"id": "3"}])
+        # New signature: add_transcription_window(transcription_window_id, segments, window_start_ts, window_end_ts)
+        wm.add_transcription_window(1, [{"id": "1", "text": "Hello"}], 0.0, 2.5)
+        wm.add_transcription_window(2, [{"id": "2", "text": "World"}], 2.5, 5.0)
+        wm.add_transcription_window(3, [{"id": "3", "text": "Test"}], 5.0, 7.5)
         
         # Verify all were stored
         assert len(wm._transcription_windows) == 3
@@ -55,8 +56,9 @@ class TestWindowManagerTranscriptionTracking:
         wm = self.create_window_manager()
         
         # Add transcription windows
-        wm.add_transcription_window(1, "Hello", 0.0, 2.5, [{"id": "1"}])
-        wm.add_transcription_window(2, "World", 2.5, 5.0, [{"id": "2"}])
+        # New signature: add_transcription_window(transcription_window_id, segments, window_start_ts, window_end_ts)
+        wm.add_transcription_window(1, [{"id": "1", "text": "Hello"}], 0.0, 2.5)
+        wm.add_transcription_window(2, [{"id": "2", "text": "World"}], 2.5, 5.0)
         
         # Check pending IDs
         assert 1 in wm._pending_transcription_ids
@@ -91,12 +93,12 @@ class TestSummaryClientWithWindowManager:
         )
         
         # Add transcription window via window manager
+        # New signature: add_transcription_window(transcription_window_id, segments, window_start_ts, window_end_ts)
         client._window_manager.add_transcription_window(
             transcription_window_id=1,
-            new_text="Test text",
-            timestamp_start=0.0,
-            timestamp_end=5.0,
-            segments=[{"id": "1", "text": "Test text"}]
+            segments=[{"id": "1", "text": "Test text"}],
+            window_start_ts=0.0,
+            window_end_ts=5.0
         )
         
         # Verify it was stored

@@ -96,12 +96,13 @@ class TestContentTypeDetectionPluginMonitoring:
         mock_llm = MagicMock()
         mock_llm.reasoning_llm_client = MagicMock()
         
-        # Create the plugin
+        # Create the plugin with detection_interval=1 so it runs on first call
         plugin = ContentTypeDetectionPlugin(
             window_manager=client._window_manager,
             llm_manager=mock_llm,
             result_callback=client._queue_payload,
-            summary_client=client
+            summary_client=client,
+            detection_interval=1  # Run detection on first call for testing
         )
         
         return client, plugin

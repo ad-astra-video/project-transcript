@@ -29,13 +29,13 @@ class TestSixWindowAccumulation:
         client = self.create_client(transcription_windows_per_summary_window=2)
         
         # Add 6 transcription windows
+        # New signature: add_transcription_window(transcription_window_id, segments, window_start_ts, window_end_ts)
         for i in range(6):
             client._window_manager.add_transcription_window(
                 transcription_window_id=i,
-                new_text=f"Window {i} text",
-                timestamp_start=float(i * 10),
-                timestamp_end=float((i + 1) * 10),
-                segments=[{"id": str(i), "text": f"Window {i} text"}]
+                segments=[{"id": str(i), "text": f"Window {i} text"}],
+                window_start_ts=float(i * 10),
+                window_end_ts=float((i + 1) * 10)
             )
         
         # Verify all windows stored
