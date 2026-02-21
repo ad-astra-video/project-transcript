@@ -14,7 +14,7 @@ logger = logging.getLogger(__name__)
 class ContentTypeDetectionPlugin:
     """Plugin for content type detection."""
     
-    def __init__(self, window_manager, llm_manager, result_callback, summary_client=None, **kwargs):
+    def __init__(self, window_manager, llm_manager, result_callback, summary_client=None, detection_interval: int = 5, **kwargs):
         self._window_manager = window_manager
         self._llm = llm_manager
         self._max_tokens = 350
@@ -22,12 +22,15 @@ class ContentTypeDetectionPlugin:
         self._content_type_context_limit = 2000  # Character limit for content type detection
         self._result_callback = result_callback
         self._summary_client = summary_client  # Keep for non-LLM operations
-        self._auto_detect = True
         self._in_progress = False
         
         # Track content type state for previous_content_type
         self._current_content_type = "UNKNOWN"
         self._user_content_type_override = None
+        
+        # Counter-based detection: run every N summary windows
+        self._detection_counter = 0
+        self._detection_interval = detection_interval  # Run detection every N windows
         
         # Create task once at init and reuse for all processing
         self._task = ContentTypeDetectionTask(
@@ -52,8 +55,23 @@ class ContentTypeDetectionPlugin:
             logger.info("Content type user override cleared")
     
     def _should_detect(self, summary_window_id: int) -> bool:
-        """Check if should run content type detection for a summary window."""
-        return self._auto_detect and not self._in_progress
+        """Check if should run content type detection for a summary window.
+        
+        Uses counter-based approach: runs detection every N summary windows.
+        Note: User override is handled in process() method, not here.
+        """
+        # Skip if already in progress
+        if self._in_progress:
+            return False
+        
+        # Increment counter and check if we've reached the interval
+        self._detection_counter += 1
+        
+        if self._detection_counter >= self._detection_interval:
+            self._detection_counter = 0  # Reset after running
+            return True
+        
+        return False
     
     async def process(self, summary_window_id: int, **kwargs):
         """Process a summary window for content type detection.
@@ -81,7 +99,6 @@ class ContentTypeDetectionPlugin:
                 }
                 
                 self._current_content_type = self._user_content_type_override
-                self._auto_detect = False
                 await self._result_callback(payload)
                 
                 # Emit on_content_type_detected event to notify other plugins
@@ -116,7 +133,6 @@ class ContentTypeDetectionPlugin:
             
             # Update current content type
             self._current_content_type = result.content_type
-            self._auto_detect = False
             await self._result_callback(payload)
             
             # Emit on_content_type_detected event to notify other plugins

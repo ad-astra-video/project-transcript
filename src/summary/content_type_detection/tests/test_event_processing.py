@@ -53,7 +53,8 @@ class TestContentTypeDetectionEventProcessing:
             window_manager=mock_window_manager,
             llm_manager=mock_llm,
             result_callback=result_callback,
-            summary_client=mock_summary_client
+            summary_client=mock_summary_client,
+            detection_interval=1  # Run on every call for testing
         )
 
     @pytest.mark.asyncio
@@ -141,15 +142,32 @@ class TestContentTypeDetectionEventProcessing:
         assert plugin._content_type_context_limit == 3000
 
     @pytest.mark.asyncio
-    async def test_process_respects_auto_detect_flag(self, plugin):
-        """Test that auto_detect flag controls detection."""
-        # Disable auto-detect
-        plugin._auto_detect = False
+    async def test_process_respects_detection_interval(self, plugin):
+        """Test that detection runs only after counter reaches interval."""
+        # Set detection_interval to a higher value
+        plugin._detection_interval = 3
+        plugin._detection_counter = 0
         
-        result = await plugin.process(summary_window_id=1)
+        # First call - counter becomes 1, but interval is 3, so no detection
+        result1 = await plugin.process(summary_window_id=1)
+        assert result1 == {}
         
-        # Should return empty when auto-detect is disabled
-        assert result == {}
+        # Second call - counter becomes 2, but interval is 3, so no detection
+        result2 = await plugin.process(summary_window_id=2)
+        assert result2 == {}
+        
+        # Third call - counter becomes 3, which equals interval, so detection runs
+        with patch.object(plugin._task, 'detect_content_type', new_callable=AsyncMock) as mock_detect:
+            mock_detect.return_value = MagicMock(
+                content_type="MEETING",
+                confidence=0.85,
+                reasoning="Meeting content"
+            )
+            result3 = await plugin.process(summary_window_id=3)
+            
+            # Detection should have run
+            assert result3["content_type"] == "MEETING"
+            mock_detect.assert_called_once()
 
     @pytest.mark.asyncio
     async def test_process_prevents_concurrent_detection(self, plugin):
@@ -265,7 +283,8 @@ class TestContentTypeOverride:
             window_manager=mock_window_manager,
             llm_manager=mock_llm,
             result_callback=AsyncMock(),
-            summary_client=mock_summary_client
+            summary_client=mock_summary_client,
+            detection_interval=1  # Run on every call for testing
         )
 
     def test_set_content_type_override(self, plugin):
@@ -282,14 +301,18 @@ class TestContentTypeOverride:
         assert plugin._user_content_type_override is None
 
     @pytest.mark.asyncio
-    async def test_override_disables_auto_detect(self, plugin):
-        """Test that setting override disables auto-detect."""
+    async def test_override_prevents_auto_detect(self, plugin):
+        """Test that setting override prevents auto-detect from running."""
         plugin.set_content_type_override("PRESENTATION")
         
-        # Process should use override and disable auto-detect
-        await plugin.process(summary_window_id=1)
+        # Process should use override and skip auto-detect
+        result = await plugin.process(summary_window_id=1)
         
-        assert plugin._auto_detect is False
+        # Verify override is used
+        assert result["content_type"] == "PRESENTATION"
+        assert result["source"] == "USER_OVERRIDE"
+        # Verify _user_content_type_override is still set (prevents future auto-detect)
+        assert plugin._user_content_type_override == "PRESENTATION"
 
 
 class TestContentTypeStateTracking:
@@ -316,7 +339,8 @@ class TestContentTypeStateTracking:
             window_manager=mock_window_manager,
             llm_manager=mock_llm,
             result_callback=AsyncMock(),
-            summary_client=mock_summary_client
+            summary_client=mock_summary_client,
+            detection_interval=1  # Run on every call for testing
         )
 
     @pytest.mark.asyncio
@@ -338,8 +362,8 @@ class TestContentTypeStateTracking:
             assert result["previous_content_type"] == "MEETING"
 
     @pytest.mark.asyncio
-    async def test_auto_detect_disabled_after_first_detection(self, plugin, mock_window_manager):
-        """Test that auto-detect is disabled after first detection."""
+    async def test_counter_resets_after_detection(self, plugin, mock_window_manager):
+        """Test that detection counter resets after running detection."""
         with patch.object(plugin._task, 'detect_content_type', new_callable=AsyncMock) as mock_detect:
             mock_detect.return_value = MagicMock(
                 content_type="MEETING",
@@ -347,7 +371,10 @@ class TestContentTypeStateTracking:
                 reasoning="Meeting content"
             )
             
+            # Initial counter should be 0
+            assert plugin._detection_counter == 0
+            
             await plugin.process(summary_window_id=1)
             
-            # Auto-detect should be disabled after first detection
-            assert plugin._auto_detect is False
+            # Counter should be reset to 0 after detection runs
+            assert plugin._detection_counter == 0

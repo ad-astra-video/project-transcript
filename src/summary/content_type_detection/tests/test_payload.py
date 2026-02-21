@@ -51,7 +51,8 @@ class TestContentTypeDetectionPayload:
             window_manager=mock_window_manager,
             llm_manager=mock_llm,
             result_callback=result_callback,
-            summary_client=mock_summary_client
+            summary_client=mock_summary_client,
+            detection_interval=1  # Run on every call for testing
         )
 
     @pytest.mark.asyncio

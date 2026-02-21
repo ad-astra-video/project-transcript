@@ -41,7 +41,8 @@ class TestContentTypeDetectionPlugin:
             window_manager=mock_client._window_manager,
             llm_manager=mock_llm,
             result_callback=mock_client._queue_payload,
-            summary_client=mock_client
+            summary_client=mock_client,
+            detection_interval=1  # Run on every call for testing
         )
         
         return mock_client, plugin
@@ -71,20 +72,21 @@ class TestContentTypeDetectionPlugin:
             assert result.get("content_type") == "TECHNICAL_TALK"
     
     @pytest.mark.asyncio
-    async def test_detection_skipped_when_auto_detect_disabled(self, plugin_with_mock_llm):
-        """Content type detection should be skipped when auto_detect is disabled."""
+    async def test_detection_skipped_when_interval_not_reached(self, plugin_with_mock_llm):
+        """Content type detection should be skipped when interval not reached."""
         client, plugin = plugin_with_mock_llm
         
-        # Disable auto detect
-        plugin._auto_detect = False
+        # Set detection_interval to a high value
+        plugin._detection_interval = 10
+        plugin._detection_counter = 0
         
         # Add text to window manager
         client._window_manager.add_summary_window("Test content", 0.0, 10.0, [1])
         
-        # Process content type detection
+        # Process content type detection - counter becomes 1, but interval is 10
         result = await plugin.process(summary_window_id=0)
         
-        # Should return empty (skipped)
+        # Should return empty (skipped because interval not reached)
         assert result == {}
     
     @pytest.mark.asyncio
@@ -108,15 +110,15 @@ class TestContentTypeDetectionPlugin:
     
     @pytest.mark.asyncio
     async def test_clear_user_override(self, plugin_with_mock_llm):
-        """Clearing user override should re-enable auto-detection."""
+        """Clearing user override should allow auto-detection to work."""
         client, plugin = plugin_with_mock_llm
         
         # Set and then clear user override
         plugin.set_content_type_override("INTERVIEW")
         plugin.set_content_type_override(None)
         
-        # Auto detect should still be enabled
-        assert plugin._auto_detect is True
+        # User override should be cleared
+        assert plugin._user_content_type_override is None
     
     @pytest.mark.asyncio
     async def test_detection_prevents_concurrent_runs(self, plugin_with_mock_llm):
