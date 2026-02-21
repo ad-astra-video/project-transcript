@@ -218,6 +218,39 @@ When a story spans multiple windows and the core insight emerges gradually:
 }
 ```
 
+### Continuation for Short Clarifications and Metadata
+
+When short follow-ups, role clarifications, or participant metadata appear immediately after a substantive remark by the same speaker (or clearly referring to the same subject), prefer treating the later item as a continuation of the earlier one rather than a separate insight. Merge into the prior `NOTES` or append the clarification with `continuation_of` pointing to the originating insight.
+
+Guidelines:
+- If the second item is short (one sentence or phrase) and provides identity, role, availability, or a brief clarification about the speaker or topic, mark it as `continuation_of` the previous insight.
+- Merge text where possible into a single `insight_text` (e.g., "Speaker X introduces group whose mission is Y; later clarified as panelist available for questions").
+- If the follow-up changes the meaning materially (correction or contradiction), treat it as a self-correction and use `correction_of` semantics instead.
+
+Example - DO:
+```json
+{
+  "insight_type": "NOTES",
+  "insight_text": "Jonathan Benz, a long-term NVIDIA employee with experience in various roles, introduces a group whose mission is related to CUDA education for developers; later noted as a panelist available for questions at the end of the segment",
+  "continuation_of": null
+}
+```
+
+### Time-adjacent Windows
+
+When the transcript is split into sequential LLM requests (windows) that are close in time, prefer merging short follow-ups into the prior insight rather than emitting a new one.
+
+Rules:
+- If the current window occurs within 30 seconds of the prior window, and either:
+  - the current window is short (approximate audio duration <= 20 seconds), or
+  - the current text is concise (one sentence or <= ~30 tokens),
+  then treat it as a continuation of the prior insight when it adds clarification, role/participant metadata, or brief availability notes.
+- Require one of: same speaker identity, explicit referent to prior subject ("the group", "the panelist"), or clear topical overlap.
+- If the follow-up materially corrects or contradicts the prior insight, treat as a self-correction and use `correction_of` semantics instead.
+
+Rationale: many streams split utterances into adjacent segments (~15-20s each). This rule avoids duplicating trivial metadata or clarifications across windows and preserves cohesive insights.
+
+
 ---
 
 ## CORE INSIGHT TYPES (PRIORITY ORDER)
