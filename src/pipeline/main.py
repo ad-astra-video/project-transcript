@@ -716,6 +716,7 @@ async def _flush_audio_buffers():
 
 async def update_params(params: dict):
     """Update runtime parameters for the transcription pipeline."""
+    logger.info(f"update_params called with: {params}")
     if STATE is None:
         return
     
