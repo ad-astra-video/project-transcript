@@ -665,7 +665,7 @@ async def _handle_graceful_shutdown():
     
     # Phase 4: Wait for completion with timeout
     start_time = time.time()
-    timeout = 300.0  # 5 minutes
+    timeout = 270.0  # 4.5 minutes
     
     while time.time() - start_time < timeout:
         # Summary workers are already stopped in Phase 3 via SummaryClient.stop()
@@ -673,7 +673,9 @@ async def _handle_graceful_shutdown():
         
         # Check diarization
         diarization_idle = STATE.diarization_client.is_idle()
-        
+        if all_workers_done and not diarization_idle:
+            logger.info(f"Summary workers wrapped up, closing stream.  Diarization has not completed, pending: {STATE.diarization_client.get_pending_count()}")
+
         if all_workers_done and diarization_idle:
             STATE.shutdown_completed = True
             await PROCESSOR.send_data(json.dumps({
