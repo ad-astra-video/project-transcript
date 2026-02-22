@@ -36,6 +36,12 @@ You must output valid JSON matching this schema:
   ]
 }
 ```
+## Example of empty summary when no significant discussion occurs:
+```json
+{
+  "summary": []
+}
+```
 
 Provide the summary in the required JSON format.
 """
