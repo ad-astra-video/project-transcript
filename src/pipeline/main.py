@@ -657,12 +657,12 @@ async def _handle_graceful_shutdown():
     # Phase 2: Flush remaining buffered audio
     await _flush_audio_buffers()
     
-    # Phase 3: Stop summary workers gracefully
-    if STATE.summary_client is not None:
-        await STATE.summary_client.stop()
-    
     STATE.diarization_client.send_shutdown_signal()
-    
+
+    # Phase 3: Stop summary workers gracefully (using default shutdown timeout)
+    if STATE.summary_client is not None:
+        await STATE.summary_client.stop()   
+        
     # Phase 4: Wait for completion with timeout
     start_time = time.time()
     timeout = 270.0  # 4.5 minutes
@@ -675,6 +675,7 @@ async def _handle_graceful_shutdown():
         diarization_idle = STATE.diarization_client.is_idle()
         if all_workers_done and not diarization_idle:
             logger.info(f"Summary workers wrapped up, closing stream.  Diarization has not completed, pending: {STATE.diarization_client.get_pending_count()}")
+            break
 
         if all_workers_done and diarization_idle:
             STATE.shutdown_completed = True
@@ -867,8 +868,8 @@ async def on_stream_stop():
         STATE.summary_client._stop_requested = True
         logger.info("Summary client stop requested")
         
-        # Stop the workers gracefully
-        await STATE.summary_client.stop(timeout=240.0)
+        # Stop the workers forcefully
+        await STATE.summary_client.stop(timeout=5.0)
         workers_completed_at = datetime.now(timezone.utc).isoformat()
         wait_duration_seconds = (datetime.fromisoformat(workers_completed_at.replace('+00:00', '')) -
                                datetime.fromisoformat(stop_requested_at.replace('+00:00', ''))).total_seconds()
