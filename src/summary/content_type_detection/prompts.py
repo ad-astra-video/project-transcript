@@ -5,15 +5,9 @@ Prompt templates for content type detection task.
 CONTENT_TYPE_DETECTION_PROMPT = """
 [CONTENT TYPE DETECTION]
 
-Analyze the transcript context below and determine the single most accurate content type. Prioritize speaker interaction patterns and communicative intent over tone, confidence, or opinion strength. Strong opinions alone MUST NOT imply debate.
-
----
-
-## TRANSCRIPT CONTEXT
-
-Transcript Text (Last {context_length} characters):
-{context_text}
-
+Analyze the transcript context below and determine the single most accurate content type. 
+Prioritize speaker interaction patterns and communicative intent over tone, confidence, or opinion strength. 
+Strong opinions alone MUST NOT imply debate.
 ---
 
 ## CORE CLASSIFICATION PRINCIPLES

@@ -86,7 +86,7 @@ class ContentTypeDetectionTask:
     def _build_messages(
         self,
         context_text: str,
-        context_length: int = 2000
+        context_length: int
     ) -> List[Dict[str, str]]:
         """Build messages for content type detection.
         
@@ -103,10 +103,7 @@ class ContentTypeDetectionTask:
 
 Transcript Text (Last {context_length} characters):
 {context_text}
-
----
-
-Please analyze the transcript context above and output content type detection as JSON with fields: content_type, confidence, and reasoning."""
+"""
         
         return self._llm_client.build_messages(
             system_prompt=CONTENT_TYPE_DETECTION_PROMPT,
@@ -135,6 +132,8 @@ Please analyze the transcript context above and output content type detection as
         # Get context text (last N chars)
         context_to_use = context_text[-context_length:] if len(context_text) > context_length else context_text
         
+        logger.info(f"Sending {len(context_to_use)} chars to content_type_detection")
+        
         try:
             logger.info(f"Running content type detection (context_length={context_length})")
             
@@ -156,6 +155,7 @@ Please analyze the transcript context above and output content type detection as
             
             # Validate response before parsing
             if not content or not content.strip():
+                logger.warning(f"Content type detection returned empty response. Messages: {messages}")
                 return ContentTypeDetectionSchema(
                     content_type=ContentType.UNKNOWN,
                     confidence=0.0,
@@ -168,16 +168,23 @@ Please analyze the transcript context above and output content type detection as
             ends_with_brace = content_stripped.endswith('}')
             
             if not starts_with_brace or not ends_with_brace:
+                logger.warning(f"Content type detection returned incomplete JSON. Content: {content_stripped}. Messages: {messages}")
                 return ContentTypeDetectionSchema(
                     content_type=ContentType.UNKNOWN,
                     confidence=0.0,
                     reasoning="Incomplete JSON response from LLM"
                 )
             
-            return self._parse_content_type_response(content)
+            result = self._parse_content_type_response(content)
+            
+            # Log when UNKNOWN is returned
+            if result.content_type == ContentType.UNKNOWN:
+                logger.warning(f"Content type detection returned UNKNOWN. Content: {content_stripped}. Messages: {messages}")
+            
+            return result
             
         except Exception as e:
-            logger.error(f"Content type detection error: {e}")
+            logger.error(f"Content type detection error: {e}. Messages: {messages}")
             return ContentTypeDetectionSchema(
                 content_type=ContentType.UNKNOWN,
                 confidence=0.0,
