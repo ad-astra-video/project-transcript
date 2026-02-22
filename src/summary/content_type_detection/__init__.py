@@ -17,7 +17,7 @@ class ContentTypeDetectionPlugin:
     def __init__(self, window_manager, llm_manager, result_callback, summary_client=None, detection_interval: int = 5, **kwargs):
         self._window_manager = window_manager
         self._llm = llm_manager
-        self._max_tokens = 350
+        self._max_tokens = 8192
         self._temperature = 0.2
         self._content_type_context_limit = 2000  # Character limit for content type detection
         self._result_callback = result_callback

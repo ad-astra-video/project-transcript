@@ -178,8 +178,10 @@ Transcript Text (Last {context_length} characters):
             result = self._parse_content_type_response(content)
             
             # Log when UNKNOWN is returned
+            has_system_prompt = any(m.get("role") == "system" and m.get("content") for m in messages)
+            has_user_content = any(m.get("role") == "user" and m.get("content") for m in messages)
             if result.content_type == ContentType.UNKNOWN:
-                logger.warning(f"Content type detection returned UNKNOWN. Content: {content_stripped}. Messages: {messages}")
+                logger.warning(f"Content type detection returned UNKNOWN. Content length: {len(content_stripped)}. System Prompt: {has_system_prompt}. User Content: {has_user_content}")
             
             return result
             
