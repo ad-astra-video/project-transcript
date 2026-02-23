@@ -105,9 +105,11 @@ class RapidSummaryTask:
         if not self._llm_client:
             raise RuntimeError("Rapid summary client not initialized")
         
-        # Format the system prompt with prior context
-        system_prompt = RAPID_SUMMARY_SYSTEM_PROMPT.format(
-            prior_insights_context=prior_context if prior_context else "(No prior context available)"
+        # Format the system prompt with prior context using replace to avoid
+        # conflicts with JSON braces in the prompt template
+        prior_context_value = prior_context if prior_context else "(No prior context available)"
+        system_prompt = RAPID_SUMMARY_SYSTEM_PROMPT.replace(
+            "__PRIOR_INSIGHTS_CONTEXT__", prior_context_value
         )
         
         user_content = f"Summarize this conversation:\n\n{text}"
@@ -120,6 +122,9 @@ class RapidSummaryTask:
             max_tokens=self.max_tokens,
             response_format={"type": "json_schema", "json_schema": {"name": "rapid_summary", "schema": self.rapid_summary_response_json_schema}}
         )
+        
+        # Log the raw response for debugging
+        logger.info(f"Rapid summary raw response: {content}")
         
         # Parse JSON response using Pydantic
         try:

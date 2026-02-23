@@ -50,7 +50,7 @@ For a 15-second transcript snippet, capture the FULL ESSENCE with comprehensive 
 
 ## Prior Context (don't duplicate)
 
-{prior_insights_context}
+__PRIOR_INSIGHTS_CONTEXT__
 
 ## JSON Output Format
 

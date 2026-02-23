@@ -129,6 +129,7 @@ class RapidSummaryPlugin:
         try:
             # Use pre-created task instead of creating new one each time
             # Pass the window so it can store scribe notes in plugin results
+            logger.info(f"Starting rapid summary for window {summary_window_id}, text length: {len(window_text)}")
             result = await self._task.build_rapid_summary_payload(
                 segments=segments,
                 transcription_window_id=summary_window_id,
@@ -142,11 +143,12 @@ class RapidSummaryPlugin:
             # Note: Result is now stored in plugin results via summary_window.store_result()
             # The old store_plugin_result call is no longer needed since task.py handles it
             
+            logger.info(f"Rapid summary completed, result: {result}")
             await result_callback(result)
             return result
         except Exception as e:
             success = False
-            logger.error(f"Rapid summary error: {e}")
+            logger.error(f"Rapid summary error: {e}", exc_info=True)
             return {}
         finally:
             # Emit complete monitoring event
