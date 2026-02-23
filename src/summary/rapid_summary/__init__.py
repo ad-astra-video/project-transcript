@@ -51,6 +51,7 @@ class RapidSummaryPlugin:
         self._task = RapidSummaryTask(
             llm_client=self._llm.rapid_llm_client,
             rapid_summary_response_json_schema=None,
+            window_manager=window_manager,  # Pass window_manager for prior context
         )
     
     async def _send_monitoring_event(self, event_data: Dict[str, Any], event_type: str):
@@ -127,22 +128,19 @@ class RapidSummaryPlugin:
         
         try:
             # Use pre-created task instead of creating new one each time
+            # Pass the window so it can store scribe notes in plugin results
             result = await self._task.build_rapid_summary_payload(
                 segments=segments,
                 transcription_window_id=summary_window_id,
                 window_start_ts=window_start,
                 window_end_ts=window_end,
                 context_since_last_summary=rapid_context,
-                transcription_window_ids=transcription_window_ids
+                transcription_window_ids=transcription_window_ids,
+                summary_window=window,  # Pass window for plugin storage
             )
             
-            # Store result in window for other plugins to access
-            self._window_manager.store_plugin_result(
-                window_id=summary_window_id,
-                plugin_name="rapid_summary",
-                result=result,
-                include_in_context=True,
-            )
+            # Note: Result is now stored in plugin results via summary_window.store_result()
+            # The old store_plugin_result call is no longer needed since task.py handles it
             
             await result_callback(result)
             return result
