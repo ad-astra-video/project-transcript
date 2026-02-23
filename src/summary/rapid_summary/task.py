@@ -43,7 +43,7 @@ class RapidSummaryTask:
         self,
         llm_client: LLMClient,
         rapid_summary_response_json_schema: Dict[str, Any] = None,
-        max_tokens: int = 500,
+        max_tokens: int = 4096,
         temperature: float = 0.3,
     ):
         """Initialize the rapid summary task.
