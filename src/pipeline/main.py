@@ -422,8 +422,8 @@ async def _process_transcription_async(window_samples: np.ndarray, window_start_
         
         # Emit transcription_window_received monitoring event
         if PROCESSOR and hasattr(PROCESSOR, 'send_monitoring_event'):
-            text_length = sum(len(seg.get("text", "")) for seg in segments)
-            word_count = sum(len(seg.get("text", "").split()) for seg in segments)
+            text_length = sum(len(getattr(seg, "text", "")) for seg in segments)
+            word_count = sum(len(getattr(seg, "text", "").split()) for seg in segments)
             duration_seconds = window_end_ts - window_start_ts
             await PROCESSOR.send_monitoring_event(
                 {
