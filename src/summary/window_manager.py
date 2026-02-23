@@ -4,11 +4,42 @@ Window management for transcription summarization.
 Contains WindowInsight, TranscriptionWindow, SummaryWindow, and WindowManager classes.
 """
 
+import json
 import logging
+import threading
 from dataclasses import dataclass, field
-from typing import Optional, List, Dict, Any
+from typing import Optional, List, Dict, Any, Callable, Tuple
 
 logger = logging.getLogger(__name__)
+
+
+# ==================== Constants for Plugin Result Size Limits ====================
+
+MAX_PLUGIN_RESULTS_PER_WINDOW = 50
+MAX_PLUGIN_RESULT_SIZE = 1024 * 1024 * 5  # 5MB
+MAX_PLUGIN_NAME_LENGTH = 64
+
+
+# ==================== Custom Exceptions ====================
+
+class WindowManagerError(Exception):
+    """Base exception for WindowManager errors."""
+    pass
+
+
+class WindowNotFoundError(WindowManagerError):
+    """Raised when a window lookup fails."""
+    pass
+
+
+class PluginResultError(WindowManagerError):
+    """Raised when plugin result operations fail."""
+    pass
+
+
+class FormatCallbackError(WindowManagerError):
+    """Raised when a format callback fails."""
+    pass
 
 
 @dataclass
@@ -62,6 +93,78 @@ class SummaryWindow:
     char_count: int  # Length of text for context limit calculation
     processed: bool = False  # Track if window has been processed by LLM
     transcription_window_ids: List[int] = field(default_factory=list)  # List of transcription window IDs that created this summary
+    
+    # Plugin results storage
+    plugin_results: Dict[str, Dict[str, Any]] = field(default_factory=dict)
+    
+    def store_result(
+        self,
+        plugin_name: str,
+        result: Any,
+        include_in_context: bool = True,
+    ) -> None:
+        """Store a plugin's result in this window."""
+        # Validate plugin_name
+        if not plugin_name or not isinstance(plugin_name, str):
+            raise PluginResultError(
+                f"Invalid plugin_name: {plugin_name!r}. Must be non-empty string."
+            )
+        
+        # Validate result size to prevent memory issues
+        result_size = len(str(result))
+        if result_size > MAX_PLUGIN_RESULT_SIZE:
+            raise PluginResultError(
+                f"Plugin result too large: {result_size} bytes > {MAX_PLUGIN_RESULT_SIZE} bytes"
+            )
+        
+        self.plugin_results[plugin_name] = {
+            "data": result,
+            "include_in_context": include_in_context,
+        }
+    
+    def get_result(self, plugin_name: str) -> Optional[Any]:
+        """Get a plugin's result from this window."""
+        plugin_data = self.plugin_results.get(plugin_name)
+        if plugin_data:
+            return plugin_data.get("data")
+        return None
+    
+    def get_all_results(self) -> Dict[str, Any]:
+        """Get all plugin results from this window."""
+        return {
+            name: data.get("data")
+            for name, data in self.plugin_results.items()
+        }
+    
+    def format_result_for_context(
+        self,
+        data: Any,
+        format_callback: Optional[Callable[[Any], str]] = None,
+    ) -> Optional[str]:
+        """Format plugin data for context using provided callback."""
+        if not data:
+            return None
+        
+        if format_callback:
+            try:
+                return format_callback(data)
+            except Exception as e:
+                logger.error(
+                    "Format callback failed for plugin data: %s",
+                    str(e),
+                    exc_info=True
+                )
+                return None
+        
+        # Default: JSON dump if no callback
+        try:
+            return json.dumps(data, indent=2)
+        except (TypeError, ValueError) as e:
+            logger.warning(
+                "Failed to serialize plugin result to JSON: %s",
+                str(e)
+            )
+            return str(data)  # Fallback to string conversion
 
 
 class WindowManager:
@@ -85,6 +188,149 @@ class WindowManager:
         self._first_window_timestamp: Optional[float] = None  # Track first window timestamp for self-contained delay logic
         self._next_insight_id: int = 0  # Counter for unique insight IDs
         self._last_processed_timestamp_end: Optional[float] = None  # Track last processed timestamp end for deduplication
+        
+        # Thread lock for thread safety
+        self._lock = threading.RLock()
+        
+        # Plugin format callbacks registry
+        self._plugin_format_callbacks: Dict[str, Callable[[Any], str]] = {}
+    
+    # Register plugin format callback
+    def register_plugin_format_callback(
+        self,
+        plugin_name: str,
+        callback: Callable[[Any], str],
+    ) -> None:
+        """Register a format callback for a plugin."""
+        with self._lock:
+            self._plugin_format_callbacks[plugin_name] = callback
+    
+    # Get window by ID (O(1) lookup)
+    def get_window(self, window_id: int) -> Optional[SummaryWindow]:
+        """Get a summary window by ID using O(1) lookup."""
+        index = self._window_id_to_index.get(window_id)
+        
+        if index is None:
+            logger.warning(
+                "Window ID %d not found in index. "
+                "Window may never have existed or was dropped.",
+                window_id
+            )
+            return None
+        
+        if not 0 <= index < len(self._summary_windows):
+            logger.error(
+                "Window index %d out of bounds for %d windows. "
+                "Index may be stale.",
+                index, len(self._summary_windows)
+            )
+            return None
+        
+        return self._summary_windows[index]
+    
+    # Get accumulated text and results with per-plugin token limits
+    def get_accumulated_text_and_results(
+        self,
+        text_token_limit: int = 0,
+        result_types: Optional[List[str]] = None,
+        result_token_limit: Optional[Dict[str, int]] = None
+    ) -> Tuple[str, Dict[str, List[str]], int, Dict[str, float]]:
+        """
+        Get accumulated text and plugin results from summary windows.
+        
+        Args:
+            text_token_limit: Max tokens for accumulated text
+            result_types: Optional list of plugin names to include
+            result_token_limit: Optional dict of {plugin_name: token_limit}.
+                               If None, all results are included.
+        
+        Returns:
+            Tuple of (accumulated_text, plugin_results_dict, text_token_count, results_per_window_dict)
+
+            plugin_results_dict format: {plugin_name: [formatted_result_text, ...], ...}
+            results_per_window_dict format: {plugin_name: results_per_window_ratio, ...}
+        """
+        try:
+            with self._lock:
+                accumulated_text_parts = []
+                text_token_count = 0
+                plugin_results: Dict[str, List[str]] = {}  # plugin_name -> list of formatted texts
+                
+                # Track result counts per plugin for metrics
+                plugin_result_counts: Dict[str, int] = {}
+                
+                # Track token usage per plugin (only used when result_token_limit is provided)
+                plugin_token_counts: Dict[str, int] = {}
+                
+                for window in reversed(self._summary_windows):
+                    if text_token_limit > 0:
+                        # Estimate tokens for this window's text
+                        window_tokens = window.char_count // 4
+                        
+                        # Check if adding this window would exceed text limit
+                        if text_token_limit == 0 or text_token_count + window_tokens <= text_token_limit:
+                            accumulated_text_parts.insert(0, window.text)
+                            text_token_count += window_tokens
+                        else:
+                            # at limit of context, exit loop
+                            break
+                    
+                    # if not requesting results from plugins then skip
+                    if result_types is None:
+                        continue
+
+                    # Collect plugin results for this window (regardless of text limit)
+                    if window.plugin_results:
+                        for plugin_name, data in window.plugin_results.items():
+                            if result_types and plugin_name not in result_types:
+                                continue
+                            
+                            plugin_data = data.get("data")
+                            include_flag = data.get("include_in_context", True)
+                            
+                            if not include_flag or not plugin_data:
+                                continue
+                            
+                            callback = self._plugin_format_callbacks.get(plugin_name)
+                            formatted = window.format_result_for_context(plugin_data, callback)
+                            
+                            if formatted:
+                                result_tokens = len(formatted) // 4
+                                
+                                # Check per-plugin token limit if provided
+                                if result_token_limit is not None:
+                                    plugin_limit = result_token_limit.get(plugin_name)
+                                    if plugin_limit is not None:
+                                        current_count = plugin_token_counts.get(plugin_name, 0)
+                                        if current_count + result_tokens > plugin_limit:
+                                            continue
+                                
+                                # Append to list (not overwrite)
+                                if plugin_name not in plugin_results:
+                                    plugin_results[plugin_name] = []
+                                    plugin_token_counts[plugin_name] = 0
+                                    plugin_result_counts[plugin_name] = 0
+                                plugin_results[plugin_name].append(formatted)
+                                plugin_result_counts[plugin_name] += 1
+                                if result_token_limit is not None:
+                                    plugin_token_counts[plugin_name] += result_tokens
+                
+                accumulated_text = "\n".join(accumulated_text_parts)
+                
+                # Calculate results per window for each plugin
+                window_count = len(self._summary_windows) if self._summary_windows else 1
+                results_per_window = {
+                    plugin_name: count / window_count
+                    for plugin_name, count in plugin_result_counts.items()
+                }
+                
+                return accumulated_text, plugin_results, text_token_count, results_per_window
+        except RuntimeError as e:
+            logger.error("Runtime error during accumulation: %s", str(e))
+            return "", {}, 0, {}
+        except Exception as e:
+            logger.error("Unexpected error during accumulation: %s", str(e))
+            return "", {}, 0, {}
     
     def add_summary_window(
         self,

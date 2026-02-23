@@ -13,6 +13,27 @@ from .prompts import SYSTEM_PROMPT, SYSTEM_PROMPT_OUTPUT_CONSTRAINTS, CONTENT_TY
 logger = logging.getLogger(__name__)
 
 
+def _format_context_summary_for_context(result: Dict[str, Any]) -> str:
+    """Format context_summary result for AI context."""
+    import json
+    
+    summary_text = result.get("summary_text", "{}")
+    
+    try:
+        summary_data = json.loads(summary_text)
+        insights = summary_data.get("insights", [])
+        
+        formatted_insights = []
+        for insight in insights:
+            formatted_insights.append(
+                f"- {insight.get('insight_type')}: {insight.get('insight_text')}"
+            )
+        
+        return f"### Insights\n" + "\n".join(formatted_insights)
+    except (json.JSONDecodeError, TypeError, KeyError) as e:
+        logger.warning("Failed to parse context_summary result: %s", str(e))
+        return summary_text
+
 
 class ContentTypeStateHolder:
     """Simple holder for content type state to pass to tasks."""
@@ -45,6 +66,7 @@ class ContextSummaryPlugin:
         # Note: message_format_mode is now managed by LLMClient
         self._task = ContextSummaryTask(
             llm_client=self._llm.reasoning_llm_client,
+            rapid_llm_client=self._llm.rapid_llm_client,
             content_type_state=self._content_type_state,
             window_manager=self._window_manager,
         )
@@ -128,6 +150,15 @@ class ContextSummaryPlugin:
         try:
             # Use pre-created task - it handles context building, text retrieval, and result processing internally
             result = await self._task.process_context_summary(summary_window_id)
+            
+            # Store result in window for other plugins to access
+            window = self._window_manager.get_window(summary_window_id)
+            if window:
+                window.store_result(
+                    plugin_name="context_summary",
+                    result=result,
+                    include_in_context=False,
+                )
             
             segments = [
                 {
@@ -219,6 +250,12 @@ class ContextSummaryPlugin:
 def init_plugin(plugin_name: str, window_manager, llm_manager, result_callback: Callable,
                 summary_client=None, send_monitoring_event_callback=None):
     """Initialize the plugin and register with summary_client."""
+    # Register format callback for plugin results
+    window_manager.register_plugin_format_callback(
+        "context_summary",
+        _format_context_summary_for_context,
+    )
+    
     initial_delay = summary_client.initial_summary_delay_seconds if summary_client else 0.0
     
     plugin_instance = ContextSummaryPlugin(

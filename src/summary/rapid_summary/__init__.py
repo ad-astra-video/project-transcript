@@ -12,6 +12,21 @@ from .task import RapidSummaryTask
 
 logger = logging.getLogger(__name__)
 
+
+def _format_rapid_summary_for_context(result: Dict[str, Any]) -> str:
+    """Format rapid_summary result for AI context."""
+    try:
+        segments = result.get("segments", [])
+        
+        if segments:
+            summary = segments[0].get("summary", "")
+            return f"### Rapid Summary\n{summary}"
+        return "No summary available"
+    except (TypeError, IndexError, KeyError) as e:
+        logger.warning("Failed to format rapid_summary result: %s", str(e))
+        return "No summary available"
+
+
 # Module-level references (set by init_plugin)
 _window_manager = None
 _summary_client = None
@@ -121,6 +136,15 @@ class RapidSummaryPlugin:
                 transcription_window_ids=transcription_window_ids
             )
             
+            # Store result in window for other plugins to access
+            window = self._window_manager.get_window(summary_window_id)
+            if window:
+                window.store_result(
+                    plugin_name="rapid_summary",
+                    result=result,
+                    include_in_context=True,
+                )
+            
             await result_callback(result)
             return result
         except Exception as e:
@@ -181,6 +205,12 @@ def init_plugin(plugin_name: str, window_manager, llm_manager, result_callback: 
                 summary_client=None, send_monitoring_event_callback=None):
     """Initialize the plugin and register with summary_client."""
     global _window_manager, _summary_client, _result_callback
+    
+    # Register format callback for plugin results
+    window_manager.register_plugin_format_callback(
+        "rapid_summary",
+        _format_rapid_summary_for_context,
+    )
     
     _window_manager = window_manager
     _summary_client = summary_client  # Keep for registration only

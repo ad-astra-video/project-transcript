@@ -16,7 +16,7 @@ from openai.types.chat.chat_completion import ChatCompletion
 from pydantic import BaseModel
 
 from ..llm_manager import LLMClient
-from ..window_manager import WindowInsight
+from ..window_manager import a
 from .prompts import (
     SYSTEM_PROMPT,
     SYSTEM_PROMPT_OUTPUT_CONSTRAINTS,
@@ -266,10 +266,15 @@ class ContextSummaryTask:
         if self._window_manager is None:
             raise RuntimeError("WindowManager not initialized")
         
-        # Build context using the pre-created task
-        context, prior_insights, context_text_length, insights_per_window = self.build_context(
-            include_insights=True
+        # Build context using the new method (get text without plugin results for backward compatibility)
+        context, context_text_length, results_per_window = self.build_context(
+            text_token_limit=0,
+            result_types=["context_summary"],
         )
+        
+        # For backward compatibility, also get insights using the old method
+        # This maintains the existing behavior while using the new plugin result system
+        _, prior_insights, _, insights_per_window = self._window_manager.get_accumulated_text_and_insights()
         
         # Get text to analyze based on whether this is the first summary
         # (This logic should be coordinated with the plugin's _has_performed_summary state)
@@ -356,19 +361,34 @@ class ContextSummaryTask:
 
         return payload
     
-    def build_context(self, include_insights: bool = True) -> Tuple[str, List[Any], int, float]:
+    def build_context(
+        self,
+        text_token_limit: int = 0,
+        result_types: Optional[List[str]] = None,
+        result_token_limit: Optional[Dict[str, int]] = None,
+    ) -> Tuple[str, int, Dict[str, float]]:
         """
-        Build context string with text and optionally insights from accumulated windows.
-        Single-pass: loops through accumulated windows once to get both text and insights.
+        Build context string with text and plugin results from accumulated windows.
+        
+        Args:
+            text_token_limit: Max tokens for accumulated text
+            result_types: Optional list of plugin names to include
+            result_token_limit: Optional dict of {plugin_name: token_limit}
         
         Returns:
-            Tuple of (formatted_context_string, list_of_insights_from_accumulated_windows, text_length, insights_per_window_metric)
+            Tuple of (formatted_context_string, text_token_count, results_per_window_dict)
         """
         if self._window_manager is None:
-            return "", [], 0, 0.0
+            return "", 0, {}
         
-        # Single-pass accumulation from same windows
-        accumulated_text, insights, text_length, insights_per_window = self._window_manager.get_accumulated_text_and_insights()
+        # Use get_accumulated_text_and_results
+        accumulated_text, plugin_results, text_token_count, results_per_window = (
+            self._window_manager.get_accumulated_text_and_results(
+                text_token_limit=text_token_limit,
+                result_types=result_types,
+                result_token_limit=result_token_limit,
+            )
+        )
         
         parts = []
         
@@ -376,13 +396,18 @@ class ContextSummaryTask:
         if accumulated_text:
             parts.append(f"## PRIOR TEXT\n{accumulated_text}")
         
-        # Add insights from same accumulated windows
-        if include_insights and insights:
-            insights_text = self._format_insights_for_context(insights)
-            parts.append(f"## PRIOR INSIGHTS\n{insights_text}")
+        # Add plugin results (dict of plugin_name -> list of formatted texts)
+        if plugin_results:
+            result_parts = []
+            for plugin_name, formatted_list in plugin_results.items():
+                # Join all results for this plugin
+                result_parts.extend(formatted_list)
+            
+            if result_parts:
+                parts.append(f"## OTHER PLUGIN RESULTS\n" + "\n\n---\n\n".join(result_parts))
         
         context_string = "\n\n".join(parts) if parts else ""
-        return context_string, insights, text_length, insights_per_window
+        return context_string, text_token_count, results_per_window
     
     def _format_insights_for_context(self, insights: List[Any]) -> str:
         """Format insights for inclusion in Prior Context with IDs and timing hints."""
