@@ -7,7 +7,8 @@ The content type state is now managed by the plugins.
 
 import pytest
 from src.summary.summary_client import SummaryClient
-from src.summary.window_manager import WindowManager, WindowInsight
+from src.summary.window_manager import WindowManager
+from src.summary.context_summary.task import WindowInsight
 
 
 class TestSummaryClientReset:
@@ -96,19 +97,26 @@ class TestWindowManagerReset:
         assert len(wm._summary_windows) == 0
         assert wm._next_window_id == 0
     
-    def test_window_manager_resets_insight_counter(self):
-        """Test that WindowManager resets insight ID counter."""
-        wm = WindowManager()
+    def test_context_summary_task_insight_counter(self):
+        """Test that ContextSummaryTask has insight ID counter."""
+        from src.summary.context_summary.task import ContextSummaryTask
+        from unittest.mock import MagicMock
         
-        # Add a window with insights to increment counter
-        wm.add_summary_window("text1", 0.0, 5.0, [1])
-        wm._next_insight_id = 10
+        task = ContextSummaryTask(
+            llm_client=MagicMock(),
+            window_manager=WindowManager()
+        )
         
-        # Clear
-        wm.clear()
+        # Get first insight ID
+        first_id = task._get_next_insight_id()
+        assert first_id == 1
         
-        # Counter should be reset
-        assert wm._next_insight_id == 0
+        # Get second insight ID
+        second_id = task._get_next_insight_id()
+        assert second_id == 2
+        
+        # Counter increments correctly
+        assert task._next_insight_id == 2
 
 
 if __name__ == "__main__":

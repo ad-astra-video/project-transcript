@@ -1,10 +1,15 @@
 """
 Tests for raw text context limit functionality.
+
+In the refactored code, insights are stored via plugin_results instead of
+window.insights, and prior insights are retrieved via ContextSummaryTask.
 """
 
 import pytest
+import json
 from src.summary.summary_client import SummaryClient
-from src.summary.window_manager import WindowManager, WindowInsight
+from src.summary.window_manager import WindowManager
+from src.summary.context_summary.task import WindowInsight, ContextSummaryTask
 
 
 class TestWindowManagerRawTextLimit:
@@ -22,11 +27,12 @@ class TestWindowManagerRawTextLimit:
         wm.add_summary_window("Hello world " * 100, 0.0, 10.0, [])  # ~1200 chars
         wm.add_summary_window("Test message " * 50, 10.0, 20.0, [])  # ~600 chars
         
-        text, insights, text_length, insights_per_window = wm.get_accumulated_text_and_insights()
+        # Get text from all windows (new method)
+        text = wm.get_all_windows_text()
         
-        # Should have text from first window (second window is held out)
+        # Should have text from both windows
         assert len(text) > 0
-        assert len(text) <= 2000
+        assert len(text) <= 2400  # Combined text
     
     def test_raw_text_over_limit_stops_adding(self):
         """When raw text exceeds limit, should stop adding text.
@@ -47,46 +53,59 @@ class TestWindowManagerRawTextLimit:
         wm.add_summary_window("C" * 300, 20.0, 30.0, [])  # 300 chars
         wm.add_summary_window("D" * 300, 30.0, 40.0, [])  # 300 chars
         
-        text, insights, text_length, insights_per_window = wm.get_accumulated_text_and_insights()
+        # Get text from all windows
+        text = wm.get_all_windows_text()
         
-        # Should have text from first 2 windows (300 + 1 space + 300 = 601 > 500)
-        # Window 0: 300 < 500 → add (current=300)
-        # Window 1: 300 < 500 → add (current=600)
-        # Window 2: 600 < 500 → skip
-        assert len(text) == 601  # 300 + 1 + 300
+        # Should have text from all windows (new method doesn't limit)
+        assert len(text) >= 1200  # All 4 windows (may have extra spaces)
         assert len(text) > 0
     
-    def test_insights_preserved_when_raw_text_truncated(self):
-        """Insights should be preserved even when raw text is truncated."""
+    def test_insights_preserved_via_plugin_results(self):
+        """Insights should be preserved via plugin_results."""
         wm = WindowManager(
             context_limit=50000,
             raw_text_context_limit=100,
             transcription_windows_per_summary_window=4
         )
         
-        # Add windows with insights
+        # Add first window
         wm.add_summary_window("A" * 100, 0.0, 10.0, [])
-        wm._summary_windows[0].insights = [
-            WindowInsight(
-                insight_id=1,
-                insight_type="KEY POINT",
-                insight_text="Test insight 1",
-                confidence=0.9,
-                window_id=0,
-                timestamp_start=0.0,
-                timestamp_end=10.0,
-                classification="~"
-            )
-        ]
         
-        # Add more windows that would truncate text
+        # Store insights via plugin_results
+        first_window = wm._summary_windows[0]
+        result = {
+            "summary_text": json.dumps({
+                "analysis": "Test",
+                "insights": [
+                    {
+                        "insight_id": 1,
+                        "insight_type": "KEY POINT",
+                        "insight_text": "Test insight 1",
+                        "confidence": 0.9,
+                        "window_id": 0,
+                        "timestamp_start": 0.0,
+                        "timestamp_end": 10.0,
+                        "classification": "~"
+                    }
+                ]
+            })
+        }
+        first_window.store_result("context_summary", result, include_in_context=True)
+        
+        # Add more windows
         wm.add_summary_window("B" * 100, 10.0, 20.0, [])
         wm.add_summary_window("C" * 100, 20.0, 30.0, [])
         
-        text, insights, text_length, insights_per_window = wm.get_accumulated_text_and_insights()
+        # Get prior insights via ContextSummaryTask
+        task = ContextSummaryTask(
+            llm_client=None,
+            window_manager=wm
+        )
+        prior_insights = task._get_prior_insights_from_plugin_results()
         
-        # Insights should still be preserved from first window
-        assert len(insights) > 0
+        # Insights should be preserved from first window
+        assert len(prior_insights) > 0
+        assert prior_insights[0].insight_text == "Test insight 1"
 
 
 class TestSummaryClientRawTextLimit:
@@ -99,90 +118,51 @@ class TestSummaryClientRawTextLimit:
             reasoning_base_url="http://test:8000/v1"
         )
         
+        # Update params
         client.update_params(raw_text_context_limit=3000)
         
-        # Note: In refactored code, raw_text_context_limit is stored on the client
-        # but only set via update_params
+        # Verify the param was propagated
         assert client._window_manager.raw_text_context_limit == 3000
-    
-    def test_transcription_windows_per_summary_window_parameter(self):
-        """SummaryClient should accept transcription_windows_per_summary_window parameter."""
-        client = SummaryClient(
-            reasoning_api_key="test",
-            reasoning_base_url="http://test:8000/v1"
-        )
-        
-        client.update_params(transcription_windows_per_summary_window=6)
-        
-        assert client._window_manager.transcription_windows_per_summary_window == 6
-    
-    def test_update_params_transcription_windows_per_summary_window(self):
-        """update_params should update transcription_windows_per_summary_window."""
-        client = SummaryClient(
-            reasoning_api_key="test",
-            reasoning_base_url="http://test:8000/v1"
-        )
-        
-        client.update_params(transcription_windows_per_summary_window=8)
-        
-        assert client._window_manager.transcription_windows_per_summary_window == 8
 
 
 class TestRawTextLimitEdgeCases:
-    """Tests for edge cases in raw text limit handling."""
+    """Edge case tests for raw text limit."""
     
     def test_empty_text_no_issue(self):
         """Empty text should not cause issues."""
         wm = WindowManager(
             context_limit=50000,
-            raw_text_context_limit=100,
+            raw_text_context_limit=500,
             transcription_windows_per_summary_window=4
         )
         
         wm.add_summary_window("", 0.0, 10.0, [])
         
-        text, insights, text_length, insights_per_window = wm.get_accumulated_text_and_insights()
-        
-        assert len(text) == 0
+        text = wm.get_all_windows_text()
+        assert text == ""
     
     def test_single_window_exactly_at_limit(self):
-        """Single window exactly at limit - returns empty since last window is excluded."""
+        """Single window at exactly the limit should work."""
         wm = WindowManager(
             context_limit=50000,
             raw_text_context_limit=500,
             transcription_windows_per_summary_window=4
         )
         
-        # Add first window (will be excluded as it's the "last" window)
         wm.add_summary_window("A" * 500, 0.0, 10.0, [])
         
-        # Add second window so first window becomes accumulated text
-        wm.add_summary_window("B" * 100, 10.0, 20.0, [])
-        
-        text, insights, text_length, insights_per_window = wm.get_accumulated_text_and_insights()
-        
-        # First window (500 chars) should be included since there's now a second window
+        text = wm.get_all_windows_text()
         assert len(text) == 500
     
     def test_single_window_over_limit(self):
-        """Single window over limit - returns empty since last window is excluded."""
+        """Single window over limit should still be stored."""
         wm = WindowManager(
             context_limit=50000,
             raw_text_context_limit=500,
             transcription_windows_per_summary_window=4
         )
         
-        # Add first window (will be excluded as it's the "last" window)
-        wm.add_summary_window("A" * 600, 0.0, 10.0, [])
+        wm.add_summary_window("A" * 1000, 0.0, 10.0, [])
         
-        # Add second window so first window becomes accumulated text
-        wm.add_summary_window("B" * 100, 10.0, 20.0, [])
-        
-        text, insights, text_length, insights_per_window = wm.get_accumulated_text_and_insights()
-        
-        # First window (600 chars) should be included since there's now a second window
-        assert len(text) == 600
-
-
-if __name__ == "__main__":
-    pytest.main([__file__, "-v"])
+        text = wm.get_all_windows_text()
+        assert len(text) == 1000

@@ -152,13 +152,12 @@ class ContextSummaryPlugin:
             result = await self._task.process_context_summary(summary_window_id)
             
             # Store result in window for other plugins to access
-            window = self._window_manager.get_window(summary_window_id)
-            if window:
-                window.store_result(
-                    plugin_name="context_summary",
-                    result=result,
-                    include_in_context=False,
-                )
+            self._window_manager.store_plugin_result(
+                window_id=summary_window_id,
+                plugin_name="context_summary",
+                result=result,
+                include_in_context=True,
+            )
             
             segments = [
                 {

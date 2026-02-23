@@ -137,13 +137,12 @@ class RapidSummaryPlugin:
             )
             
             # Store result in window for other plugins to access
-            window = self._window_manager.get_window(summary_window_id)
-            if window:
-                window.store_result(
-                    plugin_name="rapid_summary",
-                    result=result,
-                    include_in_context=True,
-                )
+            self._window_manager.store_plugin_result(
+                window_id=summary_window_id,
+                plugin_name="rapid_summary",
+                result=result,
+                include_in_context=True,
+            )
             
             await result_callback(result)
             return result

@@ -54,7 +54,6 @@ class TestWindowManagerReset:
         
         # Verify initial state
         assert manager._next_window_id == 2
-        assert manager._next_insight_id == 5
         assert manager._first_window_timestamp == 0.0
         
         # Clear
@@ -62,7 +61,6 @@ class TestWindowManagerReset:
         
         # Verify counters reset
         assert manager._next_window_id == 0
-        assert manager._next_insight_id == 0
         assert manager._first_window_timestamp is None
     
     def test_window_manager_clear_with_empty_windows(self):
@@ -71,7 +69,6 @@ class TestWindowManagerReset:
         
         # Verify initial state
         assert manager._next_window_id == 0
-        assert manager._next_insight_id == 0
         assert manager._first_window_timestamp is None
         assert len(manager._summary_windows) == 0
         
@@ -80,7 +77,6 @@ class TestWindowManagerReset:
         
         # Verify still zero
         assert manager._next_window_id == 0
-        assert manager._next_insight_id == 0
         assert manager._first_window_timestamp is None
     
     def test_window_manager_first_timestamp_reset(self):

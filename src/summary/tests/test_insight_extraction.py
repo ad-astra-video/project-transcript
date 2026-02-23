@@ -73,8 +73,8 @@ class TestExtractInsights:
         assert "insights" in result
         assert len(result["insights"]) == 0
     
-    def test_extract_insights_assigns_window_id(self):
-        """Test that insights are assigned the correct window_id and stored in WindowManager."""
+    def test_extract_insights_assigns_insight_id(self):
+        """Test that insights are assigned unique IDs."""
         task = self.create_task()
         
         # Add the summary window first (required for adding insights)
@@ -94,11 +94,13 @@ class TestExtractInsights:
         
         result = task._extract_insights(parsed_data, 0, 10.0, 15.0)
         
-        # In refactored code, insights are stored in WindowManager with window_id
-        # Verify insight was added to window 0
-        window_insights = task._window_manager.get_window_insights(0)
-        assert len(window_insights) == 1
-        assert window_insights[0].window_id == 0
+        # In refactored code, insights are returned in the result with assigned IDs
+        # Verify insight was assigned an ID and returned in result
+        assert "insights" in result
+        assert len(result["insights"]) == 1
+        assert result["insights"][0]["insight_id"] == 1  # First insight gets ID 1
+        assert result["insights"][0]["insight_type"] == "KEY POINT"
+        assert result["insights"][0]["insight_text"] == "Test insight"
 
 
 class TestInsightTypeEnum:

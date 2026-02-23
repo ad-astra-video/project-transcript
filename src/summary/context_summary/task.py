@@ -16,7 +16,7 @@ from openai.types.chat.chat_completion import ChatCompletion
 from pydantic import BaseModel
 
 from ..llm_manager import LLMClient
-from ..window_manager import a
+from dataclasses import dataclass, field
 from .prompts import (
     SYSTEM_PROMPT,
     SYSTEM_PROMPT_OUTPUT_CONSTRAINTS,
@@ -26,6 +26,40 @@ from .prompts import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+# ==================== WindowInsight (moved from window_manager.py) ====================
+
+@dataclass
+class WindowInsight:
+    """Insight extracted from a summary window."""
+    insight_id: int = 0  # Unique identifier assigned by system (not LLM)
+    insight_type: str = ""
+    insight_text: str = ""
+    confidence: float = 0.0  # Confidence score from LLM (0.0-1.0)
+    window_id: int = 0
+    timestamp_start: float = 0.0
+    timestamp_end: float = 0.0
+    classification: str = "~"
+    continuation_of: Optional[int] = None  # Previous insight ID this continues
+    correction_of: Optional[int] = None  # Previous insight ID this corrects
+    
+    # Excludes timestamp_start and timestamp_end
+    #   this is used for sending over json data channel which includes timing for all insights sent
+    def as_dict(self) -> Dict[str, Any]:
+        """Export as dictionary for JSON serialization."""
+        return {
+            "insight_id": self.insight_id,
+            "insight_type": self.insight_type,
+            "insight_text": self.insight_text,
+            "confidence": self.confidence,
+            "classification": self.classification,
+            "continuation_of": self.continuation_of,
+            "correction_of": self.correction_of,
+        }
+
+
+# ==================== End WindowInsight ====================
 
 
 # ==================== Types and Schemas ====================
@@ -107,8 +141,77 @@ class ContextSummaryTask:
         self._content_type_state = content_type_state
         self._window_manager = window_manager
         
+        # Counter for unique insight IDs (used for continuation/correction references)
+        self._next_insight_id: int = 0
+        
         # Store last raw LLM response for debugging
         self._last_summary_raw_response: Optional[str] = None
+    
+    def _get_prior_insights_from_plugin_results(self) -> List[WindowInsight]:
+        """
+        Retrieve prior insights from plugin_results in all windows except the last one.
+        
+        The last window is the "current" window being analyzed - its insights are being
+        created. All previous windows' insights form the prior context for continuation/correction.
+        
+        Returns:
+            List of WindowInsight objects from prior windows
+        """
+        if self._window_manager is None:
+            return []
+        
+        prior_insights = []
+        
+        # Get all summary windows
+        windows = self._window_manager._summary_windows
+        
+        if len(windows) <= 1:
+            return []
+        
+        # All windows except the last one (current window being analyzed)
+        prior_windows = windows[:-1]
+        
+        for window in prior_windows:
+            # Get context_summary plugin result from this window
+            result = window.get_result("context_summary")
+            if result:
+                # Extract insights from the result
+                summary_text = result.get("summary_text", "{}")
+                try:
+                    import json
+                    summary_data = json.loads(summary_text)
+                    insights_list = summary_data.get("insights", [])
+                    
+                    for insight_dict in insights_list:
+                        # Convert dict back to WindowInsight for validation
+                        insight = WindowInsight(
+                            insight_id=insight_dict.get("insight_id", 0),
+                            insight_type=insight_dict.get("insight_type", "NOTES"),
+                            insight_text=insight_dict.get("insight_text", ""),
+                            confidence=insight_dict.get("confidence", 0.0),
+                            window_id=insight_dict.get("window_id", window.window_id),
+                            timestamp_start=insight_dict.get("timestamp_start", window.timestamp_start),
+                            timestamp_end=insight_dict.get("timestamp_end", window.timestamp_end),
+                            classification=insight_dict.get("classification", "~"),
+                            continuation_of=insight_dict.get("continuation_of"),
+                            correction_of=insight_dict.get("correction_of"),
+                        )
+                        prior_insights.append(insight)
+                except (json.JSONDecodeError, TypeError, KeyError) as e:
+                    logger.warning(f"Failed to parse prior insights from window {window.window_id}: {e}")
+        
+        return prior_insights
+    
+    def _get_next_insight_id(self) -> int:
+        """
+        Increment and return the next unique insight ID.
+        First call returns 1, second returns 2, etc.
+        
+        Returns:
+            Unique integer ID for the next insight
+        """
+        self._next_insight_id += 1
+        return self._next_insight_id
     
     def _format_content_type_rules(self, content_type: str) -> str:
         """
@@ -272,9 +375,12 @@ class ContextSummaryTask:
             result_types=["context_summary"],
         )
         
-        # For backward compatibility, also get insights using the old method
-        # This maintains the existing behavior while using the new plugin result system
-        _, prior_insights, _, insights_per_window = self._window_manager.get_accumulated_text_and_insights()
+        # Get prior insights from plugin_results for continuation/correction validation
+        prior_insights = self._get_prior_insights_from_plugin_results()
+        
+        # Calculate insights_per_window metric
+        window_count = len(self._window_manager._summary_windows) - 1 if self._window_manager._summary_windows else 1
+        insights_per_window = len(prior_insights) / window_count if window_count > 0 else 0.0
         
         # Get text to analyze based on whether this is the first summary
         # (This logic should be coordinated with the plugin's _has_performed_summary state)
@@ -804,8 +910,8 @@ class ContextSummaryTask:
                     correction_of, prior_insights, "correction_of"
                 )
             
-            # Assign ID using system function
-            insight_id = self._window_manager._get_next_insight_id()
+            # Assign ID using local counter (for continuation/correction references)
+            insight_id = self._get_next_insight_id()
             
             # Create WindowInsight with system-assigned ID
             insight = WindowInsight(
@@ -820,14 +926,6 @@ class ContextSummaryTask:
                 continuation_of=continuation_of,
                 correction_of=correction_of,
             )
-            
-            # Add insight to window via WindowManager
-            result = self._window_manager.add_insight_to_window(window_id, insight)
-            if result == -1:
-                logger.error(
-                    f"Failed to add insight {insight_id} (type={insight.insight_type}) to window {window_id}. "
-                    f"Insight text: {insight.insight_text[:100]}..."
-                )
             
             # Use as_dict() for clean export to summary
             insights_for_summary.append(insight.as_dict())

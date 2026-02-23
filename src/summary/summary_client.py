@@ -14,8 +14,9 @@ from openai.types.chat.chat_completion import ChatCompletion
 from pydantic import BaseModel
 
 from .context_summary.prompts import SYSTEM_PROMPT, SYSTEM_PROMPT_OUTPUT_CONSTRAINTS
+from .context_summary.task import WindowInsight
 from .llm_manager import LLMManager, MessageFormatMode
-from .window_manager import WindowManager, WindowInsight
+from .window_manager import WindowManager
 
 logger = logging.getLogger(__name__)
 

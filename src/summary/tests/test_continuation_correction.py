@@ -7,8 +7,7 @@ InsightResponseItemSchema in context_summary/task.py.
 
 import pytest
 from src.summary.summary_client import SummaryClient
-from src.summary.window_manager import WindowInsight
-from src.summary.context_summary.task import InsightResponseItemSchema, InsightType, ClassificationField
+from src.summary.context_summary.task import WindowInsight, InsightResponseItemSchema, InsightType, ClassificationField
 
 
 class TestContinuationCorrectionParsing:
