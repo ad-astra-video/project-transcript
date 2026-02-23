@@ -17,7 +17,13 @@ from pydantic import BaseModel
 
 from ..llm_manager import LLMClient
 from ..window_manager import WindowInsight
-from .prompts import SYSTEM_PROMPT, SYSTEM_PROMPT_OUTPUT_CONSTRAINTS, CONTENT_TYPE_RULE_MODIFIERS
+from .prompts import (
+    SYSTEM_PROMPT,
+    SYSTEM_PROMPT_OUTPUT_CONSTRAINTS,
+    CONTENT_TYPE_RULE_MODIFIERS,
+    INSIGHT_CONSOLIDATION_PROMPT,
+    InsightConsolidationResponse
+)
 
 logger = logging.getLogger(__name__)
 
@@ -73,6 +79,7 @@ class ContextSummaryTask:
     def __init__(
         self,
         llm_client: Optional[LLMClient] = None,
+        rapid_llm_client: Optional[LLMClient] = None,
         max_tokens: int = 8192,
         temperature: float = 0.2,
         system_prompt: str = SYSTEM_PROMPT,
@@ -83,6 +90,7 @@ class ContextSummaryTask:
         
         Args:
             llm_client: Optional LLMClient for LLM calls (includes model and message building)
+            rapid_llm_client: Optional LLMClient for rapid/small model calls (used for consolidation)
             max_tokens: Maximum tokens to generate
             temperature: Temperature for generation
             system_prompt: System prompt for the LLM
@@ -90,10 +98,12 @@ class ContextSummaryTask:
             window_manager: Window manager for tracking windows
         """
         self._llm_client = llm_client
+        self._rapid_llm_client = rapid_llm_client
         self.max_tokens = max_tokens
         self.temperature = temperature
         self.system_prompt = system_prompt
         self.insights_response_json_schema = InsightsResponseSchema.model_json_schema()
+        self._consolidation_response_json_schema = InsightConsolidationResponse.model_json_schema()
         self._content_type_state = content_type_state
         self._window_manager = window_manager
         
@@ -399,6 +409,166 @@ class ContextSummaryTask:
         
         return "\n".join(formatted)
     
+    # ==================== Insight Consolidation Methods ====================
+    
+    def _find_duplicate_insight_types(
+        self,
+        insights: List[InsightResponseItemSchema]
+    ) -> Dict[str, List[InsightResponseItemSchema]]:
+        """Find insight types that appear more than once, excluding continuations/corrections.
+        
+        Args:
+            insights: List of extracted insights from the current window
+            
+        Returns:
+            Dictionary mapping insight_type to list of insights of that type,
+            only for types with more than 1 non-continuation/correction insight
+        """
+        from collections import defaultdict
+        
+        # Group insights by type, excluding continuations and corrections
+        type_groups: Dict[str, List[InsightResponseItemSchema]] = defaultdict(list)
+        
+        for insight in insights:
+            # Skip insights that are continuations or corrections - they are explicitly linked
+            if insight.continuation_of is not None or insight.correction_of is not None:
+                continue
+            
+            insight_type = insight.insight_type.value if hasattr(insight.insight_type, 'value') else str(insight.insight_type)
+            type_groups[insight_type].append(insight)
+        
+        # Return only types with more than 1 insight
+        return {
+            insight_type: insight_list
+            for insight_type, insight_list in type_groups.items()
+            if len(insight_list) > 1
+        }
+    
+    async def _consolidate_similar_insights(
+        self,
+        insights: List[InsightResponseItemSchema]
+    ) -> List[InsightResponseItemSchema]:
+        """Check for duplicate insight types and consolidate if similar.
+        
+        This method:
+        1. Groups insights by type (excluding continuations/corrections)
+        2. For each type with multiple insights, calls rapid_summary LLM to check similarity
+        3. If similar, consolidates into a single insight
+        
+        Args:
+            insights: List of extracted insights from the current window
+            
+        Returns:
+            List of insights with similar duplicate types consolidated
+        """
+        if not self._rapid_llm_client or len(insights) < 2:
+            return insights
+        
+        # Find duplicate insight types
+        duplicate_types = self._find_duplicate_insight_types(insights)
+        
+        if not duplicate_types:
+            return insights
+        
+        # Build a set of insight IDs to exclude (those that get consolidated)
+        consolidated_ids: set = set()
+        new_insights: List[InsightResponseItemSchema] = []
+        
+        for insight_type, type_insights in duplicate_types.items():
+            if len(type_insights) < 2:
+                new_insights.append(type_insights[0])
+                continue
+            
+            logger.info(
+                f"Found {len(type_insights)} insights of type {insight_type}, "
+                f"checking for consolidation: {[i.insight_text[:30] for i in type_insights]}"
+            )
+            
+            # Format insights for the consolidation prompt
+            insights_text = "\n".join(
+                f"- Insight {i+1}: {insight.insight_text}"
+                for i, insight in enumerate(type_insights)
+            )
+            
+            # Call rapid_summary LLM to check similarity
+            user_content = f"## Insights to Compare\n{insights_text}"
+            
+            try:
+                reasoning, content, input_tokens, output_tokens = await self._rapid_llm_client.create_completion(
+                    system_prompt=INSIGHT_CONSOLIDATION_PROMPT,
+                    user_content=user_content,
+                    temperature=0.3,
+                    max_tokens=200,
+                    response_format={
+                        "type": "json_schema",
+                        "json_schema": {
+                            "name": "insight_consolidation",
+                            "schema": self._consolidation_response_json_schema
+                        }
+                    }
+                )
+                
+                # Parse the response
+                try:
+                    parsed = InsightConsolidationResponse.model_validate_json(content)
+                    
+                    if parsed.are_similar and parsed.consolidated_text.strip():
+                        # Consolidate: create a single insight with combined text
+                        # Use the highest confidence from the group
+                        max_confidence = max(insight.confidence for insight in type_insights)
+                        
+                        # Use the classification from the first insight
+                        first_classification = type_insights[0].classification
+                        
+                        consolidated_insight = InsightResponseItemSchema(
+                            insight_type=type_insights[0].insight_type,
+                            insight_text=parsed.consolidated_text.strip(),
+                            confidence=max_confidence,
+                            classification=first_classification,
+                            continuation_of=None,
+                            correction_of=None
+                        )
+                        
+                        new_insights.append(consolidated_insight)
+                        
+                        # Mark these IDs as consolidated (exclude from final list)
+                        for insight in type_insights:
+                            consolidated_ids.add(id(insight))
+                        
+                        logger.info(
+                            f"Consolidated {len(type_insights)} insights of type {insight_type} "
+                            f"into: {parsed.consolidated_text[:50]}..."
+                        )
+                    else:
+                        # Not similar - keep all insights
+                        new_insights.extend(type_insights)
+                        # Mark as processed so they're not added again
+                        for insight in type_insights:
+                            consolidated_ids.add(id(insight))
+                        
+                except Exception as e:
+                    logger.warning(f"Failed to parse consolidation response: {e}")
+                    # Keep all insights on parse failure
+                    new_insights.extend(type_insights)
+                    # Mark as processed so they're not added again
+                    for insight in type_insights:
+                        consolidated_ids.add(id(insight))
+                    
+            except Exception as e:
+                logger.warning(f"Error calling consolidation LLM: {e}")
+                # Keep all insights on error
+                new_insights.extend(type_insights)
+                # Mark as processed so they're not added again
+                for insight in type_insights:
+                    consolidated_ids.add(id(insight))
+        
+        # Add insights that weren't part of any duplicate type
+        for insight in insights:
+            if id(insight) not in consolidated_ids:
+                new_insights.append(insight)
+        
+        return new_insights
+    
     # ==================== Insight Processing Methods ====================
     
     def _parse_reference_id(self, value: Any, field_name: str) -> Optional[int]:
@@ -693,10 +863,20 @@ class ContextSummaryTask:
             participants_enabled=participants_enabled
         )
         
+        # Get the processed insights list
+        if isinstance(processed_data, dict):
+            processed_insights = processed_data.get("insights", [])
+        else:
+            processed_insights = processed_data if isinstance(processed_data, list) else []
+        
+        # Consolidate similar insights of the same type
+        if self._rapid_llm_client and len(processed_insights) > 1:
+            processed_insights = await self._consolidate_similar_insights(processed_insights)
+        
         # Build the final payload
         payload = {
             "summary_text": json.dumps(processed_data) if isinstance(processed_data, dict) else summary_text,
-            "insights": processed_data.get("insights", []) if isinstance(processed_data, dict) else processed_data,
+            "insights": processed_insights,
         }
         
         return payload

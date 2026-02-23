@@ -2,6 +2,8 @@
 Prompt templates for context summary task.
 """
 
+from pydantic import BaseModel
+
 SYSTEM_PROMPT = """
 
 You are a high-performance conversation intelligence engine optimized for REAL-TIME transcription streams.
@@ -1275,4 +1277,43 @@ STORY HANDLING for unknown content type:
     },
 }
 
-__all__ = ["SYSTEM_PROMPT", "SYSTEM_PROMPT_OUTPUT_CONSTRAINTS", "CONTENT_TYPE_RULE_MODIFIERS"]
+
+# ==================== Insight Consolidation ====================
+
+class InsightConsolidationResponse(BaseModel):
+    """Schema for insight consolidation response from LLM."""
+    are_similar: bool
+    consolidated_text: str
+
+
+INSIGHT_CONSOLIDATION_PROMPT = """
+You are comparing multiple insights from a conversation transcript to determine if they cover similar topics and should be combined.
+
+## Task
+Given 2-3 insights of the same type, determine:
+1. Are they discussing the same or very similar topic?
+2. If yes, provide a consolidated single insight that captures all unique information
+
+## Input Insights
+{insights}
+
+## Output Format
+Respond with valid JSON:
+```json
+{
+  "are_similar": true/false,
+  "consolidated_text": "Combined insight text if similar, otherwise empty string"
+}
+```
+
+Only mark as similar if they are clearly about the same topic. Minor wording differences don't make them similar.
+"""
+
+
+__all__ = [
+    "SYSTEM_PROMPT",
+    "SYSTEM_PROMPT_OUTPUT_CONSTRAINTS",
+    "CONTENT_TYPE_RULE_MODIFIERS",
+    "InsightConsolidationResponse",
+    "INSIGHT_CONSOLIDATION_PROMPT"
+]
