@@ -14,7 +14,7 @@ logger = logging.getLogger(__name__)
 
 
 def _format_context_summary_for_context(result: Dict[str, Any]) -> str:
-    """Format context_summary result for AI context."""
+    """Format context_summary result for AI context with insight IDs and continuation markers."""
     import json
     
     summary_text = result.get("summary_text", "{}")
@@ -25,8 +25,24 @@ def _format_context_summary_for_context(result: Dict[str, Any]) -> str:
         
         formatted_insights = []
         for insight in insights:
+            # Include insight ID so LLM can reference it in continuation_of/correction_of
+            insight_id = insight.get("insight_id", 0)
+            id_hint = f"[#{insight_id}]" if insight_id else ""
+            
+            # Add continuation/correction markers if present
+            markers = []
+            continuation_of = insight.get("continuation_of")
+            correction_of = insight.get("correction_of")
+            if continuation_of:
+                markers.append(f"CONTINUATION of insight #{continuation_of}")
+            if correction_of:
+                markers.append(f"CORRECTION of insight #{correction_of}")
+            
+            marker_text = f" ({', '.join(markers)})" if markers else ""
+            
             formatted_insights.append(
-                f"- {insight.get('insight_type')}: {insight.get('insight_text')}"
+                f"- **{insight.get('insight_type', 'NOTES')}** {id_hint}: "
+                f"{insight.get('insight_text', '')}{marker_text}"
             )
         
         return f"### Insights\n" + "\n".join(formatted_insights)
