@@ -123,12 +123,15 @@ class RapidSummaryTask:
         
         # Parse JSON response using Pydantic
         try:
-            parsed = RapidSummaryResponseSchema.model_validate_json(content)
+            # Handle markdown code blocks (e.g., ```json ... ```) - same as context_summary
+            json_content = content.replace("```json", "").replace("```", "").strip()
+            
+            parsed = RapidSummaryResponseSchema.model_validate_json(json_content)
             if parsed.summary and len(parsed.summary) > 0:
                 return parsed.summary[0].item
             return ""
         except Exception as e:
-            logger.warning(f"Failed to parse rapid summary response: {e}")
+            logger.warning(f"Failed to parse rapid summary response: {e}, content: {content[:200]}")
             return content
     
     async def build_rapid_summary_payload(
