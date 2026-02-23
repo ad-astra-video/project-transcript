@@ -959,6 +959,9 @@ if __name__ == "__main__":
     pytrickle_level = getattr(logging, pytrickle_log_level, logging.WARNING)
     logging.getLogger("pytrickle").setLevel(pytrickle_level)
 
+    # Set httpx logger to WARNING level (not configurable)
+    logging.getLogger("httpx").setLevel(logging.WARNING)
+
     #loop = asyncio.get_event_loop()
     #loop.run_until_complete(load_model())
 
