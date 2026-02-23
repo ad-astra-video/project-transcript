@@ -954,6 +954,11 @@ if __name__ == "__main__":
         format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
     )
 
+    # Set pytrickle log level from environment variable (default: WARNING)
+    pytrickle_log_level = os.getenv("PYTRICKLE_LOG_LEVEL", "WARNING").upper()
+    pytrickle_level = getattr(logging, pytrickle_log_level, logging.WARNING)
+    logging.getLogger("pytrickle").setLevel(pytrickle_level)
+
     #loop = asyncio.get_event_loop()
     #loop.run_until_complete(load_model())
 
