@@ -3,6 +3,7 @@ Context summary task module.
 """
 
 import logging
+import time
 from datetime import datetime, timezone
 from typing import Dict, Any, Callable, List, Optional
 
@@ -25,11 +26,12 @@ class ContextSummaryPlugin:
     """Plugin for context-based summarization."""
     
     def __init__(self, window_manager, llm_manager, result_callback, summary_client=None,
-                 initial_summary_delay_seconds: float = 15.0, **kwargs):
+                 initial_summary_delay_seconds: float = 15.0, send_monitoring_event_callback=None, **kwargs):
         self._window_manager = window_manager
         self._llm = llm_manager
         self._result_callback = result_callback
         self._summary_client = summary_client  # Keep for non-LLM operations
+        self._send_monitoring_event_callback = send_monitoring_event_callback
         
         self._initial_summary_delay_seconds = initial_summary_delay_seconds
         self._has_performed_summary = False
@@ -46,6 +48,18 @@ class ContextSummaryPlugin:
             content_type_state=self._content_type_state,
             window_manager=self._window_manager,
         )
+    
+    async def _send_monitoring_event(self, event_data: Dict[str, Any], event_type: str):
+        """Send a monitoring event if callback is configured."""
+        if self._send_monitoring_event_callback:
+            try:
+                await self._send_monitoring_event_callback(event_data, event_type)
+            except Exception as e:
+                logger.warning(f"Failed to send monitoring event: {e}")
+    
+    def set_monitoring_callback(self, callback):
+        """Set the monitoring event callback after initialization."""
+        self._send_monitoring_event_callback = callback
     
     async def handle_content_type_detected(self, content_type: str, confidence: float, source: str, reasoning: str):
         """Handle on_content_type_detected event from content_type_detection plugin.
@@ -95,48 +109,79 @@ class ContextSummaryPlugin:
         window_start = self._window_manager.get_window_start(summary_window_id)
         window_end = self._window_manager.get_window_end(summary_window_id)
         
-        # Use pre-created task - it handles context building, text retrieval, and result processing internally
-        result = await self._task.process_context_summary(summary_window_id)
+        # Get word count from the summary window
+        window_text = self._window_manager.get_window_text(summary_window_id)
+        word_count = len(window_text.split()) if window_text else 0
         
-        segments = [
-            {
-                "id": f"{summary_window_id}-0",
-                "summary_type": "context_summary",
-                "background_context": result.get("reasoning_content", ""),
-                "summary": result.get("summary_text", "{}"),
+        # Emit start monitoring event
+        await self._send_monitoring_event({
+            "summary_window_id": summary_window_id,
+            "word_count": word_count,
+            "window_start_ms": int(window_start * 1000),
+            "window_end_ms": int(window_end * 1000),
+            "timestamp_utc": datetime.now(timezone.utc).isoformat()
+        }, "context_summary_start")
+        
+        start_time = time.perf_counter()
+        success = True
+        
+        try:
+            # Use pre-created task - it handles context building, text retrieval, and result processing internally
+            result = await self._task.process_context_summary(summary_window_id)
+            
+            segments = [
+                {
+                    "id": f"{summary_window_id}-0",
+                    "summary_type": "context_summary",
+                    "background_context": result.get("reasoning_content", ""),
+                    "summary": result.get("summary_text", "{}"),
+                }
+            ]
+            
+            payload = {
+                "type": "context_summary",
+                "timestamp_utc": datetime.now(timezone.utc).isoformat(),
+                "timing": {
+                    "summary_window_id": summary_window_id,
+                    "transcription_window_ids": self._window_manager.get_window_transcription_ids(summary_window_id),
+                    "media_window_start_ms": int(window_start * 1000),
+                    "media_window_end_ms": int(window_end * 1000)
+                },
+                "llm_usage": {
+                    "input_tokens": result.get("input_tokens", 0),
+                    "output_tokens": result.get("output_tokens", 0)
+                },
+                "segments": segments,
             }
-        ]
-        
-        payload = {
-            "type": "context_summary",
-            "timestamp_utc": datetime.now(timezone.utc).isoformat(),
-            "timing": {
+            
+            self._has_performed_summary = True
+            
+            # Send result via callback (like RapidSummaryPlugin does)
+            await self._result_callback(payload)
+            
+            # Emit event with timestamp for other plugins (e.g., rapid_summary)
+            if self._summary_client:
+                await self._summary_client._notify_plugins(
+                    "on_context_summary_complete",
+                    summary_window_id=summary_window_id,
+                    timestamp=window_end
+                )
+            
+            return payload
+        except Exception as e:
+            success = False
+            raise
+        finally:
+            # Emit complete monitoring event
+            duration_ms = (time.perf_counter() - start_time) * 1000
+            await self._send_monitoring_event({
                 "summary_window_id": summary_window_id,
-                "transcription_window_ids": self._window_manager.get_window_transcription_ids(summary_window_id),
-                "media_window_start_ms": int(window_start * 1000),
-                "media_window_end_ms": int(window_end * 1000)
-            },
-            "llm_usage": {
-                "input_tokens": result.get("input_tokens", 0),
-                "output_tokens": result.get("output_tokens", 0)
-            },
-            "segments": segments,
-        }
-        
-        self._has_performed_summary = True
-        
-        # Send result via callback (like RapidSummaryPlugin does)
-        await self._result_callback(payload)
-        
-        # Emit event with timestamp for other plugins (e.g., rapid_summary)
-        if self._summary_client:
-            await self._summary_client._notify_plugins(
-                "on_context_summary_complete",
-                summary_window_id=summary_window_id,
-                timestamp=window_end
-            )
-        
-        return payload
+                "word_count": word_count,
+                "duration_ms": duration_ms,
+                "success": success,
+                "content_type": self._content_type_state.content_type,
+                "timestamp_utc": datetime.now(timezone.utc).isoformat()
+            }, "context_summary_complete")
 
 
     def on_update_params(
@@ -171,7 +216,8 @@ class ContextSummaryPlugin:
             logger.info(f"Updated initial_summary_delay_seconds to {initial_summary_delay_seconds}")
 
 
-def init_plugin(plugin_name: str, window_manager, llm_manager, result_callback: Callable, summary_client=None):
+def init_plugin(plugin_name: str, window_manager, llm_manager, result_callback: Callable,
+                summary_client=None, send_monitoring_event_callback=None):
     """Initialize the plugin and register with summary_client."""
     initial_delay = summary_client.initial_summary_delay_seconds if summary_client else 0.0
     
@@ -180,7 +226,8 @@ def init_plugin(plugin_name: str, window_manager, llm_manager, result_callback: 
         llm_manager=llm_manager,
         result_callback=result_callback,
         summary_client=summary_client,
-        initial_summary_delay_seconds=initial_delay
+        initial_summary_delay_seconds=initial_delay,
+        send_monitoring_event_callback=send_monitoring_event_callback
     )
     
     if summary_client:

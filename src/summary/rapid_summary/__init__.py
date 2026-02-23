@@ -4,6 +4,7 @@ Rapid summary task module.
 
 import logging
 import asyncio
+import time
 from datetime import datetime, timezone
 from typing import Dict, Any, Callable, List, Optional
 
@@ -20,11 +21,13 @@ _result_callback = None
 class RapidSummaryPlugin:
     """Plugin for rapid summarization."""
     
-    def __init__(self, window_manager, llm_manager, result_callback, summary_client=None, **kwargs):
+    def __init__(self, window_manager, llm_manager, result_callback, summary_client=None,
+                 send_monitoring_event_callback=None, **kwargs):
         self._window_manager = window_manager
         self._llm = llm_manager
         self._result_callback = result_callback
         self._summary_client = summary_client  # Keep for non-LLM operations
+        self._send_monitoring_event_callback = send_monitoring_event_callback
         
         # Track the highest context_summary timestamp (for out-of-order windows)
         self._context_summary_timestamp: float = 0.0
@@ -34,6 +37,18 @@ class RapidSummaryPlugin:
             llm_client=self._llm.rapid_llm_client,
             rapid_summary_response_json_schema=None,
         )
+    
+    async def _send_monitoring_event(self, event_data: Dict[str, Any], event_type: str):
+        """Send a monitoring event if callback is configured."""
+        if self._send_monitoring_event_callback:
+            try:
+                await self._send_monitoring_event_callback(event_data, event_type)
+            except Exception as e:
+                logger.warning(f"Failed to send monitoring event: {e}")
+    
+    def set_monitoring_callback(self, callback):
+        """Set the monitoring event callback after initialization."""
+        self._send_monitoring_event_callback = callback
     
     def _get_window_by_id(self, window_id: int):
         """Get window by ID from window_manager._summary_windows."""
@@ -89,6 +104,12 @@ class RapidSummaryPlugin:
         # Convert window text to segments format
         segments = [{"text": window_text, "start": window_start, "end": window_end}]
         
+        # Get word count
+        word_count = len(window_text.split()) if window_text else 0
+        
+        start_time = time.perf_counter()
+        success = True
+        
         try:
             # Use pre-created task instead of creating new one each time
             result = await self._task.build_rapid_summary_payload(
@@ -103,8 +124,19 @@ class RapidSummaryPlugin:
             await result_callback(result)
             return result
         except Exception as e:
+            success = False
             logger.error(f"Rapid summary error: {e}")
             return {}
+        finally:
+            # Emit complete monitoring event
+            duration_ms = (time.perf_counter() - start_time) * 1000
+            await self._send_monitoring_event({
+                "summary_window_id": summary_window_id,
+                "word_count": word_count,
+                "duration_ms": duration_ms,
+                "success": success,
+                "timestamp_utc": datetime.now(timezone.utc).isoformat()
+            }, "rapid_summary_complete")
 
 
     async def handle_context_summary_complete(self, summary_window_id: int, timestamp: float):
@@ -145,7 +177,8 @@ class RapidSummaryPlugin:
         logger.debug("RapidSummaryPlugin reset - context timestamp cleared")
 
 
-def init_plugin(plugin_name: str, window_manager, llm_manager, result_callback: Callable, summary_client=None):
+def init_plugin(plugin_name: str, window_manager, llm_manager, result_callback: Callable,
+                summary_client=None, send_monitoring_event_callback=None):
     """Initialize the plugin and register with summary_client."""
     global _window_manager, _summary_client, _result_callback
     
@@ -158,6 +191,7 @@ def init_plugin(plugin_name: str, window_manager, llm_manager, result_callback: 
         llm_manager=llm_manager,
         result_callback=result_callback,
         summary_client=summary_client,
+        send_monitoring_event_callback=send_monitoring_event_callback
     )
     
     if summary_client:

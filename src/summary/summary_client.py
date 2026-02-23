@@ -134,6 +134,7 @@ class SummaryClient:
                             llm_manager=self.llm,
                             result_callback=self._queue_payload,
                             summary_client=self,
+                            send_monitoring_event_callback=self._send_monitoring_event_callback,
                         )
                         logger.info(f"Loaded plugin: {entry}")
                 except Exception as e:
@@ -373,7 +374,7 @@ class SummaryClient:
         self._summary_results.clear()
         logger.info("Summary queues cleared")
     
-    def queue_segments(
+    async def queue_segments(
         self,
         segments: List[Any],
         transcription_window_id: int,
@@ -389,12 +390,29 @@ class SummaryClient:
             window_start_ts: Start timestamp of the window
             window_end_ts: End timestamp of the window
         """
+        # Calculate word count from segments
+        word_count = sum(len(seg.get("text", "").split()) for seg in segments)
+        
         self._summary_queue.put_nowait((
             segments,
             transcription_window_id,
             window_start_ts,
             window_end_ts
         ))
+        
+        # Emit summary_window_queued monitoring event
+        if self._send_monitoring_event_callback is not None:
+            await self._send_monitoring_event_callback(
+                {
+                    "transcription_window_id": transcription_window_id,
+                    "word_count": word_count,
+                    "window_start_ms": int(window_start_ts * 1000),
+                    "window_end_ms": int(window_end_ts * 1000),
+                    "queue_size": self._summary_queue.qsize(),
+                    "timestamp_utc": datetime.now(timezone.utc).isoformat()
+                },
+                "summary_window_queued"
+            )
     
     def add_content_type_detection(
         self,
@@ -502,6 +520,19 @@ class SummaryClient:
                 try:
                     # Add window to in-flight tracking
                     self.add_in_flight_window(transcription_window_id)
+                    
+                    # Emit worker in-progress monitoring event
+                    if self._send_monitoring_event_callback is not None:
+                        await self._send_monitoring_event_callback(
+                            {
+                                "transcription_window_id": transcription_window_id,
+                                "worker_id": id(asyncio.current_task()),
+                                "queue_size": self._summary_queue.qsize(),
+                                "in_flight_count": len(self.in_flight_windows),
+                                "timestamp_utc": datetime.now(timezone.utc).isoformat()
+                            },
+                            "summary_worker_in_progress"
+                        )
                     
                     start = time.perf_counter()
                     result_payload = await asyncio.wait_for(

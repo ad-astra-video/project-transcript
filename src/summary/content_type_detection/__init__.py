@@ -14,7 +14,8 @@ logger = logging.getLogger(__name__)
 class ContentTypeDetectionPlugin:
     """Plugin for content type detection."""
     
-    def __init__(self, window_manager, llm_manager, result_callback, summary_client=None, detection_interval: int = 5, **kwargs):
+    def __init__(self, window_manager, llm_manager, result_callback, summary_client=None,
+                 detection_interval: int = 5, send_monitoring_event_callback=None, **kwargs):
         self._window_manager = window_manager
         self._llm = llm_manager
         self._max_tokens = 8192
@@ -22,6 +23,7 @@ class ContentTypeDetectionPlugin:
         self._content_type_context_limit = 2000  # Character limit for content type detection
         self._result_callback = result_callback
         self._summary_client = summary_client  # Keep for non-LLM operations
+        self._send_monitoring_event_callback = send_monitoring_event_callback
         self._in_progress = False
         
         # Track content type state for previous_content_type
@@ -38,6 +40,18 @@ class ContentTypeDetectionPlugin:
             max_tokens=self._max_tokens,
             temperature=self._temperature
         )
+    
+    async def _send_monitoring_event(self, event_data: Dict[str, Any], event_type: str):
+        """Send a monitoring event if callback is configured."""
+        if self._send_monitoring_event_callback:
+            try:
+                await self._send_monitoring_event_callback(event_data, event_type)
+            except Exception as e:
+                logger.warning(f"Failed to send monitoring event: {e}")
+    
+    def set_monitoring_callback(self, callback):
+        """Set the monitoring event callback after initialization."""
+        self._send_monitoring_event_callback = callback
     
     def set_content_type_override(self, content_type: str):
         """Set user override for content type.
@@ -111,6 +125,16 @@ class ContentTypeDetectionPlugin:
                         reasoning="User override"
                     )
                 
+                # Emit monitoring event
+                await self._send_monitoring_event({
+                    "content_type": self._user_content_type_override,
+                    "confidence": 1.0,
+                    "source": "USER_OVERRIDE",
+                    "previous_content_type": previous_content_type,
+                    "summary_window_id": summary_window_id,
+                    "timestamp_utc": datetime.now(timezone.utc).isoformat()
+                }, "content_type_detected")
+                
                 return payload
             
             # Use get_recent_windows_text with the configured context limit
@@ -145,6 +169,16 @@ class ContentTypeDetectionPlugin:
                     reasoning=result.reasoning
                 )
             
+            # Emit monitoring event
+            await self._send_monitoring_event({
+                "content_type": result.content_type,
+                "confidence": result.confidence,
+                "source": "AUTO_DETECTED",
+                "previous_content_type": previous_content_type,
+                "summary_window_id": summary_window_id,
+                "timestamp_utc": datetime.now(timezone.utc).isoformat()
+            }, "content_type_detected")
+            
             return payload
         finally:
             self._in_progress = False
@@ -177,7 +211,8 @@ class ContentTypeDetectionPlugin:
             logger.info(f"Updated content_type_context_limit to {content_type_context_limit}")
 
 
-def init_plugin(plugin_name: str, window_manager, llm_manager, result_callback: Callable, summary_client=None):
+def init_plugin(plugin_name: str, window_manager, llm_manager, result_callback: Callable,
+                summary_client=None, send_monitoring_event_callback=None):
     """Initialize the plugin and register with summary_client."""
     global _window_manager, _summary_client, _result_callback
         
@@ -185,7 +220,8 @@ def init_plugin(plugin_name: str, window_manager, llm_manager, result_callback: 
         window_manager=window_manager,
         llm_manager=llm_manager,
         result_callback=result_callback,
-        summary_client=summary_client
+        summary_client=summary_client,
+        send_monitoring_event_callback=send_monitoring_event_callback
     )
     
     if summary_client:
