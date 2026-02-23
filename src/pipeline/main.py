@@ -420,6 +420,23 @@ async def _process_transcription_async(window_samples: np.ndarray, window_start_
         transcription_window_id, segments = await STATE.whisper_client.transcribe_audio(temp_path)
         logger.info(f"Transcription of window [{window_start_ts:.3f}s - {window_end_ts:.3f}s] took {time.perf_counter() - start:.2f}s, got {len(segments)} segments (transcription_window_id={transcription_window_id})")
         
+        # Emit transcription_window_received monitoring event
+        if PROCESSOR and hasattr(PROCESSOR, 'send_monitoring_event'):
+            text_length = sum(len(seg.get("text", "")) for seg in segments)
+            word_count = sum(len(seg.get("text", "").split()) for seg in segments)
+            duration_seconds = window_end_ts - window_start_ts
+            await PROCESSOR.send_monitoring_event(
+                {
+                    "transcription_window_id": transcription_window_id,
+                    "text_length": text_length,
+                    "word_count": word_count,
+                    "segment_count": len(segments),
+                    "duration_seconds": duration_seconds,
+                    "timestamp_utc": datetime.now(timezone.utc).isoformat()
+                },
+                "transcription_window_received"
+            )
+        
         # Mark as transcribed
         _mark_transcribed(temp_path)
         
@@ -449,7 +466,7 @@ async def _process_transcription_async(window_samples: np.ndarray, window_start_
                 # Put work on queue for background processing
                 # Worker will handle skip logic and content type detection
                 # transcription_window_id comes from whisper's internal counter
-                STATE.summary_client.queue_segments(segments_payload, transcription_window_id, window_start_ts, end_ts)
+                await STATE.summary_client.queue_segments(segments_payload, transcription_window_id, window_start_ts, end_ts)
             except Exception as e:
                 logger.error(f"Failed to queue summary work: {e}")
 
