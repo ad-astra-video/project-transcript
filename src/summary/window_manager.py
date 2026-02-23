@@ -75,6 +75,7 @@ class WindowManager:
     ):
         self._summary_windows: List[SummaryWindow] = []  # Ordered oldest -> newest (RENAMED from _windows)
         self._transcription_windows: Dict[int, TranscriptionWindow] = {}  # Dict of transcription windows keyed by ID
+        self._window_id_to_index: Dict[int, int] = {}  # Maps window_id -> list index for O(1) lookup
         self._pending_transcription_ids: List[int] = []  # Track pending transcription IDs for summary creation
         self._char_count: int = 0
         self._next_window_id: int = 0
@@ -131,6 +132,13 @@ class WindowManager:
             self._char_count -= oldest.char_count
             new_char_count = self._char_count + len(text)
         
+        # Rebuild index after dropping windows (indices have shifted)
+        if self._window_id_to_index:
+            self._window_id_to_index = {
+                w.window_id: i
+                for i, w in enumerate(self._summary_windows)
+            }
+        
         # Create and add window
         window = SummaryWindow(
             window_id=actual_window_id,
@@ -143,6 +151,9 @@ class WindowManager:
         )
         self._summary_windows.append(window)
         self._char_count += len(text)
+        
+        # Add new window to index dictionary
+        self._window_id_to_index[actual_window_id] = len(self._summary_windows) - 1
 
         logger.debug(f"Added summary window {actual_window_id}, char_count={self._char_count}, total_windows={len(self._summary_windows)}")
 
@@ -268,9 +279,9 @@ class WindowManager:
     
     def get_window_insights(self, window_id: int) -> List[WindowInsight]:
         """Get insights for a specific window."""
-        for window in self._summary_windows:
-            if window.window_id == window_id:
-                return window.insights
+        idx = self._window_id_to_index.get(window_id)
+        if idx is not None:
+            return self._summary_windows[idx].insights
         return []
     
     def _get_next_insight_id(self) -> int:
@@ -286,8 +297,7 @@ class WindowManager:
     
     def add_insight_to_window(self, window_id: int, insight: WindowInsight) -> int:
         """
-        Add a single insight to a window. Searches windows in reverse order
-        (newest first) for efficiency since recent windows are more likely targets.
+        Add a single insight to a window using O(1) dictionary lookup.
         
         Args:
             window_id: The window to add insight to
@@ -296,14 +306,14 @@ class WindowManager:
         Returns:
             The insight_id of the added insight, or -1 if window not found
         """
-        for window in reversed(self._summary_windows):
-            if window.window_id == window_id:
-                window.insights.append(insight)
-                logger.debug(f"Added insight {insight.insight_id} to window {window_id}")
-                return insight.insight_id
+        idx = self._window_id_to_index.get(window_id)
+        if idx is not None:
+            self._summary_windows[idx].insights.append(insight)
+            logger.debug(f"Added insight {insight.insight_id} to window {window_id}")
+            return insight.insight_id
         
         # Window not found - log error with diagnostic info
-        available_ids = [w.window_id for w in self._summary_windows]
+        available_ids = list(self._window_id_to_index.keys())
         logger.error(
             f"Failed to add insight {insight.insight_id} to window {window_id} - window not found. "
             f"Available window IDs: {available_ids}, Total windows: {len(self._summary_windows)}"
@@ -314,6 +324,7 @@ class WindowManager:
         """Clear all windows and reset internal counters for fresh stream."""
         self._summary_windows.clear()
         self._transcription_windows.clear()
+        self._window_id_to_index.clear()
         self._pending_transcription_ids.clear()
         self._char_count = 0
         # Reset all internal counters for fresh stream
@@ -529,30 +540,30 @@ class WindowManager:
     
     def get_window_transcription_ids(self, window_id: int) -> List[int]:
         """Get transcription window IDs for a summary window."""
-        for window in self._summary_windows:
-            if window.window_id == window_id:
-                return window.transcription_window_ids
+        idx = self._window_id_to_index.get(window_id)
+        if idx is not None:
+            return self._summary_windows[idx].transcription_window_ids
         return []
     
     def get_window_start(self, window_id: int) -> float:
         """Get start timestamp for a summary window."""
-        for window in self._summary_windows:
-            if window.window_id == window_id:
-                return window.timestamp_start
+        idx = self._window_id_to_index.get(window_id)
+        if idx is not None:
+            return self._summary_windows[idx].timestamp_start
         return 0.0
     
     def get_window_end(self, window_id: int) -> float:
         """Get end timestamp for a summary window."""
-        for window in self._summary_windows:
-            if window.window_id == window_id:
-                return window.timestamp_end
+        idx = self._window_id_to_index.get(window_id)
+        if idx is not None:
+            return self._summary_windows[idx].timestamp_end
         return 0.0
     
     def get_window_text(self, window_id: int) -> str:
         """Get text for a specific summary window."""
-        for window in self._summary_windows:
-            if window.window_id == window_id:
-                return window.text
+        idx = self._window_id_to_index.get(window_id)
+        if idx is not None:
+            return self._summary_windows[idx].text
         return ""
     
     def get_transcription_text_since_timestamp(self, timestamp: float) -> str:
