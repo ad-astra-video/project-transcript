@@ -144,7 +144,7 @@ Transcript Text (Last {context_length} characters):
             )
             
             # Use LLMClient's create_completion with pre-built messages
-            reasoning, content, input_tokens, output_tokens = await self._llm_client.create_completion(
+            reasoning, content, input_tokens, output_tokens, reasoning_tokens = await self._llm_client.create_completion(
                 system_prompt="",  # Messages already built by _build_messages
                 user_content="",   # We pass messages directly
                 messages=messages,

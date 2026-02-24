@@ -86,7 +86,7 @@ class LLMClient:
         user_content: str = "",
         messages: Optional[List[Dict[str, str]]] = None,
         **kwargs
-    ) -> Tuple[str, str, int, int]:
+    ) -> Tuple[str, str, int, int, int]:
         """Create a chat completion with automatic message building.
         
         Args:
@@ -96,11 +96,12 @@ class LLMClient:
             **kwargs: Additional arguments passed to chat.completions.create
             
         Returns:
-            Tuple of (response, content, input_tokens, output_tokens)
-            - response: The full ChatCompletion response object
+            Tuple of (reasoning, content, input_tokens, output_tokens, reasoning_tokens)
+            - reasoning: The reasoning content from the model (for reasoning models)
             - content: The text content from the first choice's message
             - input_tokens: Number of tokens in the input
             - output_tokens: Number of tokens in the output
+            - reasoning_tokens: Number of reasoning tokens in the input (for reasoning models)
         """
         # Use provided messages or build them from system_prompt and user_content
         if messages is None:
@@ -120,7 +121,12 @@ class LLMClient:
         input_tokens = response.usage.prompt_tokens if response.usage else 0
         output_tokens = response.usage.completion_tokens if response.usage else 0
         
-        return (reasoning, content, input_tokens, output_tokens)
+        # Extract reasoning tokens from prompt_tokens_details (available for reasoning models like o1, o3-mini)
+        reasoning_tokens = 0
+        if response.usage and hasattr(response.usage, 'prompt_tokens_details') and response.usage.prompt_tokens_details:
+            reasoning_tokens = response.usage.prompt_tokens_details.reasoning_tokens if hasattr(response.usage.prompt_tokens_details, 'reasoning_tokens') else 0
+        
+        return (reasoning, content, input_tokens, output_tokens, reasoning_tokens)
 
 
 class LLMManager:

@@ -405,7 +405,7 @@ class ContextSummaryTask:
             if self._llm_client is None:
                 raise RuntimeError("LLMClient not initialized")
             
-            reasoning, content, input_tokens, output_tokens = await self._llm_client.create_completion(
+            reasoning, content, input_tokens, output_tokens, reasoning_tokens = await self._llm_client.create_completion(
                 messages=messages,
                 max_tokens=self.max_tokens,
                 temperature=self.temperature,
@@ -416,7 +416,7 @@ class ContextSummaryTask:
             summary_text = content.replace("```json", "").replace("```", "").strip()
             reasoning_content = reasoning or ""
 
-            logger.info(f"process_context_summary received response, length={len(summary_text)}, input_tokens={input_tokens}")
+            logger.info(f"process_context_summary received response, length={len(summary_text)}, input_tokens={input_tokens}, reasoning_tokens={reasoning_tokens}")
             self._last_summary_raw_response = summary_text_raw
             
             # Handle empty response from LLM
@@ -625,7 +625,7 @@ class ContextSummaryTask:
             user_content = f"## Insights to Compare\n{insights_text}"
             
             try:
-                reasoning, content, input_tokens, output_tokens = await self._rapid_llm_client.create_completion(
+                reasoning, content, input_tokens, output_tokens, reasoning_tokens = await self._rapid_llm_client.create_completion(
                     system_prompt=INSIGHT_CONSOLIDATION_PROMPT,
                     user_content=user_content,
                     temperature=0.3,

@@ -132,7 +132,7 @@ class RapidSummaryTask:
         user_content = f"Summarize this conversation:\n\n{text}"
         
         # Use LLMClient's create_completion which handles message building
-        reasoning, content, input_tokens, output_tokens = await self._llm_client.create_completion(
+        reasoning, content, input_tokens, output_tokens, reasoning_tokens = await self._llm_client.create_completion(
             system_prompt=system_prompt,
             user_content=user_content,
             temperature=self.temperature,
