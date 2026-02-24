@@ -962,6 +962,9 @@ if __name__ == "__main__":
     # Set httpx logger to WARNING level (not configurable)
     logging.getLogger("httpx").setLevel(logging.WARNING)
 
+    # Set aiohttp logger to WARNING level (not configurable)
+    logging.getLogger("aiohttp").setLevel(logging.WARNING)
+
     #loop = asyncio.get_event_loop()
     #loop.run_until_complete(load_model())
 
