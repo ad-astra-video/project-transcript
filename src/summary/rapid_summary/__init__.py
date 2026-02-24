@@ -143,7 +143,7 @@ class RapidSummaryPlugin:
             # Note: Result is now stored in plugin results via summary_window.store_result()
             # The old store_plugin_result call is no longer needed since task.py handles it
             
-            logger.info(f"Rapid summary completed, result: {result}")
+            #logger.info(f"Rapid summary completed, result: {result}")
             await result_callback(result)
             return result
         except Exception as e:

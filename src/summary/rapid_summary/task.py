@@ -92,7 +92,7 @@ class RapidSummaryTask:
         
         return "\n\n".join(parts) if parts else ""
     
-    async def process_rapid_summary(self, text: str, prior_context: str = "") -> str:
+    async def process_rapid_summary(self, text: str, prior_context: str = "") -> List[str]:
         """Process text through rapid summary LLM.
         
         Args:
@@ -100,7 +100,7 @@ class RapidSummaryTask:
             prior_context: Prior context from previous windows (optional)
             
         Returns:
-            Summary text string (scribe notes)
+            List of summary items (scribe notes)
         """
         if not self._llm_client:
             raise RuntimeError("Rapid summary client not initialized")
@@ -108,6 +108,7 @@ class RapidSummaryTask:
         # Format the system prompt with prior context using replace to avoid
         # conflicts with JSON braces in the prompt template
         prior_context_value = prior_context if prior_context else "(No prior context available)"
+        logger.info(f"Rapid summary prior context length: {len(prior_context_value)} chars")
         system_prompt = RAPID_SUMMARY_SYSTEM_PROMPT.replace(
             "__PRIOR_INSIGHTS_CONTEXT__", prior_context_value
         )
@@ -124,7 +125,7 @@ class RapidSummaryTask:
         )
         
         # Log the raw response for debugging
-        logger.info(f"Rapid summary raw response: {content}")
+        #logger.info(f"Rapid summary raw response: {content}")
         
         # Parse JSON response using Pydantic
         try:
@@ -133,8 +134,9 @@ class RapidSummaryTask:
             
             parsed = RapidSummaryResponseSchema.model_validate_json(json_content)
             if parsed.summary and len(parsed.summary) > 0:
-                return parsed.summary[0].item
-            return ""
+                # Return all items as a list for the frontend to process
+                return [item.item for item in parsed.summary]
+            return []
         except Exception as e:
             logger.warning(f"Failed to parse rapid summary response: {e}, content: {content[:200]}")
             return content
@@ -176,18 +178,22 @@ class RapidSummaryTask:
         # Get prior insights context using the same pattern as context_summary
         prior_context = self._get_prior_insights_context()
         
-        # Call rapid summary LLM with prior context
-        scribe_notes = await self.process_rapid_summary(full_context, prior_context)
+        # Call rapid summary LLM with prior context - returns a list of items
+        scribe_notes_list = await self.process_rapid_summary(full_context, prior_context)
+        
+        # Ensure we have a list (handle empty case)
+        if not scribe_notes_list:
+            scribe_notes_list = []
         
         # Store result in plugin results if summary_window provided
         if summary_window is not None:
             summary_window.store_result(
                 "rapid_summary",
-                {"scribe_notes": scribe_notes},
+                {"scribe_notes": scribe_notes_list},
                 include_in_context=True  # Important: include in context for future windows
             )
         
-        # Create payload with rapid_summary type and its own schema
+        # Create payload with rapid_summary type - wrap each string in { item: string } format
         payload = {
             "type": "rapid_summary",
             "timestamp_utc": datetime.now(timezone.utc).isoformat(),
@@ -196,9 +202,7 @@ class RapidSummaryTask:
                 "media_window_start_ms": int(window_start_ts * 1000),
                 "media_window_end_ms": int(window_end_ts * 1000)
             },
-            "summary": [
-                {"item": scribe_notes}
-            ]
+            "summary": [{"item": item} for item in scribe_notes_list]
         }
         
         return payload
