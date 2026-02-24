@@ -575,7 +575,7 @@ class SummaryClient:
                             "process_transcription_request_stats"
                         )
                 except Exception as e:
-                    logger.error(f"Summary processing error: {e}")
+                    logger.exception("Summary processing error")
                 finally:
                     # Remove from in-flight tracking regardless of success or failure
                     self.remove_in_flight_window(transcription_window_id)
