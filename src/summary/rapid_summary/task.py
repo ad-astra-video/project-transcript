@@ -5,6 +5,7 @@ This module contains the core logic for processing rapid summaries,
 which provide quick, concise summaries of ongoing discussions.
 """
 
+import json
 import logging
 from typing import Dict, Any, Optional, List
 from pydantic import BaseModel
@@ -66,29 +67,44 @@ class RapidSummaryTask:
         Uses window_manager.get_accumulated_text_and_results() similar to context_summary.
         
         Returns:
-            Prior context string with text and plugin results (~1000 text tokens + ~500 plugin tokens)
+            Prior context string with only plugin results (~200 tokens)
         """
         if self._window_manager is None:
             return ""
         
         # Use same pattern as context_summary - get plugin results with token limit
+        # Note: We request text but don't include it in context (per user request)
         accumulated_text, plugin_results, _, _ = self._window_manager.get_accumulated_text_and_results(
-            text_token_limit=1000,  # Include some text context too
+            text_token_limit=1000,  # Keep at 1000 (0 means unlimited)
             result_types=["rapid_summary"],
-            result_token_limit={"rapid_summary": 500},  # ~500 tokens for prior context
+            result_token_limit={"rapid_summary": 200},  # Reduced from 500
         )
         
-        # Build context string similar to context_summary build_context method
+        # Build context string - only include rapid_summary plugin results
         parts = []
         
-        # Add accumulated text
-        if accumulated_text:
-            parts.append(f"## PRIOR TEXT\n{accumulated_text}")
+        # Note: We intentionally do NOT include accumulated_text in the prior context
+        # Only include the rapid_summary plugin results
         
-        # Add rapid_summary plugin results
+        # Add rapid_summary plugin results - extract scribe_notes from JSON
         rapid_summary_results = plugin_results.get("rapid_summary", [])
         if rapid_summary_results:
-            parts.append(f"## PRIOR RAPID SUMMARY NOTES\n" + "\n\n---\n\n".join(rapid_summary_results))
+            formatted_notes = []
+            for result_json in rapid_summary_results:
+                # Parse the JSON to extract scribe_notes
+                try:
+                    data = json.loads(result_json) if isinstance(result_json, str) else result_json
+                    scribe_notes = data.get("scribe_notes", [])
+                    if scribe_notes:
+                        formatted_notes.extend(scribe_notes)
+                except (json.JSONDecodeError, AttributeError):
+                    # Fallback: treat as string
+                    formatted_notes.append(str(result_json))
+            
+            if formatted_notes:
+                # Format as bullet list for readability
+                notes_text = "\n".join(f"- {note}" for note in formatted_notes)
+                parts.append(f"## PRIOR RAPID SUMMARY NOTES\n{notes_text}")
         
         return "\n\n".join(parts) if parts else ""
     
