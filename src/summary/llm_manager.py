@@ -121,10 +121,10 @@ class LLMClient:
         input_tokens = response.usage.prompt_tokens if response.usage else 0
         output_tokens = response.usage.completion_tokens if response.usage else 0
         
-        # Extract reasoning tokens from prompt_tokens_details (available for reasoning models like o1, o3-mini)
+        # Extract reasoning tokens from completion_tokens_details (available for reasoning models like o1, o3-mini)
         reasoning_tokens = 0
-        if response.usage and hasattr(response.usage, 'prompt_tokens_details') and response.usage.prompt_tokens_details:
-            reasoning_tokens = response.usage.prompt_tokens_details.reasoning_tokens if hasattr(response.usage.prompt_tokens_details, 'reasoning_tokens') else 0
+        if response.usage and hasattr(response.usage, 'completion_tokens_details') and response.usage.completion_tokens_details:
+            reasoning_tokens = response.usage.completion_tokens_details.reasoning_tokens if hasattr(response.usage.completion_tokens_details, 'reasoning_tokens') else 0
         
         return (reasoning, content, input_tokens, output_tokens, reasoning_tokens)
 
