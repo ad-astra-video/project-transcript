@@ -371,8 +371,9 @@ class ContextSummaryTask:
         
         # Build context using the new method (get text without plugin results for backward compatibility)
         context, context_text_length, results_per_window = self.build_context(
-            text_token_limit=0,
+            text_token_limit=500,
             result_types=["context_summary"],
+            result_token_limit={"context_summary": 5000}
         )
         
         # Get prior insights from plugin_results for continuation/correction validation
@@ -927,8 +928,8 @@ class ContextSummaryTask:
                 correction_of=correction_of,
             )
             
-            # Use as_dict() for clean export to summary
-            insights_for_summary.append(insight.as_dict())
+            # Keep WindowInsight objects throughout the pipeline for proper attribute access
+            insights_for_summary.append(insight)
         
         # Update parsed_data with assigned insight_ids
         if is_list_format:
@@ -996,10 +997,28 @@ class ContextSummaryTask:
         if self._rapid_llm_client and len(processed_insights) > 1:
             processed_insights = await self._consolidate_similar_insights(processed_insights)
         
-        # Build the final payload
+        # Build the final payload - convert WindowInsight objects to dicts for JSON serialization
+        insights_as_dicts = [
+            insight.as_dict() if hasattr(insight, 'as_dict') else insight
+            for insight in processed_insights
+        ]
+        
+        # Also convert processed_data if it contains WindowInsight objects
+        if isinstance(processed_data, dict):
+            if "insights" in processed_data:
+                processed_data = processed_data.copy()
+                # Use processed_insights (which contains consolidated insights) instead of original processed_data
+                processed_data["insights"] = [
+                    insight.as_dict() if hasattr(insight, 'as_dict') else insight
+                    for insight in processed_insights
+                ]
+            summary_text_json = json.dumps(processed_data)
+        else:
+            summary_text_json = summary_text
+        
         payload = {
-            "summary_text": json.dumps(processed_data) if isinstance(processed_data, dict) else summary_text,
-            "insights": processed_insights,
+            "summary_text": summary_text_json,
+            "insights": insights_as_dicts,
         }
         
         return payload
