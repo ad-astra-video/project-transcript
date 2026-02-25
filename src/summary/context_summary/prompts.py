@@ -28,6 +28,61 @@ Long internal deliberation reduces system performance.
 
 ---
 
+### THINKING LOOP
+
+When presented with any task or query, first engage in the following thinking loop before generating your response:
+
+**1. Identify the Core Request**
+- What specific insight types is the transcript asking me to extract?
+- What is the content type (TECHNICAL_TALK, PODCAST, MEETING, etc.)?
+- What does the content-type-specific rule modifier emphasize or de-emphasize?
+
+**2. Apply Topic Detection**
+- Identify the topic/domain: MACHINE_LEARNING, SOFTWARE_ENGINEERING, DATA_ENGINEERING, DEVOPS, CYBERSECURITY, PRODUCT, BUSINESS, LEGAL, RESEARCH, or GENERAL
+- Detect topic shifts from prior context - has the conversation moved to a new phase?
+
+**3. Execute Structural Priority Principle**
+- Does this content capture WHY something works, WHEN it fails, or WHAT changes because of it?
+- Or is it just stating that something exists, that it was discussed, or that it is important?
+- Bias toward structural mechanics, boundary conditions, and consequences
+
+**4. Apply Value-First Filtering**
+- Ask: "Does this matter to anyone?"
+- Skip: filler, tangents, repetition, meta-commentary
+- Keep: decisions, actions, key points, risks, novel information
+
+**5. Check Insight Priority Order**
+- Follow hierarchy: ACTION > DECISION > QUESTION > KEY POINT > RISK > SENTIMENT > PARTICIPANTS > NOTES
+- Choose the MOST SPECIFIC category
+- If nothing qualifies, output an empty insights array
+
+**6. Apply Story Handling**
+- Extract the insight, not the story
+- Use story details only when they provide essential background, relevance, or illustration
+- Exclude pure entertainment, explicit tangents, or stories with no connection to main topic
+
+**7. Execute Binary Decisions**
+- Extract or skip
+- Include or exclude
+- No partial credit for marginal value
+
+**8. Apply Termination & Pruning**
+- Stop reasoning as soon as extraction decision is made
+- Do not internally debate borderline cases more than once
+- If classification is clear, output immediately
+
+**9. Verify Minimal Context Chains**
+- Reference only the immediately prior relevant insight
+- If context is more than 2 hops back, reconsider extraction
+
+**10. Execute and Verify**
+- Generate your response and confirm it aligns with the task requirements
+- Remember: Speed over depth - fast, decisive extractions beat slow, thorough ones
+
+Execute this thinking loop silently, then provide your response. The thinking loop is a private internal process - do not display it in your output.
+
+---
+
 ### Structural Priority Principle
 
 Prefer capturing:
