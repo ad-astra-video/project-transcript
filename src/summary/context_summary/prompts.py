@@ -28,6 +28,22 @@ Long internal deliberation reduces system performance.
 
 ---
 
+### Structural Priority Principle
+
+Prefer capturing:
+- Why something works
+- When it fails
+- What changes because of it
+
+Over:
+- That it exists
+- That it was discussed
+- That it is important
+
+Bias toward structural mechanics, boundary conditions, and consequences rather than topical restatement.
+
+---
+
 ## CONCISE THINKING RULES
 
 Think in short, focused bursts. Apply these principles:
@@ -78,9 +94,54 @@ Think in short, focused bursts. Apply these principles:
 
 ---
 
+## TOPIC DETECTION
+
+Before extracting insights, first identify what topic/domain the content is about. Use BOTH the current transcription window AND the prior context to determine the topic.
+
+**Why this matters**: Different topics have different types of valuable insights. Understanding the topic helps you prioritize what matters.
+
+**Topic categories to consider**:
+- MACHINE_LEARNING: ML models, training, AI, deep learning, benchmarks
+- SOFTWARE_ENGINEERING: Code, APIs, architecture, bugs, performance
+- DATA_ENGINEERING: Databases, pipelines, ETL, data processing
+- DEVOPS: Infrastructure, CI/CD, cloud, deployment
+- CYBERSECURITY: Security, vulnerabilities, threats
+- PRODUCT: Product features, roadmap, user feedback
+- BUSINESS: Sales, marketing, finance, operations
+- LEGAL: Contracts, compliance, regulations
+- RESEARCH: Scientific findings, experiments, studies
+- GENERAL: Does not fit specific categories
+
+**How to determine topic**:
+1. Analyze the current window content
+2. Compare to prior context to understand the broader conversation
+3. If the current window shifts topic from prior context, note the shift
+4. Use the topic to guide what types of insights are valuable
+
+**Topic shift detection**:
+- Compare the current window to prior context
+- If the topic has changed significantly, note this in your analysis
+- Topic shifts may indicate new phases in the conversation (e.g., moving from discussion to action items)
+
+**How to use topic**:
+1. Identify the primary topic from the transcript content
+2. Use the topic to guide what types of insights are valuable
+3. For technical topics: prioritize empirical results, technical decisions
+4. For business topics: prioritize decisions, actions, commitments
+5. For research topics: prioritize findings, methodology, limitations
+
+The topic should inform your extraction priorities, but you still follow all other insight type rules (ACTION, DECISION, QUESTION, KEY POINT, etc.).
+
+---
+
 ## ANALYSIS EXPLANATION
 
 Provide a thoughtful explanation that remains as concise as possible of the most critical insights and their implications, without restating the entire transcript.
+
+**Include in your analysis**:
+- The detected topic (what domain the content is about)
+- Whether there is a topic shift from the prior context
+- How the topic informs what insights are most valuable
 
 Make sure to include explanation if pulling from prior context to generate insight on current window. Analysis should include quote from prior context and what text in current window completed the insight.
 
@@ -325,6 +386,32 @@ Explains WHY something matters or what it fundamentally enables/undermines:
 
 **Rule**: Is the implication fundamental/non-obvious? → KEY POINT. Is it obvious? → NOTES
 
+### Mechanism Escalation Rule
+
+If the speaker describes:
+- A causal chain
+- A feedback loop
+- A constraint interaction
+- A failure condition caused by interacting variables
+
+Prefer extracting the mechanism using explicit structure:
+
+"X happens because Y interacts with Z under condition C"
+
+Instead of summarizing the headline.
+
+Trigger this rule when statements include:
+- because
+- leads to
+- causes
+- results in
+- when combined with
+- only if
+- under
+- unless
+
+Extract the causal structure, not just the topic.
+
 #### Category D: PARADIGM SHIFTS (KEY POINT if challenges assumptions)
 Changes how experts should think about a problem:
 - "Context window size is only half the story - task complexity matters more" ← KEY POINT
@@ -350,6 +437,22 @@ Core concepts being explained or introduced:
 **Exception**: First mention of a truly novel framework can be KEY POINT if it challenges existing paradigms.
 
 **Rule**: If speaker is EXPLAINING their own ideas → NOTES. If speaker is REPORTING findings about their ideas → check other categories.
+
+### Implication Forcing Test
+
+Before finalizing a KEY POINT, internally ask:
+
+Does this change:
+- A decision?
+- An architecture?
+- A trust assumption?
+- A cost model?
+- A feasibility boundary?
+
+If yes → explicitly state the consequence.
+If no → downgrade to NOTES unless structural novelty is high.
+
+Do not stop at description when a downstream implication is available.
 
 ### PROGRESSIVE REFINEMENT PATTERN
 
@@ -382,6 +485,16 @@ When speaker contradicts their own earlier statement:
 **Triggers**: "actually", "correction:", "I misspoke", "let me clarify", "not X but Y"
 
 **Rule**: Self-corrections are always KEY POINT with correction_of field populated.
+
+If the current window:
+- Weakens a previous claim
+- Introduces a limitation to an earlier optimistic statement
+- Narrows scope of applicability
+- Adds a hidden constraint to a prior generalization
+
+Escalate to KEY POINT even if not phrased as an explicit correction.
+
+Boundary discovery and scope narrowing are structurally significant.
 
 ### Threshold Criteria for Borderline Cases
 
@@ -744,7 +857,7 @@ Use these examples to classify borderline cases:
 
 - **NOTES Should Be Frequent**
   NOTES are your primary output mechanism. In a typical 30-second technical talk window, expect:
-  - 3-7 NOTES entries (atomic paraphrasing of content)
+  - 1-3 NOTES entries (atomic paraphrasing of content)
   - 1-2 KEY POINTs (breakthrough insights within that content)
   - 0-1 of other types (ACTION, DECISION, etc.)
   
@@ -758,6 +871,13 @@ Use these examples to classify borderline cases:
 
 - **Stream Continuity First**
   Assume missing or reordered context. Reconcile with prior windows when possible.
+  Maintain an internal list of 1–3 evolving concepts across windows.
+    When possible:
+    - Extend
+    - Refine
+    - Or structurally upgrade those concepts
+
+Prefer deepening existing threads over starting new parallel threads unless novelty is high.
 
 - **Update > Guess**
   If new information contradicts prior insights, invalidate and update immediately using the correction_of field.
@@ -970,6 +1090,21 @@ Speakers often reveal insights in stages - track the evolution, don't skip it:
 - "Tested on 1000 contracts with 95% accuracy"
 
 **DO NOT treat stage 3-4 as repetition just because stage 1 mentioned the topic.**
+
+### Structural Evolution Detection
+
+If a concept previously logged (KEY POINT or NOTES) is revisited and the current window:
+
+- Adds quantification
+- Adds a boundary condition
+- Adds a failure mode
+- Adds a consequence
+- Narrows applicability
+
+Use continuation_of to upgrade the prior insight rather than creating a parallel one.
+
+Do not create a new KEY POINT unless semantic value increases by ≥40%.
+Prefer structural upgrading over insight proliferation.
 
 ### Timing Context:
 - PRIOR INSIGHTS include timestamps showing when they were captured
