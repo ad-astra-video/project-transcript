@@ -26,7 +26,6 @@ class TestZeroOutputBehavior:
         
         # Empty insights array should be handled correctly
         parsed_data = {
-            "analysis": "",
             "insights": []
         }
         
@@ -36,12 +35,11 @@ class TestZeroOutputBehavior:
         assert "insights" in result
         assert len(result["insights"]) == 0
     
-    def test_empty_analysis_with_insights(self):
-        """Test that empty analysis string is valid when insights exist."""
+    def test_empty_topic_with_insights(self):
+        """Test that empty topic string is valid when insights exist."""
         task = self.create_task()
         
         parsed_data = {
-            "analysis": "",
             "insights": [
                 {
                     "insight_type": "ACTION",
@@ -56,29 +54,24 @@ class TestZeroOutputBehavior:
         
         # Should still extract the insight
         assert len(result["insights"]) == 1
-        assert result["insights"][0]["insight_text"] == "Complete the task by Friday"
+        assert result["insights"][0].insight_text == "Complete the task by Friday"
     
     def test_missing_insights_key(self):
         """Test that missing insights key is handled correctly."""
         task = self.create_task()
         
-        parsed_data = {
-            "analysis": "Some analysis"
-            # insights key missing
-        }
+        parsed_data = {}
         
         result = task._extract_insights(parsed_data, 1, 10.0, 15.0)
         
-        # Should return empty insights
-        assert "insights" in result
-        assert len(result["insights"]) == 0
+        # When parsed_data is empty, returns empty dict (pre-existing behavior)
+        assert result == {}
     
     def test_invalid_insights_type(self):
         """Test that invalid insights type is handled correctly."""
         task = self.create_task()
         
         parsed_data = {
-            "analysis": "Some analysis",
             "insights": "not a list"  # Should be a list
         }
         
@@ -87,6 +80,28 @@ class TestZeroOutputBehavior:
         # Should return empty insights
         assert "insights" in result
         assert len(result["insights"]) == 0
+    
+    def test_missing_topic_field(self):
+        """Test that missing topic field is handled correctly."""
+        task = self.create_task()
+        
+        # Test without topic field at all
+        parsed_data = {
+            "insights": [
+                {
+                    "insight_type": "KEY POINT",
+                    "insight_text": "Important point",
+                    "confidence": 0.9,
+                    "classification": "+"
+                }
+            ]
+        }
+        
+        result = task._extract_insights(parsed_data, 1, 10.0, 15.0)
+        
+        # Should extract the insight without requiring analysis
+        assert len(result["insights"]) == 1
+        assert result["insights"][0].insight_text == "Important point"
 
 
 if __name__ == "__main__":

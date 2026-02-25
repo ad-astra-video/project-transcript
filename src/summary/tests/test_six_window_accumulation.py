@@ -54,7 +54,7 @@ class TestSixWindowAccumulation:
         first_window = client._window_manager._summary_windows[0]
         result1 = {
             "summary_text": json.dumps({
-                "analysis": "First analysis",
+                "topic": "First analysis",
                 "insights": [
                     {
                         "insight_id": 1,
@@ -78,7 +78,7 @@ class TestSixWindowAccumulation:
         second_window = client._window_manager._summary_windows[1]
         result2 = {
             "summary_text": json.dumps({
-                "analysis": "Second analysis",
+                "topic": "Second analysis",
                 "insights": [
                     {
                         "insight_id": 2,
@@ -142,7 +142,7 @@ class TestWindowManagerTextAccumulation:
             window = wm._summary_windows[i]
             result = {
                 "summary_text": json.dumps({
-                    "analysis": f"Analysis {i}",
+                    "topic": f"Analysis {i}",
                     "insights": [
                         {
                             "insight_id": i + 1,

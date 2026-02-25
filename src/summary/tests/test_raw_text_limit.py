@@ -75,7 +75,7 @@ class TestWindowManagerRawTextLimit:
         first_window = wm._summary_windows[0]
         result = {
             "summary_text": json.dumps({
-                "analysis": "Test",
+                "topic": "Test",
                 "insights": [
                     {
                         "insight_id": 1,

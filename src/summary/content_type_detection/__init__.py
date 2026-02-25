@@ -19,7 +19,7 @@ class ContentTypeDetectionPlugin:
         self._window_manager = window_manager
         self._llm = llm_manager
         self._max_tokens = 8192
-        self._temperature = 0.2
+        self._temperature = 0.6
         self._content_type_context_limit = 2000  # Character limit for content type detection
         self._result_callback = result_callback
         self._summary_client = summary_client  # Keep for non-LLM operations

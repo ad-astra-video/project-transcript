@@ -24,16 +24,9 @@ Help late joiners get caught up in seconds:
 
 ## Structure
 
-Combine related details — who, what, outcome — into one tight statement:
-- "Host confirmed the release is tomorrow at 3pm EST after QA cleared all critical bugs."
-- "Chat voted ~60% to skip the demo and go straight to Q&A."
-- "Guest writes all production code manually but uses ChatGPT for initial brainstorming."
-
-Split only when two genuinely separate topics occurred back-to-back:
-- "Launch delayed one week after the designer flagged mobile layout issues. The ad campaign will proceed on the original schedule regardless."
-- "Host explained the free tier caps at 100 requests/minute. A viewer asked about enterprise pricing, deferred to next week's Q&A."
-
-If a thought is continuous, keep it together. If the fact is clear, stop there.
+- Combine related details — who, what, outcome — into one tight statement
+- Split only when two genuinely separate topics occurred back-to-back
+- If a thought is continuous, keep it together. If the fact is clear, stop there.
 
 ## Deduplication
 
@@ -41,9 +34,8 @@ Prior context is what's already been captured. If the new input elaborates on th
 
 If a topic from prior context resurfaces with no new outcome, return `{"summary": []}`
 
-If it resurfaces with a concrete new detail, lead with only that delta:
-- "Replication formula finalized: k=4 selected as optimal after evaluating constraints." ✓
-- "Discussed replication capacity and constraints again." ✗
+If it resurfaces with a concrete new detail, lead with only that delta
+
 
 ## Requirements
 

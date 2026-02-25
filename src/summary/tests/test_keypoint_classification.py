@@ -36,7 +36,7 @@ class TestKeyPointClassification:
         
         for insight_text in critical_threshold_insights:
             parsed_data = {
-                "analysis": "Test analysis",
+                "topic": "Test analysis",
                 "insights": [
                     {
                         "insight_type": "KEY POINT",
@@ -49,7 +49,7 @@ class TestKeyPointClassification:
             
             result = task._extract_insights(parsed_data, 1, 10.0, 15.0)
             assert len(result["insights"]) == 1, f"Expected KEY POINT for: {insight_text}"
-            assert result["insights"][0]["insight_type"] == "KEY POINT"
+            assert result["insights"][0].insight_type == "KEY POINT"
     
     def test_notes_classification_for_explanations(self):
         """Test that explanations are classified as NOTES, not KEY POINT."""
@@ -64,7 +64,7 @@ class TestKeyPointClassification:
         
         for insight_text in explanation_insights:
             parsed_data = {
-                "analysis": "Test analysis",
+                "topic": "Test analysis",
                 "insights": [
                     {
                         "insight_type": "NOTES",
@@ -77,14 +77,14 @@ class TestKeyPointClassification:
             
             result = task._extract_insights(parsed_data, 1, 10.0, 15.0)
             assert len(result["insights"]) == 1, f"Expected NOTES for: {insight_text}"
-            assert result["insights"][0]["insight_type"] == "NOTES"
+            assert result["insights"][0].insight_type == "NOTES"
     
     def test_action_classification_for_tasks(self):
         """Test that tasks are classified as ACTION."""
         task = self.create_task()
         
         parsed_data = {
-            "analysis": "Test analysis",
+            "topic": "Test analysis",
             "insights": [
                 {
                     "insight_type": "ACTION",
@@ -96,14 +96,14 @@ class TestKeyPointClassification:
         }
         
         result = task._extract_insights(parsed_data, 1, 10.0, 15.0)
-        assert result["insights"][0]["insight_type"] == "ACTION"
+        assert result["insights"][0].insight_type == "ACTION"
     
     def test_decision_classification_for_decisions(self):
         """Test that decisions are classified as DECISION."""
         task = self.create_task()
         
         parsed_data = {
-            "analysis": "Test analysis",
+            "topic": "Test analysis",
             "insights": [
                 {
                     "insight_type": "DECISION",
@@ -115,7 +115,7 @@ class TestKeyPointClassification:
         }
         
         result = task._extract_insights(parsed_data, 1, 10.0, 15.0)
-        assert result["insights"][0]["insight_type"] == "DECISION"
+        assert result["insights"][0].insight_type == "DECISION"
 
 
 if __name__ == "__main__":

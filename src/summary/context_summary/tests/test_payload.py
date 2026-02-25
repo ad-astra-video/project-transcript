@@ -75,7 +75,7 @@ class TestContextSummaryPayload:
         with patch.object(plugin._task, 'process_context_summary', new_callable=AsyncMock) as mock_process:
             mock_process.return_value = {
                 "reasoning_content": "Test reasoning content",
-                "summary_text": '{"analysis": "test", "insights": []}',
+                "summary_text": '{"insights": []}',
                 "input_tokens": 150,
                 "output_tokens": 75,
                 "insights": []
@@ -154,7 +154,7 @@ class TestContextSummaryPayload:
         with patch.object(plugin._task, 'process_context_summary', new_callable=AsyncMock) as mock_process:
             mock_process.return_value = {
                 "reasoning_content": "Background context from LLM",
-                "summary_text": '{"analysis": "Test analysis", "insights": []}',
+                "summary_text": '{"insights": []}',
                 "input_tokens": 100,
                 "output_tokens": 50,
                 "insights": []

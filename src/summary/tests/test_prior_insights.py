@@ -49,7 +49,7 @@ class TestPriorInsightsAccumulation:
         first_window = wm._summary_windows[0]
         result = {
             "summary_text": json.dumps({
-                "analysis": "Test analysis",
+                "topic": "Test analysis",
                 "insights": [
                     {
                         "insight_id": 1,
@@ -92,7 +92,7 @@ class TestPriorInsightsAccumulation:
         first_window = wm._summary_windows[0]
         result = {
             "summary_text": json.dumps({
-                "analysis": "Test analysis",
+                "topic": "Test analysis",
                 "insights": [
                     {
                         "insight_id": 1,
@@ -116,7 +116,7 @@ class TestPriorInsightsAccumulation:
         second_window = wm._summary_windows[1]
         result2 = {
             "summary_text": json.dumps({
-                "analysis": "Test analysis 2",
+                "topic": "Test analysis 2",
                 "insights": [
                     {
                         "insight_id": 2,

@@ -60,7 +60,7 @@ class TestContextSummaryPluginAnalysisOverride:
         with patch.object(plugin._task, 'process_context_summary', new_callable=AsyncMock) as mock_process:
             mock_process.return_value = {
                 "summary_text": json.dumps({
-                    "analysis": analysis_text,
+                    "topic": analysis_text,
                     "insights": []
                 }),
                 "reasoning_content": reasoning_text,
@@ -119,7 +119,7 @@ class TestContextSummaryPluginAnalysisOverride:
         with patch.object(plugin._task, 'process_context_summary', new_callable=AsyncMock) as mock_process:
             mock_process.return_value = {
                 "summary_text": json.dumps({
-                    "analysis": "",
+                    "topic": "",
                     "insights": []
                 }),
                 "reasoning_content": reasoning_text,

@@ -10,7 +10,7 @@ from src.summary.context_summary.task import (
     ContextSummaryTask,
     InsightType,
     ClassificationField,
-    InsightResponseItemSchema
+    WindowInsight
 )
 from src.summary.context_summary.prompts import InsightConsolidationResponse
 
@@ -26,16 +26,14 @@ class TestFindDuplicateInsightTypes:
     def test_no_duplicates_returns_empty(self, task):
         """When no duplicate types, should return empty dict."""
         insights = [
-            InsightResponseItemSchema(
-                insight_type=InsightType.ACTION,
+            WindowInsight(insight_type=InsightType.ACTION, window_id=1, timestamp_start=0.0, timestamp_end=1.0,
                 insight_text="Do something",
                 confidence=0.9,
                 classification=ClassificationField.POSITIVE,
                 continuation_of=None,
                 correction_of=None
             ),
-            InsightResponseItemSchema(
-                insight_type=InsightType.DECISION,
+            WindowInsight(insight_type=InsightType.DECISION, window_id=1, timestamp_start=0.0, timestamp_end=1.0,
                 insight_text="Decided X",
                 confidence=0.8,
                 classification=ClassificationField.NEUTRAL,
@@ -51,24 +49,21 @@ class TestFindDuplicateInsightTypes:
     def test_duplicates_found(self, task):
         """When duplicate types exist, should return grouped dict."""
         insights = [
-            InsightResponseItemSchema(
-                insight_type=InsightType.KEY_POINT,
+            WindowInsight(insight_type=InsightType.KEY_POINT, window_id=1, timestamp_start=0.0, timestamp_end=1.0,
                 insight_text="First key point",
                 confidence=0.9,
                 classification=ClassificationField.POSITIVE,
                 continuation_of=None,
                 correction_of=None
             ),
-            InsightResponseItemSchema(
-                insight_type=InsightType.KEY_POINT,
+            WindowInsight(insight_type=InsightType.KEY_POINT, window_id=1, timestamp_start=0.0, timestamp_end=1.0,
                 insight_text="Second key point",
                 confidence=0.8,
                 classification=ClassificationField.NEUTRAL,
                 continuation_of=None,
                 correction_of=None
             ),
-            InsightResponseItemSchema(
-                insight_type=InsightType.ACTION,
+            WindowInsight(insight_type=InsightType.ACTION, window_id=1, timestamp_start=0.0, timestamp_end=1.0,
                 insight_text="Take action",
                 confidence=0.7,
                 classification=ClassificationField.POSITIVE,
@@ -86,16 +81,14 @@ class TestFindDuplicateInsightTypes:
     def test_continuations_excluded(self, task):
         """Insights with continuation_of should be excluded from duplicate check."""
         insights = [
-            InsightResponseItemSchema(
-                insight_type=InsightType.KEY_POINT,
+            WindowInsight(insight_type=InsightType.KEY_POINT, window_id=1, timestamp_start=0.0, timestamp_end=1.0,
                 insight_text="Original key point",
                 confidence=0.9,
                 classification=ClassificationField.POSITIVE,
                 continuation_of=None,
                 correction_of=None
             ),
-            InsightResponseItemSchema(
-                insight_type=InsightType.KEY_POINT,
+            WindowInsight(insight_type=InsightType.KEY_POINT, window_id=1, timestamp_start=0.0, timestamp_end=1.0,
                 insight_text="Continuation of key point",
                 confidence=0.8,
                 classification=ClassificationField.NEUTRAL,
@@ -112,16 +105,14 @@ class TestFindDuplicateInsightTypes:
     def test_corrections_excluded(self, task):
         """Insights with correction_of should be excluded from duplicate check."""
         insights = [
-            InsightResponseItemSchema(
-                insight_type=InsightType.KEY_POINT,
+            WindowInsight(insight_type=InsightType.KEY_POINT, window_id=1, timestamp_start=0.0, timestamp_end=1.0,
                 insight_text="Original key point",
                 confidence=0.9,
                 classification=ClassificationField.POSITIVE,
                 continuation_of=None,
                 correction_of=None
             ),
-            InsightResponseItemSchema(
-                insight_type=InsightType.KEY_POINT,
+            WindowInsight(insight_type=InsightType.KEY_POINT, window_id=1, timestamp_start=0.0, timestamp_end=1.0,
                 insight_text="Correction of key point",
                 confidence=0.8,
                 classification=ClassificationField.NEUTRAL,
@@ -138,24 +129,21 @@ class TestFindDuplicateInsightTypes:
     def test_mixed_continuations_and_duplicates(self, task):
         """Should find duplicates when some insights are continuations."""
         insights = [
-            InsightResponseItemSchema(
-                insight_type=InsightType.KEY_POINT,
+            WindowInsight(insight_type=InsightType.KEY_POINT, window_id=1, timestamp_start=0.0, timestamp_end=1.0,
                 insight_text="Original key point",
                 confidence=0.9,
                 classification=ClassificationField.POSITIVE,
                 continuation_of=None,
                 correction_of=None
             ),
-            InsightResponseItemSchema(
-                insight_type=InsightType.KEY_POINT,
+            WindowInsight(insight_type=InsightType.KEY_POINT, window_id=1, timestamp_start=0.0, timestamp_end=1.0,
                 insight_text="Second key point",
                 confidence=0.8,
                 classification=ClassificationField.NEUTRAL,
                 continuation_of=None,
                 correction_of=None
             ),
-            InsightResponseItemSchema(
-                insight_type=InsightType.KEY_POINT,
+            WindowInsight(insight_type=InsightType.KEY_POINT, window_id=1, timestamp_start=0.0, timestamp_end=1.0,
                 insight_text="Continuation of key point",
                 confidence=0.7,
                 classification=ClassificationField.POSITIVE,
@@ -191,8 +179,7 @@ class TestConsolidateSimilarInsights:
         task = ContextSummaryTask(rapid_llm_client=None)
         
         insights = [
-            InsightResponseItemSchema(
-                insight_type=InsightType.KEY_POINT,
+            WindowInsight(insight_type=InsightType.KEY_POINT, window_id=1, timestamp_start=0.0, timestamp_end=1.0,
                 insight_text="Test",
                 confidence=0.9,
                 classification=ClassificationField.POSITIVE,
@@ -210,8 +197,7 @@ class TestConsolidateSimilarInsights:
     async def test_single_insight_returns_unchanged(self, task_with_rapid):
         """When only one insight, should return unchanged."""
         insights = [
-            InsightResponseItemSchema(
-                insight_type=InsightType.KEY_POINT,
+            WindowInsight(insight_type=InsightType.KEY_POINT, window_id=1, timestamp_start=0.0, timestamp_end=1.0,
                 insight_text="Only one insight",
                 confidence=0.9,
                 classification=ClassificationField.POSITIVE,
@@ -228,16 +214,14 @@ class TestConsolidateSimilarInsights:
     async def test_no_duplicates_returns_unchanged(self, task_with_rapid, mock_rapid_llm):
         """When no duplicate types, should return unchanged without calling LLM."""
         insights = [
-            InsightResponseItemSchema(
-                insight_type=InsightType.ACTION,
+            WindowInsight(insight_type=InsightType.ACTION, window_id=1, timestamp_start=0.0, timestamp_end=1.0,
                 insight_text="Action 1",
                 confidence=0.9,
                 classification=ClassificationField.POSITIVE,
                 continuation_of=None,
                 correction_of=None
             ),
-            InsightResponseItemSchema(
-                insight_type=InsightType.DECISION,
+            WindowInsight(insight_type=InsightType.DECISION, window_id=1, timestamp_start=0.0, timestamp_end=1.0,
                 insight_text="Decision 1",
                 confidence=0.8,
                 classification=ClassificationField.NEUTRAL,
@@ -260,20 +244,19 @@ class TestConsolidateSimilarInsights:
             "",  # reasoning
             '{"are_similar": true, "consolidated_text": "Consolidated key point about the topic"}',  # content
             100,  # input_tokens
-            50   # output_tokens
+            50,   # output_tokens
+            0     # reasoning_tokens
         ))
         
         insights = [
-            InsightResponseItemSchema(
-                insight_type=InsightType.KEY_POINT,
+            WindowInsight(insight_type=InsightType.KEY_POINT, window_id=1, timestamp_start=0.0, timestamp_end=1.0,
                 insight_text="The project is behind schedule",
                 confidence=0.9,
                 classification=ClassificationField.NEGATIVE,
                 continuation_of=None,
                 correction_of=None
             ),
-            InsightResponseItemSchema(
-                insight_type=InsightType.KEY_POINT,
+            WindowInsight(insight_type=InsightType.KEY_POINT, window_id=1, timestamp_start=0.0, timestamp_end=1.0,
                 insight_text="The timeline for the project is delayed",
                 confidence=0.8,
                 classification=ClassificationField.NEGATIVE,
@@ -296,20 +279,19 @@ class TestConsolidateSimilarInsights:
             "",
             '{"are_similar": false, "consolidated_text": ""}',
             100,
-            50
+            50,
+            0
         ))
         
         insights = [
-            InsightResponseItemSchema(
-                insight_type=InsightType.KEY_POINT,
+            WindowInsight(insight_type=InsightType.KEY_POINT, window_id=1, timestamp_start=0.0, timestamp_end=1.0,
                 insight_text="Project is behind schedule",
                 confidence=0.9,
                 classification=ClassificationField.NEGATIVE,
                 continuation_of=None,
                 correction_of=None
             ),
-            InsightResponseItemSchema(
-                insight_type=InsightType.KEY_POINT,
+            WindowInsight(insight_type=InsightType.KEY_POINT, window_id=1, timestamp_start=0.0, timestamp_end=1.0,
                 insight_text="Weather was nice today",
                 confidence=0.8,
                 classification=ClassificationField.POSITIVE,
@@ -330,28 +312,26 @@ class TestConsolidateSimilarInsights:
             "",
             '{"are_similar": true, "consolidated_text": "Consolidated"}',
             100,
-            50
+            50,
+            0
         ))
         
         insights = [
-            InsightResponseItemSchema(
-                insight_type=InsightType.KEY_POINT,
+            WindowInsight(insight_type=InsightType.KEY_POINT, window_id=1, timestamp_start=0.0, timestamp_end=1.0,
                 insight_text="Key point 1",
                 confidence=0.9,
                 classification=ClassificationField.POSITIVE,
                 continuation_of=None,
                 correction_of=None
             ),
-            InsightResponseItemSchema(
-                insight_type=InsightType.KEY_POINT,
+            WindowInsight(insight_type=InsightType.KEY_POINT, window_id=1, timestamp_start=0.0, timestamp_end=1.0,
                 insight_text="Key point 2",
                 confidence=0.8,
                 classification=ClassificationField.POSITIVE,
                 continuation_of=None,
                 correction_of=None
             ),
-            InsightResponseItemSchema(
-                insight_type=InsightType.ACTION,
+            WindowInsight(insight_type=InsightType.ACTION, window_id=1, timestamp_start=0.0, timestamp_end=1.0,
                 insight_text="Take action",
                 confidence=0.7,
                 classification=ClassificationField.POSITIVE,
@@ -374,20 +354,19 @@ class TestConsolidateSimilarInsights:
             "",
             '{"are_similar": true, "consolidated_text": "Consolidated text"}',
             100,
-            50
+            50,
+            0
         ))
         
         insights = [
-            InsightResponseItemSchema(
-                insight_type=InsightType.KEY_POINT,
+            WindowInsight(insight_type=InsightType.KEY_POINT, window_id=1, timestamp_start=0.0, timestamp_end=1.0,
                 insight_text="Low confidence point",
                 confidence=0.5,
                 classification=ClassificationField.POSITIVE,
                 continuation_of=None,
                 correction_of=None
             ),
-            InsightResponseItemSchema(
-                insight_type=InsightType.KEY_POINT,
+            WindowInsight(insight_type=InsightType.KEY_POINT, window_id=1, timestamp_start=0.0, timestamp_end=1.0,
                 insight_text="High confidence point",
                 confidence=0.9,
                 classification=ClassificationField.POSITIVE,
@@ -408,16 +387,14 @@ class TestConsolidateSimilarInsights:
         mock_rapid_llm.create_completion = AsyncMock(side_effect=Exception("LLM error"))
         
         insights = [
-            InsightResponseItemSchema(
-                insight_type=InsightType.KEY_POINT,
+            WindowInsight(insight_type=InsightType.KEY_POINT, window_id=1, timestamp_start=0.0, timestamp_end=1.0,
                 insight_text="Point 1",
                 confidence=0.9,
                 classification=ClassificationField.POSITIVE,
                 continuation_of=None,
                 correction_of=None
             ),
-            InsightResponseItemSchema(
-                insight_type=InsightType.KEY_POINT,
+            WindowInsight(insight_type=InsightType.KEY_POINT, window_id=1, timestamp_start=0.0, timestamp_end=1.0,
                 insight_text="Point 2",
                 confidence=0.8,
                 classification=ClassificationField.POSITIVE,
@@ -442,16 +419,14 @@ class TestConsolidateSimilarInsights:
         ))
         
         insights = [
-            InsightResponseItemSchema(
-                insight_type=InsightType.KEY_POINT,
+            WindowInsight(insight_type=InsightType.KEY_POINT, window_id=1, timestamp_start=0.0, timestamp_end=1.0,
                 insight_text="Point 1",
                 confidence=0.9,
                 classification=ClassificationField.POSITIVE,
                 continuation_of=None,
                 correction_of=None
             ),
-            InsightResponseItemSchema(
-                insight_type=InsightType.KEY_POINT,
+            WindowInsight(insight_type=InsightType.KEY_POINT, window_id=1, timestamp_start=0.0, timestamp_end=1.0,
                 insight_text="Point 2",
                 confidence=0.8,
                 classification=ClassificationField.POSITIVE,

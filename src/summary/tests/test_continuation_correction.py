@@ -138,7 +138,7 @@ class TestWindowInsightPipeline:
         
         # Simulate parsed data from LLM
         parsed_data = {
-            "analysis": "Test analysis",
+            "topic": "Test analysis",
             "insights": [
                 {
                     "insight_type": "KEY POINT",
@@ -185,7 +185,7 @@ class TestWindowInsightPipeline:
         )
         
         # Simulate valid JSON response from LLM
-        summary_text = '{"analysis": "Test", "insights": [{"insight_type": "KEY POINT", "insight_text": "Test", "confidence": 0.9, "classification": "+"}]}'
+        summary_text = '{"topic": "Test", "insights": [{"insight_type": "KEY POINT", "insight_text": "Test", "confidence": 0.9, "classification": "+"}]}'
         
         result = await task.process_result(
             summary_text=summary_text,

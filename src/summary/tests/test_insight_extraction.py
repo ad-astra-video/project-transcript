@@ -28,7 +28,7 @@ class TestExtractInsights:
         task = self.create_task()
         
         parsed_data = {
-            "analysis": "This is the analysis text",
+            "topic": "This is the analysis text",
             "insights": [
                 {
                     "insight_type": "ACTION",
@@ -47,24 +47,24 @@ class TestExtractInsights:
         
         result = task._extract_insights(parsed_data, 1, 10.0, 15.0)
         
-        # _extract_insights returns the parsed_data dict with insights
+        # _extract_insights returns the parsed_data dict with WindowInsight objects
         assert "insights" in result
         assert len(result["insights"]) == 2
-        assert result["insights"][0]["insight_type"] == "ACTION"
-        assert result["insights"][0]["insight_text"] == "Complete the task by Friday"
-        assert result["insights"][0]["confidence"] == 0.95
-        assert result["insights"][0]["classification"] == "[+]"
-        assert result["insights"][1]["insight_type"] == "DECISION"
-        assert result["insights"][1]["insight_text"] == "Approved the budget"
-        assert result["insights"][1]["confidence"] == 0.90
-        assert result["insights"][1]["classification"] == "[~]"
+        assert result["insights"][0].insight_type == "ACTION"
+        assert result["insights"][0].insight_text == "Complete the task by Friday"
+        assert result["insights"][0].confidence == 0.95
+        assert result["insights"][0].classification == "[+]"
+        assert result["insights"][1].insight_type == "DECISION"
+        assert result["insights"][1].insight_text == "Approved the budget"
+        assert result["insights"][1].confidence == 0.90
+        assert result["insights"][1].classification == "[~]"
     
     def test_extract_insights_with_empty_list(self):
         """Test extracting insights with empty list."""
         task = self.create_task()
         
         parsed_data = {
-            "analysis": "Analysis",
+            "topic": "Analysis",
             "insights": []
         }
         
@@ -81,7 +81,7 @@ class TestExtractInsights:
         task._window_manager.add_summary_window("Test content", 10.0, 15.0, [1])
         
         parsed_data = {
-            "analysis": "Analysis",
+            "topic": "Analysis",
             "insights": [
                 {
                     "insight_type": "KEY POINT",
@@ -94,13 +94,13 @@ class TestExtractInsights:
         
         result = task._extract_insights(parsed_data, 0, 10.0, 15.0)
         
-        # In refactored code, insights are returned in the result with assigned IDs
+        # In refactored code, insights are returned as WindowInsight objects with assigned IDs
         # Verify insight was assigned an ID and returned in result
         assert "insights" in result
         assert len(result["insights"]) == 1
-        assert result["insights"][0]["insight_id"] == 1  # First insight gets ID 1
-        assert result["insights"][0]["insight_type"] == "KEY POINT"
-        assert result["insights"][0]["insight_text"] == "Test insight"
+        assert result["insights"][0].insight_id == 1  # First insight gets ID 1
+        assert result["insights"][0].insight_type == "KEY POINT"
+        assert result["insights"][0].insight_text == "Test insight"
 
 
 class TestInsightTypeEnum:

@@ -165,6 +165,16 @@ Before extracting insights, first identify what topic/domain the content is abou
 - BUSINESS: Sales, marketing, finance, operations
 - LEGAL: Contracts, compliance, regulations
 - RESEARCH: Scientific findings, experiments, studies
+- HEALTH: Medical topics, healthcare, wellness, medicine
+- EDUCATIONAL: Teaching, learning, academia, training
+- SPORTS: Athletic events, competitions, training, fitness
+- ARTS: Creative work, entertainment, media, music, film
+- AGRICULTURE: Farming, gardening, botany, horticulture
+- HISTORY: Historical events, archaeology, anthropology
+- ENVIRONMENT: Climate, ecology, conservation, sustainability
+- FINANCE: Investments, banking, economics, accounting
+- MARKETING: Advertising, branding, promotion, social media
+- CUSTOMER_SERVICE: Support, service, relations, help desk
 - GENERAL: Does not fit specific categories
 
 **How to determine topic**:
@@ -188,22 +198,6 @@ Before extracting insights, first identify what topic/domain the content is abou
 The topic should inform your extraction priorities, but you still follow all other insight type rules (ACTION, DECISION, QUESTION, KEY POINT, etc.).
 
 ---
-
-## ANALYSIS EXPLANATION
-
-Provide a thoughtful explanation that remains as concise as possible of the most critical insights and their implications, without restating the entire transcript.
-
-**Include in your analysis**:
-- The detected topic (what domain the content is about)
-- Whether there is a topic shift from the prior context
-- How the topic informs what insights are most valuable
-
-Make sure to include explanation if pulling from prior context to generate insight on current window. Analysis should include quote from prior context and what text in current window completed the insight.
-
-**For NOTES-heavy output**: Briefly summarize the main topics being discussed. For example: "Speaker continues explaining ContextRot concept with legal contract examples, then discusses RAG approach limitations."
-
----
-
 
 ## STORY AND BACKGROUND CONTEXT HANDLING
 
@@ -1196,7 +1190,7 @@ SYSTEM_PROMPT_OUTPUT_CONSTRAINTS = """
 
 ```json
 {
-  "analysis": "Thoughtful explanation of the most critical insights and their implications, without restating the entire transcript",
+  "topic": "The identified topic/domain (e.g., MACHINE_LEARNING, HEALTH, SPORTS, ARCHEOLOGY)",
   "insights": [
     {
       "insight_type": "ACTION | DECISION | QUESTION | KEY POINT | RISK | SENTIMENT | PARTICIPANTS | NOTES",

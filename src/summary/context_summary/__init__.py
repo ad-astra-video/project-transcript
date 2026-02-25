@@ -116,6 +116,10 @@ class ContextSummaryPlugin:
             confidence=confidence,
             source=source
         )
+        
+        # Update the task's reference to the content type state
+        # This ensures the task sees the updated content type when processing
+        self._task._content_type_state = self._content_type_state
                 
         logger.info(f"ContextSummaryPlugin updated content type to: {content_type} "
                     f"(sentiment_enabled={self._sentiment_enabled}, participants_enabled={self._participants_enabled})")

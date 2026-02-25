@@ -120,7 +120,7 @@ class LLMClient:
         # Extract token usage
         input_tokens = response.usage.prompt_tokens if response.usage else 0
         output_tokens = response.usage.completion_tokens if response.usage else 0
-        
+        logger.info(f"LLMClient.create_completion token usage: {response.usage if response.usage else 'N/A'}")
         # Extract reasoning tokens from completion_tokens_details (available for reasoning models like o1, o3-mini)
         reasoning_tokens = 0
         if response.usage and hasattr(response.usage, 'completion_tokens_details') and response.usage.completion_tokens_details:

@@ -95,7 +95,7 @@ class InsightResponseItemSchema(BaseModel):
 
 class InsightsResponseSchema(BaseModel):
     """Schema for insights response from LLM."""
-    analysis: str
+    topic: str = "GENERAL"
     insights: List[InsightResponseItemSchema]
 
 
@@ -115,7 +115,7 @@ class ContextSummaryTask:
         llm_client: Optional[LLMClient] = None,
         rapid_llm_client: Optional[LLMClient] = None,
         max_tokens: int = 8192,
-        temperature: float = 0.2,
+        temperature: float = 0.6,
         system_prompt: str = SYSTEM_PROMPT,
         content_type_state: Any = None,
         window_manager: Any = None
@@ -373,7 +373,7 @@ class ContextSummaryTask:
         context, context_text_length, results_per_window = self.build_context(
             text_token_limit=500,
             result_types=["context_summary"],
-            result_token_limit={"context_summary": 5000}
+            result_token_limit={"context_summary": 1000}
         )
         
         # Get prior insights from plugin_results for continuation/correction validation
@@ -545,8 +545,8 @@ class ContextSummaryTask:
     
     def _find_duplicate_insight_types(
         self,
-        insights: List[InsightResponseItemSchema]
-    ) -> Dict[str, List[InsightResponseItemSchema]]:
+        insights: List[WindowInsight]
+    ) -> Dict[str, List[WindowInsight]]:
         """Find insight types that appear more than once, excluding continuations/corrections.
         
         Args:
@@ -559,7 +559,7 @@ class ContextSummaryTask:
         from collections import defaultdict
         
         # Group insights by type, excluding continuations and corrections
-        type_groups: Dict[str, List[InsightResponseItemSchema]] = defaultdict(list)
+        type_groups: Dict[str, List[WindowInsight]] = defaultdict(list)
         
         for insight in insights:
             # Skip insights that are continuations or corrections - they are explicitly linked
@@ -578,8 +578,8 @@ class ContextSummaryTask:
     
     async def _consolidate_similar_insights(
         self,
-        insights: List[InsightResponseItemSchema]
-    ) -> List[InsightResponseItemSchema]:
+        insights: List[WindowInsight]
+    ) -> List[WindowInsight]:
         """Check for duplicate insight types and consolidate if similar.
         
         This method:
@@ -604,7 +604,7 @@ class ContextSummaryTask:
         
         # Build a set of insight IDs to exclude (those that get consolidated)
         consolidated_ids: set = set()
-        new_insights: List[InsightResponseItemSchema] = []
+        new_insights: List[WindowInsight] = []
         
         for insight_type, type_insights in duplicate_types.items():
             if len(type_insights) < 2:
@@ -652,11 +652,15 @@ class ContextSummaryTask:
                         # Use the classification from the first insight
                         first_classification = type_insights[0].classification
                         
-                        consolidated_insight = InsightResponseItemSchema(
-                            insight_type=type_insights[0].insight_type,
+                        consolidated_insight = WindowInsight(
+                            insight_id=self._get_next_insight_id(),
+                            insight_type=type_insights[0].insight_type.value if hasattr(type_insights[0].insight_type, 'value') else type_insights[0].insight_type,
                             insight_text=parsed.consolidated_text.strip(),
                             confidence=max_confidence,
-                            classification=first_classification,
+                            window_id=type_insights[0].window_id,
+                            timestamp_start=type_insights[0].timestamp_start,
+                            timestamp_end=type_insights[0].timestamp_end,
+                            classification=type_insights[0].classification.value if hasattr(type_insights[0].classification, 'value') else type_insights[0].classification,
                             continuation_of=None,
                             correction_of=None
                         )
@@ -975,6 +979,12 @@ class ContextSummaryTask:
                 "insights": [],
                 "error": str(e)
             }
+        
+        # Ensure topic defaults to "GENERAL" if not provided by LLM
+        if isinstance(parsed_data, dict) and "topic" not in parsed_data:
+            parsed_data["topic"] = "GENERAL"
+        elif isinstance(parsed_data, dict) and not parsed_data.get("topic"):
+            parsed_data["topic"] = "GENERAL"
         
         # Extract and process insights
         processed_data = self._extract_insights(

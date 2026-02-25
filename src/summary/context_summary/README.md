@@ -78,7 +78,7 @@ class ContextSummaryPlugin:
 
 ```python
 class ContextSummaryTask:
-    def __init__(self, client, model, max_tokens=8192, temperature=0.2,
+    def __init__(self, client, model, max_tokens=8192, temperature=0.6,
                  system_prompt=None, insights_response_json_schema=None,
                  message_format_mode="system", content_type_state=None,
                  window_manager=None, semaphore=None)
