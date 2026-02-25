@@ -144,7 +144,7 @@ class WindowManager:
         self,
         context_limit: int = 50000,  # Max characters for accumulated text
         raw_text_context_limit: int = 1500,  # Max characters for raw text in LLM context
-        transcription_windows_per_summary_window: int = 8  # Number of transcription windows per summary window
+        transcription_windows_per_summary_window: int = 10  # Number of transcription windows per summary window
     ):
         self._summary_windows: List[SummaryWindow] = []  # Ordered oldest -> newest (RENAMED from _windows)
         self._transcription_windows: Dict[int, TranscriptionWindow] = {}  # Dict of transcription windows keyed by ID
