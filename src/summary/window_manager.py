@@ -262,25 +262,37 @@ class WindowManager:
                 # Track token usage per plugin (only used when result_token_limit is provided)
                 plugin_token_counts: Dict[str, int] = {}
                 
+                # Track if limits have been reached (for controlling loop exit)
+                text_limit_reached: bool = False
+                plugin_limits_reached: Dict[str, bool] = {}
+                
                 for window in reversed(self._summary_windows):
+                    # Track whether to continue collecting plugin results from this window
+                    should_collect_plugins = True
+                    
+                    # Handle text collection (always runs unless text_token_limit is 0 and we've hit limit)
                     if text_token_limit > 0:
                         # Estimate tokens for this window's text
                         window_tokens = window.char_count // 4
                         
                         # Check if adding this window would exceed text limit
-                        if text_token_limit == 0 or text_token_count + window_tokens <= text_token_limit:
+                        if text_token_count + window_tokens <= text_token_limit:
                             accumulated_text_parts.insert(0, window.text)
                             text_token_count += window_tokens
                         else:
-                            # at limit of context, exit loop
-                            break
+                            # Text limit reached - mark it but continue for plugin results
+                            text_limit_reached = True
+                    elif text_token_limit == 0:
+                        # Unlimited text - always collect
+                        accumulated_text_parts.insert(0, window.text)
+                        text_token_count += window.char_count // 4
                     
                     # if not requesting results from plugins then skip
                     if result_types is None:
-                        continue
+                        should_collect_plugins = False
 
                     # Collect plugin results for this window (regardless of text limit)
-                    if window.plugin_results:
+                    if should_collect_plugins and window.plugin_results:
                         for plugin_name, data in window.plugin_results.items():
                             if result_types and plugin_name not in result_types:
                                 continue
@@ -296,6 +308,7 @@ class WindowManager:
                             
                             if formatted:
                                 result_tokens = len(formatted) // 4
+                                limit_reached = False
                                 
                                 # Check per-plugin token limit if provided
                                 if result_token_limit is not None:
@@ -303,7 +316,12 @@ class WindowManager:
                                     if plugin_limit is not None:
                                         current_count = plugin_token_counts.get(plugin_name, 0)
                                         if current_count + result_tokens > plugin_limit:
-                                            continue
+                                            limit_reached = True
+                                
+                                # Track if this plugin's limit is reached
+                                if limit_reached:
+                                    plugin_limits_reached[plugin_name] = True
+                                    continue
                                 
                                 # Append to list (not overwrite)
                                 if plugin_name not in plugin_results:
@@ -314,6 +332,16 @@ class WindowManager:
                                 plugin_result_counts[plugin_name] += 1
                                 if result_token_limit is not None:
                                     plugin_token_counts[plugin_name] += result_tokens
+                    
+                    # Only break if text limit reached AND all plugin limits reached
+                    if text_limit_reached and result_types is not None:
+                        # Check if all requested plugins have reached their limits
+                        all_plugins_limited = all(
+                            plugin_limits_reached.get(plugin_name, False)
+                            for plugin_name in result_types
+                        )
+                        if all_plugins_limited:
+                            break
                 
                 accumulated_text = "\n".join(accumulated_text_parts)
                 
