@@ -763,12 +763,8 @@ def diarization_worker(hf_token: str, request_queue, result_queue):
                 logger.warning(f"Speakers before reset: {list(speakers.centroids.keys())}")
                 speakers.reset()
                 logger.warning(f"Speakers after reset: {list(speakers.centroids.keys())}")
-                # CRITICAL FIX: Do NOT continue loop here - we need to re-check queue state
-                # The issue is that after clearing queues in reset_process(), the queue is empty
-                # If we continue and find queue empty with shutdown_received=False, we won't exit
-                # But if shutdown_received was True before, we need to ensure it stays False
-                # Actually, the issue is different - let me trace through the flow more carefully
                 logger.debug(f"After RESET_SIGNAL: shutdown_received={shutdown_received}, queue.empty()={request_queue.empty()}")
+                continue  # Skip the rest of the loop - request is a string, not a DiarizationRequest
 
             logger.info(f"Received diarization request: {request.request_id}, audio: {request.audio_path}")
             try:
