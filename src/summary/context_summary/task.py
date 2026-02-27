@@ -83,6 +83,33 @@ class ClassificationField(str, Enum):
     NEGATIVE = "-"
 
 
+class Topic(str, Enum):
+    """Enumeration of valid topic categories for context summary.
+    
+    These values must exactly match the TOPICS defined in the system prompt.
+    """
+    MACHINE_LEARNING = "MACHINE_LEARNING"
+    SOFTWARE_ENGINEERING = "SOFTWARE_ENGINEERING"
+    DATA_ENGINEERING = "DATA_ENGINEERING"
+    DEVOPS = "DEVOPS"
+    CYBERSECURITY = "CYBERSECURITY"
+    PRODUCT = "PRODUCT"
+    BUSINESS = "BUSINESS"
+    LEGAL = "LEGAL"
+    RESEARCH = "RESEARCH"
+    HEALTH = "HEALTH"
+    EDUCATIONAL = "EDUCATIONAL"
+    SPORTS = "SPORTS"
+    ARTS = "ARTS"
+    AGRICULTURE = "AGRICULTURE"
+    HISTORY = "HISTORY"
+    ENVIRONMENT = "ENVIRONMENT"
+    FINANCE = "FINANCE"
+    MARKETING = "MARKETING"
+    CUSTOMER_SERVICE = "CUSTOMER_SERVICE"
+    GENERAL = "GENERAL"
+
+
 class InsightResponseItemSchema(BaseModel):
     """Schema for a single insight item."""
     insight_type: InsightType
@@ -94,8 +121,11 @@ class InsightResponseItemSchema(BaseModel):
 
 
 class InsightsResponseSchema(BaseModel):
-    """Schema for insights response from LLM."""
-    topic: str = "GENERAL"
+    """Schema for insights response from LLM.
+    
+    The topic field is required and must be one of the valid Topic enum values.
+    """
+    topic: Topic
     insights: List[InsightResponseItemSchema]
 
 
@@ -980,11 +1010,23 @@ class ContextSummaryTask:
                 "error": str(e)
             }
         
-        # Ensure topic defaults to "GENERAL" if not provided by LLM
-        if isinstance(parsed_data, dict) and "topic" not in parsed_data:
-            parsed_data["topic"] = "GENERAL"
-        elif isinstance(parsed_data, dict) and not parsed_data.get("topic"):
-            parsed_data["topic"] = "GENERAL"
+        # Validate topic field - must be present and a valid Topic enum value
+        if isinstance(parsed_data, dict):
+            topic_value = parsed_data.get("topic")
+            if topic_value is None:
+                logger.error("Topic field is missing from LLM response - topic is now required")
+                return {
+                    "summary_text": "{}",
+                    "insights": [],
+                    "error": "topic field is required but was not provided by LLM"
+                }
+            
+            # Validate topic is a valid enum value
+            try:
+                parsed_data["topic"] = Topic(topic_value).value
+            except ValueError:
+                logger.warning(f"Invalid topic value '{topic_value}' from LLM, defaulting to 'GENERAL'")
+                parsed_data["topic"] = Topic.GENERAL.value
         
         # Extract and process insights
         processed_data = self._extract_insights(

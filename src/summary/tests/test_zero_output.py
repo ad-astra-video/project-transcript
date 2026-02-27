@@ -81,11 +81,12 @@ class TestZeroOutputBehavior:
         assert "insights" in result
         assert len(result["insights"]) == 0
     
-    def test_missing_topic_field(self):
-        """Test that missing topic field is handled correctly."""
+    @pytest.mark.asyncio
+    async def test_missing_topic_field(self):
+        """Test that missing topic field returns an error."""
         task = self.create_task()
         
-        # Test without topic field at all
+        # Test without topic field at all - should return error since topic is now required
         parsed_data = {
             "insights": [
                 {
@@ -97,11 +98,86 @@ class TestZeroOutputBehavior:
             ]
         }
         
-        result = task._extract_insights(parsed_data, 1, 10.0, 15.0)
+        # Use process_result which validates the topic field
+        import json
+        summary_text = json.dumps(parsed_data)
         
-        # Should extract the insight without requiring analysis
+        result = await task.process_result(
+            summary_text=summary_text,
+            summary_window_id=1,
+            window_start=10.0,
+            window_end=15.0
+        )
+        
+        # Should return error since topic is now required
+        assert "error" in result
+        assert "topic" in result["error"]
+        assert result["insights"] == []
+
+    @pytest.mark.asyncio
+    async def test_valid_topic_field(self):
+        """Test that valid topic field is accepted."""
+        task = self.create_task()
+        
+        # Test with valid topic field
+        parsed_data = {
+            "topic": "MACHINE_LEARNING",
+            "insights": [
+                {
+                    "insight_type": "KEY POINT",
+                    "insight_text": "Important ML insight",
+                    "confidence": 0.9,
+                    "classification": "+"
+                }
+            ]
+        }
+        
+        import json
+        summary_text = json.dumps(parsed_data)
+        
+        result = await task.process_result(
+            summary_text=summary_text,
+            summary_window_id=1,
+            window_start=10.0,
+            window_end=15.0
+        )
+        
+        # Should extract the insight successfully
+        assert "error" not in result
         assert len(result["insights"]) == 1
-        assert result["insights"][0].insight_text == "Important point"
+        assert result["insights"][0]["insight_text"] == "Important ML insight"
+
+    @pytest.mark.asyncio
+    async def test_invalid_topic_field_defaults_to_general(self):
+        """Test that invalid topic value defaults to GENERAL."""
+        task = self.create_task()
+        
+        # Test with invalid topic field
+        parsed_data = {
+            "topic": "INVALID_TOPIC",
+            "insights": [
+                {
+                    "insight_type": "KEY POINT",
+                    "insight_text": "Some insight",
+                    "confidence": 0.9,
+                    "classification": "+"
+                }
+            ]
+        }
+        
+        import json
+        summary_text = json.dumps(parsed_data)
+        
+        result = await task.process_result(
+            summary_text=summary_text,
+            summary_window_id=1,
+            window_start=10.0,
+            window_end=15.0
+        )
+        
+        # Should extract the insight with topic defaulted to GENERAL
+        assert "error" not in result
+        assert len(result["insights"]) == 1
 
 
 if __name__ == "__main__":

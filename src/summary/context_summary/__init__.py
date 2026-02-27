@@ -7,7 +7,7 @@ import time
 from datetime import datetime, timezone
 from typing import Dict, Any, Callable, List, Optional
 
-from .task import ContextSummaryTask
+from .task import ContextSummaryTask, Topic
 from .prompts import SYSTEM_PROMPT, SYSTEM_PROMPT_OUTPUT_CONSTRAINTS, CONTENT_TYPE_RULE_MODIFIERS
 
 logger = logging.getLogger(__name__)
@@ -308,6 +308,7 @@ __all__ = [
     # Types and schemas
     "InsightType",
     "ClassificationField",
+    "Topic",
     "InsightResponseItemSchema",
     "InsightsResponseSchema",
 ]

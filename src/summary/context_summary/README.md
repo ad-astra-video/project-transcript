@@ -104,6 +104,41 @@ The plugin uses `CONTENT_TYPE_RULE_MODIFIERS` to customize behavior based on con
 | DEBATE | true | true |
 | UNKNOWN | false | false |
 
+## Topic Field
+
+The `topic` field is **required** in the LLM response and must be one of the valid Topic enum values. This field identifies the topic/domain of the transcription content.
+
+### Valid Topic Values
+
+| Topic | Description |
+|-------|-------------|
+| MACHINE_LEARNING | ML models, training, AI, deep learning, benchmarks |
+| SOFTWARE_ENGINEERING | Code, APIs, architecture, bugs, performance |
+| DATA_ENGINEERING | Databases, pipelines, ETL, data processing |
+| DEVOPS | Infrastructure, CI/CD, cloud, deployment |
+| CYBERSECURITY | Security, vulnerabilities, threats |
+| PRODUCT | Product features, roadmap, user feedback |
+| BUSINESS | Sales, marketing, finance, operations |
+| LEGAL | Contracts, compliance, regulations |
+| RESEARCH | Scientific findings, experiments, studies |
+| HEALTH | Medical topics, healthcare, wellness, medicine |
+| EDUCATIONAL | Teaching, learning, academia, training |
+| SPORTS | Athletic events, competitions, training, fitness |
+| ARTS | Creative work, entertainment, media, music, film |
+| AGRICULTURE | Farming, gardening, botany, horticulture |
+| HISTORY | Historical events, archaeology, anthropology |
+| ENVIRONMENT | Climate, ecology, conservation, sustainability |
+| FINANCE | Investments, banking, economics, accounting |
+| MARKETING | Advertising, branding, promotion, social media |
+| CUSTOMER_SERVICE | Support, service, relations, help desk |
+| GENERAL | Does not fit specific categories |
+
+### Validation Behavior
+
+- **Missing topic**: Returns an error - topic is required
+- **Invalid topic value**: Defaults to "GENERAL" with a warning log
+- **Valid topic**: Accepted and processed normally
+
 ## Architecture
 
 ```
