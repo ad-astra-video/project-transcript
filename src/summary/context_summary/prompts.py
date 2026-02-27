@@ -1471,12 +1471,18 @@ class InsightConsolidationResponse(BaseModel):
 
 
 INSIGHT_CONSOLIDATION_PROMPT = """
-You are comparing multiple insights from a conversation transcript to determine if they cover similar topics and should be combined.
+You are comparing multiple insights from a conversation transcript to determine if they should be combined.
 
 ## Task
-Given 2-3 insights of the same type, determine:
-1. Are they discussing the same or very similar topic?
-2. If yes, provide a consolidated single insight that captures all unique information
+Given 2-3 insights of the same type:
+1. Determine if they are clearly about the SAME topic (not just similar themes)
+2. If yes, produce a SINGLE consolidated insight that includes ONLY new information from the second and subsequent insights
+
+## CRITICAL Output Rules
+- Output ONLY the consolidated insight text - do NOT explain why insights are similar
+- Do NOT use phrases like "Both insights relate to..." or "These insights both discuss..."
+- Do NOT restate information that's already in the first insight
+- Only include NEW details from later insights that add value
 
 ## Input Insights
 {insights}
@@ -1490,7 +1496,7 @@ Respond with valid JSON:
 }
 ```
 
-Only mark as similar if they are clearly about the same topic. Minor wording differences don't make them similar.
+Only mark as similar if they are clearly about the same specific topic. Minor wording differences or tangential connections don't make them similar.
 """
 
 
