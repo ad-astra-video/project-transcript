@@ -77,6 +77,8 @@ class SummaryClient:
             reasoning_api_key=reasoning_api_key,
             rapid_model=rapid_model,
             reasoning_model=reasoning_model,
+            health_result_callback=self._queue_payload,
+            health_monitoring_callback=self._send_monitoring_event,
         )
         
         # Initial summary delay configuration
@@ -325,6 +327,9 @@ class SummaryClient:
             ]
             logger.info(f"Started {num_workers} summary worker tasks")
         
+        # Start health metrics scheduler
+        await self.llm.start_scheduler()
+        
         # Start sender task if not already running
         if self._sender_task is None or self._sender_task.done():
             self._sender_task = asyncio.create_task(self._summary_sender_task())
@@ -362,6 +367,9 @@ class SummaryClient:
                 await self._sender_task
             except asyncio.CancelledError:
                 pass
+        
+        # Stop health metrics scheduler
+        await self.llm.stop_scheduler()
         
         # Clear task lists
         self._worker_tasks = []

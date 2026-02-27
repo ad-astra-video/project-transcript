@@ -861,6 +861,16 @@ async def on_stream_start(params: dict):
             if STATE.summary_client is not None:
                 await STATE.summary_client.start()
             
+            # Get stream_id from gateway_request_id for health metrics
+            stream_id = params.get("gateway_request_id")
+            if not stream_id:
+                logger.warning("No gateway_request_id provided, using default")
+                stream_id = "unknown"
+            
+            # Set stream_id on LLMManager's HealthMetrics (for monitoring payload)
+            if STATE.summary_client is not None:
+                STATE.summary_client.llm.set_stream_id(stream_id)
+            
             # Start diarization polling task for this stream
             if STATE.diarization_client is not None:
                 STATE.diarization_poll_task = asyncio.create_task(_poll_diarization_results())
@@ -887,6 +897,10 @@ async def on_stream_stop():
         
         # Stop the workers forcefully
         await STATE.summary_client.stop(timeout=5.0)
+        
+        # Clear stream_id when stream ends
+        STATE.summary_client.llm.set_stream_id(None)
+        
         workers_completed_at = datetime.now(timezone.utc).isoformat()
         wait_duration_seconds = (datetime.fromisoformat(workers_completed_at.replace('+00:00', '')) -
                                datetime.fromisoformat(stop_requested_at.replace('+00:00', ''))).total_seconds()
