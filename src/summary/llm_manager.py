@@ -80,8 +80,30 @@ class HealthMetrics:
         self._model_type_counts: Dict[str, Dict[str, int]] = {}  # reasoning vs fast
         self._window_start = datetime.now(timezone.utc)
     
+    def _reset_stream_counters(self):
+        """Reset stream-level counters for a new stream."""
+        self._stream_total_requests = 0
+        self._stream_successful_requests = 0
+        self._stream_parse_failures = 0
+        self._stream_timeout_failures = 0
+        self._stream_truncation_failures = 0
+        self._stream_plugin_counts = {}
+        self._stream_model_type_counts = {}
+        self._stream_start_time = datetime.now(timezone.utc)
+        logger.debug("HealthMetrics stream-level counters reset")
+    
     def set_stream_id(self, stream_id: Optional[str]):
-        """Set stream_id when stream starts (for monitoring payload)."""
+        """Set stream_id when stream starts (for monitoring payload).
+        
+        Automatically resets stream-level metrics when a new stream ID is provided.
+        """
+        # Auto-reset metrics when setting a new stream_id (not None)
+        if stream_id is not None and stream_id != self.stream_id:
+            with self._lock:
+                self._reset_counters()  # Reset window-level
+                self._reset_stream_counters()  # Reset stream-level
+                logger.info(f"HealthMetrics reset for new stream: {stream_id}")
+        
         self.stream_id = stream_id
     
     def set_publish_callbacks(
