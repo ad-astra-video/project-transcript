@@ -1,23 +1,9 @@
 services:
-  register-worker:
-    build:
-      context: ./register
-      dockerfile: Dockerfile.register_worker
-    container_name: byoc-transcription-register-worker
-    environment:
-      - "ORCH_URL=https://${ORCH_SERVICE_ADDR}"
-      - "ORCH_SECRET=${ORCH_SECRET}"
-      - "CAPABILITY_NAME=${CAPABILITY_NAME}"
-      - "CAPABILITY_DESCRIPTION=video analysis"
-      - "CAPABILITY_URL=${AI_RUNNER_URL}"
-      - "CAPABILITY_PRICE_PER_UNIT=${CAPABILITY_PRICE_PER_UNIT}"
-      - "CAPABILITY_PRICE_SCALING=${CAPABILITY_PRICE_SCALING}"
-      - "CAPABILITY_CAPACITY=${CAPABILITY_CAPACITY}"
   transcription:
     image: ${RUNNER_IMAGE}
     build:
       context: .
-    container_name: byoc-transcription-1
+    container_name: byoc-transcription
     runtime: nvidia
     environment:
       - CUDA_DEVICE_ORDER=PCI_BUS_ID
@@ -31,8 +17,10 @@ services:
     ports:
       - ${AI_RUNNER_PORT}:8000
     depends_on:
-      - vllm-insights
-      - vllm-fast-summary
+      vllm-insights:
+        condition: service_healthy
+      vllm-fast-summary:
+        condition: service_healthy
   vllm-insights:
     image: vllm/vllm-openai:v0.15.1
     container_name: byoc-transcription-vllm-insights
@@ -41,6 +29,9 @@ services:
       - CUDA_DEVICE_ORDER=PCI_BUS_ID
       - CUDA_VISIBLE_DEVICES=${LOCAL_REASONING_VLLM_CUDA_VISIBLE_DEVICES}
       - HUGGING_FACE_HUB_TOKEN=${HF_TOKEN}
+      #workaround for bug in vllm v0.15.1, will not be needed when v0.17.0 is released
+      #https://github.com/vllm-project/vllm/issues/32373#issuecomment-3963697445
+      - LD_LIBRARY_PATH=/lib/x86_64-linux-gnu:/usr/local/cuda/lib64
     volumes:
       - ./models:/root/.cache/huggingface
     ports:
@@ -68,6 +59,9 @@ services:
       - CUDA_DEVICE_ORDER=PCI_BUS_ID
       - CUDA_VISIBLE_DEVICES=${LOCAL_FAST_VLLM_CUDA_VISIBLE_DEVICES}
       - HUGGING_FACE_HUB_TOKEN=${HF_TOKEN}
+      #workaround for bug in vllm v0.15.1, will not be needed when v0.17.0 is released
+      #https://github.com/vllm-project/vllm/issues/32373#issuecomment-3963697445
+      - LD_LIBRARY_PATH=/lib/x86_64-linux-gnu:/usr/local/cuda/lib64
     volumes:
       - ./models:/root/.cache/huggingface
     ports:
@@ -87,6 +81,9 @@ services:
       timeout: 10s
       retries: 5
       start_period: 60s
+    depends_on:
+      vllm-insights:
+        condition: service_healthy
 networks:
   default:
     name: byoc-runners
