@@ -999,19 +999,19 @@ class DiarizationClient:
     def reset(self):
         """Reset all accumulated state.
         
-        NOTE: This method does NOT stop the worker process anymore.
+        This clears both the in-process speaker memory AND sends a RESET_SIGNAL
+        to the worker process to clear its speaker memory for the new stream.
         The worker process continues running across stream boundaries.
-        Only the speaker memory and in-flight requests are cleared.
         """
-        logger.info("DiarizationClient.reset() - clearing state WITHOUT stopping worker")
+        logger.info("DiarizationClient.reset() - clearing state and signaling worker")
         if self._speaker_memory is not None:
             self._speaker_memory.reset()
         self.in_flight_requests.clear()
-        # NOTE: We no longer call reset_process() here because that would:
-        # 1. Send RESET_SIGNAL to worker
-        # 2. Then stop_process() terminates the worker before it can process the signal
-        # The worker should keep running across streams - we only need to clear speaker memory
-        logger.info("DiarizationClient state reset (worker still running)")
+        
+        # Send RESET_SIGNAL to worker to clear its speaker memory
+        self.reset_process()
+        
+        logger.info("DiarizationClient state reset (worker signaled)")
     
     def add_in_flight_request(self, request_id: str):
         """Add request ID to in-flight tracking."""
