@@ -322,7 +322,7 @@ class SpeakerMemory:
             
             # Emergency cap: if speaker count exceeds 20, aggressive merge
             if len(self.centroids) > 20:
-                self.auto_merge_similar_speakers(similarity_threshold=0.72, max_merges=10)
+                self.auto_merge_similar_speakers(similarity_threshold=0.82, max_merges=10)
                 logger.warning("Emergency merge triggered - speaker count exceeded 20")
             
             return best_id, best_score, alt_speakers
@@ -530,7 +530,7 @@ class SpeakerMemory:
     
     def auto_merge_similar_speakers(
         self,
-        similarity_threshold: float = 0.80,
+        similarity_threshold: float = 0.84,
         max_merges: int = 5
     ) -> int:
         """
@@ -765,8 +765,8 @@ def diarization_worker(hf_token: str, request_queue, result_queue):
                 logger.warning(f"Speakers after reset: {list(speakers.centroids.keys())}")
                 logger.debug(f"After RESET_SIGNAL: shutdown_received={shutdown_received}, queue.empty()={request_queue.empty()}")
                 continue  # Skip the rest of the loop - request is a string, not a DiarizationRequest
-
-            logger.info(f"Received diarization request: {request.request_id}, audio: {request.audio_path}")
+            
+            logger.info(f"WORKER: Received diarization request: {request.request_id}, audio: {request.audio_path}")
             try:
                 # Run diarization
                 diarization_result = pipeline(request.audio_path)
@@ -843,7 +843,7 @@ def diarization_worker(hf_token: str, request_queue, result_queue):
                     segments=segments
                 )
                 result_queue.put(result)
-                logger.debug(f"Sent diarization result for {request.request_id}")
+                logger.info(f"WORKER: Sent diarization result for {request.request_id}, segments={len(segments)}")
                 
             except Exception as e:
                 logger.error(f"Diarization processing error: {e}")
@@ -1095,7 +1095,7 @@ class DiarizationClient:
             audio_path: Path to the audio file
             request_id: Unique request identifier
         """
-        #logger.info(f"DiarizationClient.process_audio() called: {audio_path}, {request_id}")
+        logger.debug(f"DiarizationClient.process_audio() called: {audio_path}, {request_id}")
         if not self._running:
             raise RuntimeError("Diarization process not started")
         
@@ -1103,9 +1103,9 @@ class DiarizationClient:
             audio_path=audio_path,
             request_id=request_id
         )
-        #logger.info(f"Putting request in queue: {request_id}")
+        logger.debug(f"Putting request in queue: {request_id}")
         self._request_queue.put(request)
-        #logger.info(f"Request put in queue: {request_id}")
+        logger.debug(f"Request put in queue: {request_id}, queue size unknown (multiprocessing)")
     
     async def get_result(self, timeout: float = 10.0) -> Optional[DiarizationResult]:
         """
@@ -1126,8 +1126,26 @@ class DiarizationClient:
         except multiprocessing.queues.Empty:
             logger.debug(f"get_result timeout - queue empty")
             return None
+        except asyncio.TimeoutError:
+            # This is the actual exception raised when timeout expires
+            logger.debug(f"get_result timeout ({timeout}s) - queue empty or not ready")
+            return None
     
     @property
     def is_running(self) -> bool:
-        """Check if the process is running."""
-        return self._running
+        """Check if the process is running.
+        
+        Also checks if the underlying process is still alive. If the process
+        has exited (e.g., due to shutdown or error), returns False even if
+        _running was previously set to True.
+        """
+        if not self._running:
+            return False
+        
+        # Check if process is still alive
+        if self._process is not None and not self._process.is_alive():
+            logger.warning("Diarization process has exited but _running=True, updating state")
+            self._running = False
+            return False
+        
+        return True
