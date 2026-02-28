@@ -350,22 +350,23 @@ async def _poll_diarization_results():
     while STATE is not None and STATE.diarization_client is not None and not STATE.stop_requested:
         is_running = STATE.diarization_client.is_running
         if not is_running:
-            logger.info(f"Diarization process not running, skipping poll cycle {poll_count}")
-            await asyncio.sleep(0.1)
-            continue
+            logger.info(f"Diarization process no longer running, stopping polling")
+            break
         poll_count += 1
         if poll_count % 50 == 0:
             elapsed = time.monotonic() - poll_start_time
             logger.info(f"Diarization polling cycle {poll_count} ({elapsed:.1f}s elapsed)")
         result = await STATE.diarization_client.get_result(timeout=0.05)
         if result is not None:
-            logger.debug(f"Got diarization result: {result.request_id}")
+            logger.info(f"POLLING: Got diarization result: {result.request_id}, segments={len(result.segments)}")
             await _handle_diarization_result(result)
             # Reset poll count and timer after receiving result
             poll_count = 0
             poll_start_time = time.monotonic()
         else:
-            logger.debug(f"No diarization result in poll cycle {poll_count}")
+            # Only log occasionally to avoid log spam
+            if poll_count % 100 == 0:
+                logger.debug(f"No diarization result in poll cycle {poll_count}")
         await asyncio.sleep(0.1)
     logger.info("Stopping diarization result polling")
 
@@ -546,6 +547,17 @@ async def _process_diarization_async(window_samples: np.ndarray, window_start_ts
     logger.info(f"Diarization: preparing window [{window_start_ts:.3f}s - {window_end_ts:.3f}s], temp_path={temp_path}")
     
     try:
+        # Auto-restart diarization process if it's not running
+        if not STATE.diarization_client.is_running:
+            logger.warning("Diarization process not running, restarting...")
+            await STATE.diarization_client.start()
+            logger.info("Diarization process restarted")
+            
+            # Restart polling task if it was stopped
+            if STATE.diarization_poll_task is None or STATE.diarization_poll_task.done():
+                STATE.diarization_poll_task = asyncio.create_task(_poll_diarization_results())
+                logger.info("Diarization polling task restarted")
+        
         # Track temp file for cleanup
         STATE.pending_temp_files[temp_path] = {
             'transcribed': False,
