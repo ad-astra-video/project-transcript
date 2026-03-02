@@ -276,7 +276,7 @@ def _check_cleanup(audio_path: str):
 
 
 
-async def _send_speakers_message(segments: list[SpeakerSegment], window_start_ts: float, window_end_ts: float):
+async def _send_speakers_message(segments: list[SpeakerSegment], window_start_ts: float, window_end_ts: float, merged_speakers: Optional[list] = None):
     """Send speakers message to client (client saves to database)."""
     if PROCESSOR is None or not segments:
         return
@@ -301,6 +301,10 @@ async def _send_speakers_message(segments: list[SpeakerSegment], window_start_ts
         },
         "segments": adjusted_segments
     }
+    
+    # Include merged speakers information if any merges occurred
+    if merged_speakers:
+        speakers_payload["speakers_merged"] = merged_speakers
     
     try:
         await PROCESSOR.send_data(json.dumps(speakers_payload))
@@ -339,7 +343,7 @@ async def _handle_diarization_result(result: DiarizationResult):
             window_start_ts = STATE.buffer_start_ts + (start_idx / float(sr)) if STATE.buffer_start_ts else 0
             window_end_ts = window_start_ts + (win_len / float(sr))
         
-        await _send_speakers_message(result.segments, window_start_ts, window_end_ts)
+        await _send_speakers_message(result.segments, window_start_ts, window_end_ts, result.merged_speakers)
 
 
 async def _poll_diarization_results():

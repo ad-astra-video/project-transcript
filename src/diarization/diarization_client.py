@@ -58,6 +58,7 @@ class DiarizationResult:
     audio_path: str
     segments: List[SpeakerSegment]
     error: Optional[str] = None
+    merged_speakers: Optional[List[Dict[str, str]]] = None  # [{"source": "speaker_1", "target": "speaker_0"}]
 
 class SpeakerMemory:
     """
@@ -386,7 +387,7 @@ class SpeakerMemory:
             if self.counts.get(existing_id, 0) < 3:
                 continue
             sim = self._cosine_similarity(new_embedding, centroid)
-            if sim >= 0.84:  # Conservative threshold
+            if sim >= 0.805:  # Conservative threshold
                 self._merge_speakers_internal(existing_id, new_speaker_id)
                 logger.info(f"Proactive merge: {new_speaker_id} → {existing_id} (sim={sim:.3f})")
                 return existing_id
@@ -530,7 +531,7 @@ class SpeakerMemory:
     
     def auto_merge_similar_speakers(
         self,
-        similarity_threshold: float = 0.84,
+        similarity_threshold: float = 0.805,
         max_merges: int = 5
     ) -> int:
         """
@@ -678,6 +679,20 @@ class SpeakerMemory:
         
         # Reset validator stats
         self.validator.reset_stats()
+
+    def get_and_clear_merges(self) -> List[Dict[str, str]]:
+        """
+        Get recent merge events and clear the log.
+        
+        Returns:
+            List of merge events as [{"source": "speaker_1", "target": "speaker_0"}]
+        """
+        merges = [
+            {"source": m["from"], "target": m["to"]}
+            for m in self._recent_merges_log
+        ]
+        self._recent_merges_log.clear()
+        return merges
 
 
 def diarization_worker(hf_token: str, request_queue, result_queue):
@@ -836,11 +851,15 @@ def diarization_worker(hf_token: str, request_queue, result_queue):
                     logger.info(f"Speakers identified: {set(s.speaker for s in segments)}")
                     logger.debug(f"diarization result: {diarization_result}")
                 
+                # Get merge events that occurred during this processing
+                merged_speakers = speakers.get_and_clear_merges()
+                
                 # Send result
                 result = DiarizationResult(
                     request_id=request.request_id,
                     audio_path=request.audio_path,
-                    segments=segments
+                    segments=segments,
+                    merged_speakers=merged_speakers if merged_speakers else None
                 )
                 result_queue.put(result)
                 logger.info(f"WORKER: Sent diarization result for {request.request_id}, segments={len(segments)}")
