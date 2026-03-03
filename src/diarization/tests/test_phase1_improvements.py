@@ -84,9 +84,9 @@ class TestAutoMerge:
     def test_auto_merge_method_signature(self):
         """Test that auto_merge_similar_speakers has correct default threshold."""
         memory = SpeakerMemory()
-        # The default threshold should be 0.80 (updated from 0.84)
+        # The default threshold should be 0.76
         # We test this indirectly by checking the method can be called
-        result = memory.auto_merge_similar_speakers(similarity_threshold=0.80)
+        result = memory.auto_merge_similar_speakers(similarity_threshold=0.76)
         assert isinstance(result, int), "Should return number of merges"
     
     def test_different_speakers_not_merged(self):

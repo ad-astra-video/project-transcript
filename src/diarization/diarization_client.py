@@ -381,7 +381,7 @@ class SpeakerMemory:
             
             # Emergency cap: if speaker count exceeds 18, aggressive merge
             if len(self.centroids) > 18:
-                self.auto_merge_similar_speakers(similarity_threshold=0.80, max_merges=10)
+                self.auto_merge_similar_speakers(similarity_threshold=0.76, max_merges=10)
                 logger.warning("Emergency merge triggered - speaker count exceeded 18")
             
             return best_id, best_score, alt_speakers
@@ -452,8 +452,7 @@ class SpeakerMemory:
                 logger.info(f"Immediate merge: {new_speaker_id} → {existing_id} (sim={sim:.3f})")
                 return existing_id
             
-            # Standard merge threshold (lowered from 0.84 to 0.80)
-            if sim >= 0.80:
+            if sim >= 0.76:
                 self._merge_speakers_internal(existing_id, new_speaker_id)
                 logger.info(f"Proactive merge: {new_speaker_id} → {existing_id} (sim={sim:.3f})")
                 return existing_id
@@ -637,21 +636,21 @@ class SpeakerMemory:
     
     def auto_merge_similar_speakers(
         self,
-        similarity_threshold: float = 0.80,
+        similarity_threshold: float = 0.76,
         max_merges: int = 5
     ) -> int:
         """
         Automatically merge speakers using hierarchical approach.
         
         - Immediate merge: similarity >= 0.92 (very likely same speaker)
-        - Standard merge: similarity >= threshold (0.80 default)
+        - Standard merge: similarity >= threshold (0.76 default)
         
         This helps consolidate speakers that were incorrectly split during
         diarization. Uses a greedy approach: merge the most similar pair,
         update centroids, then repeat until no more pairs exceed threshold.
         
         Args:
-            similarity_threshold: Pairs above this threshold will be merged (default: 0.80)
+            similarity_threshold: Pairs above this threshold will be merged (default: 0.76)
             max_merges: Maximum number of merges to perform in one call
             
         Returns:

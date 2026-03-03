@@ -1398,11 +1398,11 @@ class TestDiarizationClientWithQualityImprovements:
         client = DiarizationClient(hf_token="test-token")
         
         client.update_params(
-            threshold=0.80,
+            threshold=0.76,
             min_segment_duration=0.4
         )
         
-        assert client.threshold == 0.80
+        assert client.threshold == 0.76
         assert client.min_segment_duration == 0.4
     
     def test_get_stats_returns_speaker_memory_stats(self):
