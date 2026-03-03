@@ -25,6 +25,11 @@ import numpy as np
 from datetime import datetime
 
 try:
+    from sklearn.decomposition import PCA
+except ImportError:
+    PCA = None
+
+try:
     from pyannote.audio import Pipeline
 except ImportError:
     Pipeline = None
@@ -826,6 +831,75 @@ class SpeakerMemory:
         ]
         self._recent_merges_log.clear()
         return merges
+    
+    def get_centroids(self) -> List[dict]:
+        """
+        Get 2D PCA-projected coordinates of speaker centroids.
+        
+        Returns:
+            List of dicts with speaker_id, x, y, sample_count
+        """
+        if len(self.centroids) == 0:
+            return []
+        
+        if PCA is None:
+            logger.warning("sklearn PCA not available, returning empty centroids")
+            return []
+        
+        # Stack embeddings into matrix
+        embeddings = np.array([
+            self.centroids[sid] for sid in self.centroids
+        ])
+        
+        # Normalize embeddings (already normalized, but defensive)
+        norms = np.linalg.norm(embeddings, axis=1, keepdims=True)
+        norms[norms == 0] = 1
+        embeddings = embeddings / norms
+        
+        # PCA projection to 2D
+        pca = PCA(n_components=2)
+        coords = pca.fit_transform(embeddings)
+        
+        # Build result
+        speaker_ids = list(self.centroids.keys())
+        return [
+            {
+                "speaker_id": speaker_ids[i],
+                "x": float(coords[i, 0]),
+                "y": float(coords[i, 1]),
+                "sample_count": self.counts[speaker_ids[i]]
+            }
+            for i in range(len(speaker_ids))
+        ]
+    
+    def get_pairwise_similarity(self) -> List[dict]:
+        """
+        Get pairwise cosine similarity between all speakers.
+        
+        Returns:
+            List of dicts with speaker_a, speaker_b, similarity
+        """
+        if len(self.centroids) < 2:
+            return []
+        
+        speaker_ids = list(self.centroids.keys())
+        results = []
+        
+        for i in range(len(speaker_ids)):
+            for j in range(i + 1, len(speaker_ids)):
+                sid_a = speaker_ids[i]
+                sid_b = speaker_ids[j]
+                sim = self._cosine_similarity(
+                    self.centroids[sid_a],
+                    self.centroids[sid_b]
+                )
+                results.append({
+                    "speaker_a": sid_a,
+                    "speaker_b": sid_b,
+                    "similarity": sim
+                })
+        
+        return results
 
 
 def diarization_worker(hf_token: str, request_queue, result_queue):
@@ -1143,6 +1217,21 @@ class DiarizationClient:
         if self._speaker_memory is not None:
             return self._speaker_memory.get_stats()
         return {}
+    
+    def get_centroids(self) -> dict:
+        """
+        Get speaker centroids for graph visualization.
+        
+        Returns:
+            Dict with speakers (2D coords) and pairwise_similarity
+        """
+        if self._speaker_memory is None:
+            return {"speakers": [], "pairwise_similarity": []}
+        
+        return {
+            "speakers": self._speaker_memory.get_centroids(),
+            "pairwise_similarity": self._speaker_memory.get_pairwise_similarity()
+        }
     
     def reset(self):
         """Reset all accumulated state.

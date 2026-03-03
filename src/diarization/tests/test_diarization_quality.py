@@ -1710,5 +1710,85 @@ class TestDiarizationV2Improvements:
         assert score == -1.0
 
 
+class TestSpeakerCentroidRetrieval:
+    """Tests for speaker centroid retrieval methods."""
+    
+    def test_get_centroids_empty(self):
+        """Test get_centroids returns empty list when no speakers."""
+        memory = SpeakerMemory(min_samples_for_match=1)
+        centroids = memory.get_centroids()
+        assert centroids == []
+    
+    def test_get_centroids_returns_pca_coordinates(self):
+        """Test that get_centroids returns PCA-projected 2D coordinates."""
+        memory = SpeakerMemory(min_samples_for_match=1)
+        
+        # Add 3 distinct speakers
+        for i in range(3):
+            emb = np.random.randn(512).astype(np.float32)
+            emb = emb / np.linalg.norm(emb)
+            memory.identify(emb)
+        
+        centroids = memory.get_centroids()
+        
+        assert len(centroids) == 3
+        for c in centroids:
+            assert "speaker_id" in c
+            assert "x" in c
+            assert "y" in c
+            assert "sample_count" in c
+    
+    def test_get_pairwise_similarity_empty(self):
+        """Test get_pairwise_similarity returns empty list when no speakers."""
+        memory = SpeakerMemory(min_samples_for_match=1)
+        sims = memory.get_pairwise_similarity()
+        assert sims == []
+    
+    def test_get_pairwise_similarity_single_speaker(self):
+        """Test get_pairwise_similarity returns empty list with single speaker."""
+        memory = SpeakerMemory(min_samples_for_match=1)
+        
+        emb = np.random.randn(512).astype(np.float32)
+        emb = emb / np.linalg.norm(emb)
+        memory.identify(emb)
+        
+        sims = memory.get_pairwise_similarity()
+        assert sims == []  # Only 1 speaker, no pairs
+    
+    def test_get_pairwise_similarity_two_speakers(self):
+        """Test get_pairwise_similarity returns similarity for speaker pair."""
+        memory = SpeakerMemory(min_samples_for_match=1)
+        
+        # Add 2 identical speakers (same embedding)
+        emb = np.random.randn(512).astype(np.float32)
+        emb = emb / np.linalg.norm(emb)
+        memory.identify(emb)
+        memory.identify(emb)
+        
+        sims = memory.get_pairwise_similarity()
+        assert len(sims) == 1
+        assert sims[0]["speaker_a"] == "speaker_0"
+        assert sims[0]["speaker_b"] == "speaker_0"  # Same speaker merged
+        assert sims[0]["similarity"] == 1.0
+    
+    def test_get_pairwise_similarity_different_speakers(self):
+        """Test get_pairwise_similarity returns low similarity for different speakers."""
+        memory = SpeakerMemory(min_samples_for_match=1)
+        
+        # Add 2 different speakers
+        emb1 = np.random.randn(512).astype(np.float32)
+        emb1 = emb1 / np.linalg.norm(emb1)
+        memory.identify(emb1)
+        
+        emb2 = np.random.randn(512).astype(np.float32)
+        emb2 = emb2 / np.linalg.norm(emb2)
+        memory.identify(emb2)
+        
+        sims = memory.get_pairwise_similarity()
+        assert len(sims) == 1
+        # Different random embeddings should have low similarity
+        assert sims[0]["similarity"] < 0.5
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

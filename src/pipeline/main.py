@@ -712,6 +712,18 @@ async def _handle_graceful_shutdown():
 
         if all_workers_done and diarization_idle:
             STATE.shutdown_completed = True
+            
+            # Send final speaker embedding data before shutdown
+            if STATE.diarization_client is not None:
+                centroids_data = STATE.diarization_client.get_centroids()
+                await PROCESSOR.send_data(json.dumps({
+                    "type": "speaker_embedding_data",
+                    "timestamp_utc": datetime.now(timezone.utc).isoformat(),
+                    "speakers": centroids_data["speakers"],
+                    "pairwise_similarity": centroids_data["pairwise_similarity"]
+                }))
+                logger.info(f"Sent final speaker_embedding_data: {len(centroids_data['speakers'])} speakers")
+            
             await PROCESSOR.send_data(json.dumps({
                 "type": "shutdown_complete",
                 "timestamp_utc": datetime.now(timezone.utc).isoformat()
@@ -833,6 +845,18 @@ async def update_params(params: dict):
         if STATE.summary_client is not None:
             STATE.summary_client.set_content_type(ct, conf, "AUTO_DETECTED")
             logger.info(f"Content type auto-detected: {ct} (confidence: {conf:.2f})")
+    
+    # Diarization centroids request - get 2D PCA coords for graph visualization
+    if params.get("get_speaker_embeddings"):
+        if STATE.diarization_client is not None:
+            centroids_data = STATE.diarization_client.get_centroids()
+            await PROCESSOR.send_data(json.dumps({
+                "type": "speaker_embedding_data",
+                "timestamp_utc": datetime.now(timezone.utc).isoformat(),
+                "speakers": centroids_data["speakers"],
+                "pairwise_similarity": centroids_data["pairwise_similarity"]
+            }))
+            logger.info(f"Sent speaker_embedding_data: {len(centroids_data['speakers'])} speakers")
 
 async def on_stream_start(params: dict):
     global STATE
