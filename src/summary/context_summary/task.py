@@ -1048,7 +1048,7 @@ class ContextSummaryTask:
         # Consolidate similar insights of the same type
         if self._rapid_llm_client and len(processed_insights) > 1:
             processed_insights = await self._consolidate_similar_insights(processed_insights)
-            logger.info(f"Consolidated insights: {processed_insights}")
+            #logger.info(f"Consolidated insights: {processed_insights}")
         
         # Build the final payload - convert WindowInsight objects to dicts for JSON serialization
         insights_as_dicts = [
