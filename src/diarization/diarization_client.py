@@ -381,7 +381,7 @@ class SpeakerMemory:
             
             # Emergency cap: if speaker count exceeds 18, aggressive merge
             if len(self.centroids) > 18:
-                self.auto_merge_similar_speakers(similarity_threshold=0.76, max_merges=10)
+                self.auto_merge_similar_speakers(similarity_threshold=0.73, max_merges=10)
                 logger.warning("Emergency merge triggered - speaker count exceeded 18")
             
             return best_id, best_score, alt_speakers
