@@ -130,11 +130,16 @@ class WhisperClient:
                 # Extract word-level timestamps if available
                 words = []
                 if hasattr(segment, 'words') and segment.words:
+                    #logger.info(f"Processing {len(segment.words)} words: {segment.words}")
                     for word in segment.words:
+                        word_text = word.word.strip() if hasattr(word, 'word') else str(word).strip()
+                        if word.probability < 0.60:
+                            word_text += "[?]"
+                            continue
                         words.append(WordTimestamp(
                             start=word.start,
                             end=word.end,
-                            text=word.word.strip() if hasattr(word, 'word') else str(word).strip()
+                            text=word_text
                         ))
                 
                 # Generate stable ID from timing
