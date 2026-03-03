@@ -478,7 +478,7 @@ async def _process_transcription_async(window_samples: np.ndarray, window_start_
     if PROCESSOR is not None:
         # Skip sending if all segments are blank
         if not _has_any_meaningful_segments(segments):
-            logger.debug(f"Skipping transcript - all segments blank for window [{int(window_start_ts*1000)}ms - {int(end_ts*1000)}ms]")
+            logger.info(f"Skipping transcript - all segments blank for window [{int(window_start_ts*1000)}ms - {int(end_ts*1000)}ms]")
             return
 
         try:
