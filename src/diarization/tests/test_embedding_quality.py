@@ -611,17 +611,18 @@ class TestSpeakerMerging:
     
     def test_find_similar_speakers(self):
         """Test finding similar speakers."""
-        memory = SpeakerMemory(threshold=0.50)
+        memory = SpeakerMemory(threshold=0.50, min_samples_for_match=3)
         
         # Create two identical embeddings (same speaker split incorrectly)
         embedding = np.random.randn(512).astype(np.float32)
         embedding = embedding / np.linalg.norm(embedding)
         
         # Manually add two speakers with identical embeddings
+        # Need at least min_samples_for_match samples
         memory.centroids["speaker_0"] = embedding.copy()
         memory.counts["speaker_0"] = 5
         memory.centroids["speaker_1"] = embedding.copy()  # Identical
-        memory.counts["speaker_1"] = 3
+        memory.counts["speaker_1"] = 5  # Need 5 for new default min_samples_for_match
         
         # Should find them as similar (identical = similarity 1.0)
         similar = memory.find_similar_speakers(similarity_threshold=0.90)
@@ -631,7 +632,7 @@ class TestSpeakerMerging:
     
     def test_auto_merge_similar_speakers(self):
         """Test automatic merging of similar speakers."""
-        memory = SpeakerMemory(threshold=0.50)
+        memory = SpeakerMemory(threshold=0.50, min_samples_for_match=3)
         
         # Create speakers with identical embeddings
         embedding = np.random.randn(512).astype(np.float32)
@@ -641,12 +642,13 @@ class TestSpeakerMerging:
         different_embedding = different_embedding / np.linalg.norm(different_embedding)
         
         # Manually add speakers (bypasses matching)
+        # Need at least min_samples_for_match samples for merge check
         memory.centroids["speaker_0"] = embedding.copy()
         memory.counts["speaker_0"] = 5
         memory.centroids["speaker_1"] = embedding.copy()  # Identical to speaker_0
-        memory.counts["speaker_1"] = 3
+        memory.counts["speaker_1"] = 5
         memory.centroids["speaker_2"] = different_embedding  # Different
-        memory.counts["speaker_2"] = 2
+        memory.counts["speaker_2"] = 5
         
         initial_count = len(memory.centroids)
         

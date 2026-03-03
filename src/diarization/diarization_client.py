@@ -76,12 +76,12 @@ class SpeakerMemory:
     
     def __init__(
         self,
-        threshold: float = 0.78,
-        recency_boost: float = 0.00,
+        threshold: float = 0.72,
+        recency_boost: float = 0.05,
         history_size: int = 20,
-        min_samples_for_match: int = 3,
+        min_samples_for_match: int = 5,
         min_segment_duration: float = 0.5,
-        ema_alpha: float = 0.28,
+        ema_alpha: float = 0.15,
         embedding_validator: Optional[EmbeddingQualityValidator] = None,
         on_invalid_embedding: Optional[Callable[[np.ndarray, str, Optional[dict]], None]] = None,
         on_low_confidence: Optional[Callable[[str, float, Optional[dict]], None]] = None
@@ -96,7 +96,7 @@ class SpeakerMemory:
             embedding_validator: Custom embedding validator (uses default if None)
             on_invalid_embedding: Callback for invalid embeddings: (embedding, reason, segment_info)
             on_low_confidence: Callback for low confidence matches: (speaker_id, confidence, segment_info)
-            ema_alpha: EMA smoothing factor for centroid updates (default: 0.28)
+            ema_alpha: EMA smoothing factor for centroid updates (default: 0.15)
         """
         self.threshold = threshold
         self.recency_boost = recency_boost
@@ -158,16 +158,16 @@ class SpeakerMemory:
         threshold when speaker count increases.
         """
         n = len(self.centroids)
-        base = self.threshold  # 0.78
+        base = self.threshold  # 0.72 (updated from 0.78)
         
         if n <= 4:
             return base
         elif n <= 8:
-            return max(base - 0.06, 0.68)   # 0.72
+            return max(base - 0.08, 0.65)   # 0.64
         elif n <= 12:
-            return max(base - 0.12, 0.62)   # 0.66
+            return max(base - 0.14, 0.60)   # 0.58
         else:
-            return max(base - 0.18, 0.58)   # 0.60 (aggressive latch-on)
+            return max(base - 0.20, 0.55)   # 0.52 (aggressive latch-on)
     
     def _cosine_similarity(self, a: np.ndarray, b: np.ndarray) -> float:
         """
@@ -195,6 +195,55 @@ class SpeakerMemory:
         # Round to 2 decimal places to avoid floating-point precision issues
         # This prevents cases like 0.7799... < 0.78 threshold comparison
         return round(float(np.clip(dot, -1.0, 1.0)), 2)
+    
+    def _compute_calibrated_confidence(
+        self,
+        scores: Dict[str, float],
+        best_id: Optional[str]
+    ) -> Tuple[float, Dict[str, float]]:
+        """
+        Compute calibrated confidence from similarity scores.
+        
+        Uses softmax to convert raw cosine similarities to probabilities,
+        then computes confidence based on the gap between best and second-best.
+        
+        Returns:
+            (confidence_score, normalized_probabilities)
+        """
+        if not scores or best_id is None:
+            return 0.0, {}
+        
+        # Convert to numpy array for processing
+        speaker_ids = list(scores.keys())
+        raw_scores = np.array(list(scores.values()))
+        
+        # Apply temperature scaling (higher temperature = softer distribution)
+        # Use 1.0 for more balanced confidence
+        temperature = 1.0
+        scaled_scores = raw_scores / temperature
+        
+        # Softmax to convert to probabilities (with numerical stability)
+        exp_scores = np.exp(scaled_scores - np.max(scaled_scores))
+        probs = exp_scores / np.sum(exp_scores)
+        
+        # Get probability of best speaker
+        max_prob = probs[speaker_ids.index(best_id)]
+        
+        # Compute gap-based confidence: difference between best and second-best
+        sorted_probs = np.sort(probs)[::-1]  # Sort descending
+        if len(sorted_probs) > 1:
+            gap = sorted_probs[0] - sorted_probs[1]
+        else:
+            gap = 1.0
+        
+        # Combined confidence: use max_prob weighted by the gap
+        # This rewards both high probability for best match AND clear separation
+        confidence = max_prob * (0.7 + 0.3 * gap)
+        
+        # Return normalized probabilities
+        prob_dict = {sid: float(p) for sid, p in zip(speaker_ids, probs)}
+        
+        return float(confidence), prob_dict
     
     def identify(
         self,
@@ -300,13 +349,22 @@ class SpeakerMemory:
         if best_id and best_score >= effective_threshold:
             self._stats["matches"] += 1
             
-            # Check for low confidence match
-            low_confidence_threshold = 0.75
-            if best_score < low_confidence_threshold:
+            # Compute calibrated confidence using softmax + entropy
+            calibrated_confidence, speaker_probs = self._compute_calibrated_confidence(
+                scores, best_id
+            )
+            
+            # Log calibrated confidence for debugging
+            logger.info(f"Calibrated confidence: {calibrated_confidence:.3f}, probs: {speaker_probs}")
+            
+            # Check for low confidence match using calibrated confidence
+            # Lower threshold (0.65) since we now have calibrated scores
+            low_confidence_threshold = 0.65
+            if calibrated_confidence < low_confidence_threshold:
                 self._stats["low_confidence_matches"] += 1
                 if self.on_low_confidence:
                     try:
-                        self.on_low_confidence(best_id, best_score, segment_info)
+                        self.on_low_confidence(best_id, calibrated_confidence, segment_info)
                     except Exception as e:
                         logger.warning(f"Error in on_low_confidence callback: {e}")
             
@@ -315,16 +373,16 @@ class SpeakerMemory:
             self.last_speaker = best_id
             self.history.append(best_id)
             
-            # Periodic consolidation: every 8 identifications or if speaker count exceeds 12
-            if (self._stats["identifications"] % 8 == 0) or len(self.centroids) > 12:
-                merges = self.auto_merge_similar_speakers() #using default threshold and max_merges
+            # Periodic consolidation: every 5 identifications or if speaker count exceeds 10
+            if (self._stats["identifications"] % 5 == 0) or len(self.centroids) > 10:
+                merges = self.auto_merge_similar_speakers(similarity_threshold=0.82)
                 if merges:
                     logger.info(f"Periodic consolidation: {merges} merges")
             
-            # Emergency cap: if speaker count exceeds 20, aggressive merge
-            if len(self.centroids) > 20:
-                self.auto_merge_similar_speakers(similarity_threshold=0.82, max_merges=10)
-                logger.warning("Emergency merge triggered - speaker count exceeded 20")
+            # Emergency cap: if speaker count exceeds 18, aggressive merge
+            if len(self.centroids) > 18:
+                self.auto_merge_similar_speakers(similarity_threshold=0.80, max_merges=10)
+                logger.warning("Emergency merge triggered - speaker count exceeded 18")
             
             return best_id, best_score, alt_speakers
         else:
@@ -387,7 +445,15 @@ class SpeakerMemory:
             if self.counts.get(existing_id, 0) < 3:
                 continue
             sim = self._cosine_similarity(new_embedding, centroid)
-            if sim >= 0.805:  # Conservative threshold
+            
+            # Immediate merge for very high similarity (>= 0.92)
+            if sim >= 0.92:
+                self._merge_speakers_internal(existing_id, new_speaker_id)
+                logger.info(f"Immediate merge: {new_speaker_id} → {existing_id} (sim={sim:.3f})")
+                return existing_id
+            
+            # Standard merge threshold (lowered from 0.84 to 0.80)
+            if sim >= 0.80:
                 self._merge_speakers_internal(existing_id, new_speaker_id)
                 logger.info(f"Proactive merge: {new_speaker_id} → {existing_id} (sim={sim:.3f})")
                 return existing_id
@@ -480,8 +546,48 @@ class SpeakerMemory:
                 "threshold": self.threshold,
                 "min_samples_for_match": self.min_samples_for_match,
                 "ema_alpha": self.ema_alpha,
-            }
+            },
+            # Enhanced diagnostics
+            "score_distribution": self._get_score_distribution(),
+            "speaker_timeline": list(self.history),
+            "avg_confidence": self._compute_avg_confidence(),
         }
+    
+    def _get_score_distribution(self) -> dict:
+        """Get distribution of match scores."""
+        if not self._match_log:
+            return {}
+        
+        scores = [m['best_score'] for m in self._match_log if m.get('best_score')]
+        if not scores:
+            return {}
+        
+        return {
+            'mean': float(np.mean(scores)),
+            'std': float(np.std(scores)),
+            'min': float(np.min(scores)),
+            'max': float(np.max(scores)),
+            'p25': float(np.percentile(scores, 25)),
+            'p50': float(np.percentile(scores, 50)),
+            'p75': float(np.percentile(scores, 75)),
+        }
+    
+    def _compute_avg_confidence(self) -> float:
+        """Compute average confidence from recent match log."""
+        if not self._match_log:
+            return 1.0
+        
+        recent = self._match_log[-20:]  # Last 20 matches
+        confidences = []
+        for entry in recent:
+            if entry.get('decision') == 'match':
+                scores = entry.get('scores', {})
+                best_id = entry.get('best_id')
+                if scores and best_id:
+                    conf, _ = self._compute_calibrated_confidence(scores, best_id)
+                    confidences.append(conf)
+        
+        return float(np.mean(confidences)) if confidences else 1.0
     
     def find_similar_speakers(self, similarity_threshold: float = 0.85) -> List[Tuple[str, str, float]]:
         """
@@ -531,18 +637,21 @@ class SpeakerMemory:
     
     def auto_merge_similar_speakers(
         self,
-        similarity_threshold: float = 0.805,
+        similarity_threshold: float = 0.80,
         max_merges: int = 5
     ) -> int:
         """
-        Automatically merge speakers that are very similar (likely duplicates).
+        Automatically merge speakers using hierarchical approach.
+        
+        - Immediate merge: similarity >= 0.92 (very likely same speaker)
+        - Standard merge: similarity >= threshold (0.80 default)
         
         This helps consolidate speakers that were incorrectly split during
         diarization. Uses a greedy approach: merge the most similar pair,
         update centroids, then repeat until no more pairs exceed threshold.
         
         Args:
-            similarity_threshold: Pairs above this threshold will be merged
+            similarity_threshold: Pairs above this threshold will be merged (default: 0.80)
             max_merges: Maximum number of merges to perform in one call
             
         Returns:
@@ -550,7 +659,32 @@ class SpeakerMemory:
         """
         merges_performed = 0
         
+        # Phase 1: Immediate merges for very high similarity (>= 0.92)
+        immediate_threshold = 0.92
         for _ in range(max_merges):
+            similar_pairs = self.find_similar_speakers(immediate_threshold)
+            
+            if not similar_pairs:
+                break
+            
+            # Merge the most similar pair
+            speaker_a, speaker_b, similarity = similar_pairs[0]
+            
+            logger.info(f"Immediate auto-merge: {speaker_a} <-> {speaker_b} "
+                       f"(similarity: {similarity:.3f})")
+            
+            # Use speaker_a as the target, merge speaker_b into it
+            self._merge_speakers_internal(speaker_a, speaker_b, similarity)
+            merges_performed += 1
+            
+            # Update history - replace speaker_b with speaker_a
+            self.history = deque(
+                [speaker_a if s == speaker_b else s for s in self.history],
+                maxlen=self.history.maxlen
+            )
+        
+        # Phase 2: Standard merges using the provided threshold
+        for _ in range(max_merges - merges_performed):
             similar_pairs = self.find_similar_speakers(similarity_threshold)
             
             if not similar_pairs:
@@ -559,7 +693,7 @@ class SpeakerMemory:
             # Merge the most similar pair
             speaker_a, speaker_b, similarity = similar_pairs[0]
             
-            logger.info(f"Auto-merging speakers: {speaker_a} <-> {speaker_b} "
+            logger.info(f"Standard auto-merge: {speaker_a} <-> {speaker_b} "
                        f"(similarity: {similarity:.3f})")
             
             # Use speaker_a as the target, merge speaker_b into it
@@ -885,12 +1019,12 @@ class DiarizationClient:
     def __init__(
         self,
         hf_token: str = "",
-        threshold: float = 0.78,
-        recency_boost: float = 0.00,
+        threshold: float = 0.72,
+        recency_boost: float = 0.05,
         history_size: int = 20,
-        min_samples_for_match: int = 3,
+        min_samples_for_match: int = 5,
         min_segment_duration: float = 0.5,
-        ema_alpha: float = 0.28,
+        ema_alpha: float = 0.15,
         embedding_validator: Optional[EmbeddingQualityValidator] = None,
         on_invalid_embedding: Optional[Callable[[np.ndarray, str, Optional[dict]], None]] = None,
         on_low_confidence: Optional[Callable[[str, float, Optional[dict]], None]] = None

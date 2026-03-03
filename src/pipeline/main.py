@@ -600,7 +600,7 @@ def _build_segments_payload(segments: list[TranscriptionSegment], window_start_t
         # Convert to absolute stream-relative milliseconds
         seg_ms_start = int((window_start_ts + seg.start) * 1000)
         seg_ms_end = int((window_start_ts + seg.end) * 1000)
-        
+        logger.info(f"Building segment payload: window_start={window_start_ts:.3f}s, start={seg_ms_start}ms, end={seg_ms_end}ms, text={seg.text}")
         # Build stable ID from timing and text hash
         seg_id = f"{seg_ms_start}-{hash(seg.text) & 0xFFFFFFFF:08x}"
         

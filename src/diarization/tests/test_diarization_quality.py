@@ -1515,11 +1515,12 @@ class TestDiarizationV2Improvements:
         memory.centroids["speaker_0"] = embedding
         memory.counts["speaker_0"] = 5
         
+        # With 1-4 speakers (n <= 4), still returns base threshold
         assert memory._get_dynamic_threshold() == 0.78
     
     def test_dynamic_threshold_moderate_speakers(self):
         """Test that dynamic threshold lowers for moderate speaker count."""
-        memory = SpeakerMemory(threshold=0.78)
+        memory = SpeakerMemory(threshold=0.72)
         
         # Add 6 speakers
         for i in range(6):
@@ -1528,12 +1529,12 @@ class TestDiarizationV2Improvements:
             memory.centroids[f"speaker_{i}"] = embedding
             memory.counts[f"speaker_{i}"] = 5
         
-        # With 5-8 speakers, threshold should lower by 0.06
-        assert memory._get_dynamic_threshold() == 0.72
+        # With 5-8 speakers: max(0.72 - 0.08, 0.65) = 0.65
+        assert memory._get_dynamic_threshold() == 0.65
     
     def test_dynamic_threshold_many_speakers(self):
         """Test that dynamic threshold lowers significantly for many speakers."""
-        memory = SpeakerMemory(threshold=0.78)
+        memory = SpeakerMemory(threshold=0.72)
         
         # Add 10 speakers
         for i in range(10):
@@ -1542,12 +1543,12 @@ class TestDiarizationV2Improvements:
             memory.centroids[f"speaker_{i}"] = embedding
             memory.counts[f"speaker_{i}"] = 5
         
-        # With 9-12 speakers, threshold should lower by 0.12
-        assert memory._get_dynamic_threshold() == 0.66
+        # With 9-12 speakers: max(0.72 - 0.14, 0.60) = 0.60
+        assert memory._get_dynamic_threshold() == 0.60
     
     def test_dynamic_threshold_excessive_speakers(self):
         """Test that dynamic threshold lowers aggressively for excessive speakers."""
-        memory = SpeakerMemory(threshold=0.78)
+        memory = SpeakerMemory(threshold=0.72)
         
         # Add 15 speakers
         for i in range(15):
@@ -1556,8 +1557,8 @@ class TestDiarizationV2Improvements:
             memory.centroids[f"speaker_{i}"] = embedding
             memory.counts[f"speaker_{i}"] = 5
         
-        # With >12 speakers, threshold should lower by 0.18 (capped at 0.58)
-        assert memory._get_dynamic_threshold() == pytest.approx(0.60, rel=1e-9)
+        # With >12 speakers: max(0.72 - 0.20, 0.55) = 0.55
+        assert memory._get_dynamic_threshold() == pytest.approx(0.55, rel=1e-9)
     
     def test_ema_centroid_update(self):
         """Test that EMA centroid update works correctly."""
@@ -1668,10 +1669,10 @@ class TestDiarizationV2Improvements:
         """Test that v2 defaults are applied correctly."""
         memory = SpeakerMemory()
         
-        # Check new defaults
-        assert memory.threshold == 0.78  # Was 0.91
-        assert memory.min_samples_for_match == 3  # Was 1
-        assert memory.ema_alpha == 0.28  # New parameter
+        # Check new defaults (updated for Phase 1 improvements)
+        assert memory.threshold == 0.72  # Was 0.78
+        assert memory.min_samples_for_match == 5  # Was 3
+        assert memory.ema_alpha == 0.15  # Was 0.28
     
     def test_cosine_similarity_handles_nan_inputs(self):
         """Test that cosine similarity handles NaN inputs gracefully."""
