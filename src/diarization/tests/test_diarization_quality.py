@@ -1405,6 +1405,39 @@ class TestDiarizationClientWithQualityImprovements:
         assert client.threshold == 0.76
         assert client.min_segment_duration == 0.4
     
+    def test_update_params_with_merge_speakers(self):
+        """Test updating client parameters with speaker merge requests."""
+        import asyncio
+        client = DiarizationClient(hf_token="test-token")
+        asyncio.run(client.initialize())
+        
+        # Create some speakers in the speaker memory
+        if client._speaker_memory:
+            # Create two speakers with embeddings
+            np.random.seed(42)
+            emb1 = np.random.randn(512).astype(np.float32)
+            emb2 = np.random.randn(512).astype(np.float32)
+            
+            # Create speakers
+            client._speaker_memory.centroids["speaker_0"] = emb1 / np.linalg.norm(emb1)
+            client._speaker_memory.centroids["speaker_1"] = emb2 / np.linalg.norm(emb2)
+            client._speaker_memory.counts["speaker_0"] = 1
+            client._speaker_memory.counts["speaker_1"] = 1
+            client._speaker_memory.speaker_counter = 2
+            
+            # Verify both speakers exist
+            assert "speaker_0" in client._speaker_memory.centroids
+            assert "speaker_1" in client._speaker_memory.centroids
+            
+            # Merge speaker_1 into speaker_0
+            client.update_params(merge_speakers=[
+                {"source": "speaker_1", "target": "speaker_0"}
+            ])
+            
+            # speaker_1 should be merged into speaker_0
+            assert "speaker_0" in client._speaker_memory.centroids
+            assert "speaker_1" not in client._speaker_memory.centroids
+    
     def test_get_stats_returns_speaker_memory_stats(self):
         """Test that get_stats returns speaker memory statistics."""
         client = DiarizationClient(hf_token="test-token")

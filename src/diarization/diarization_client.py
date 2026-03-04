@@ -64,6 +64,9 @@ class DiarizationResult:
     segments: List[SpeakerSegment]
     error: Optional[str] = None
     merged_speakers: Optional[List[Dict[str, str]]] = None  # [{"source": "speaker_1", "target": "speaker_0"}]
+    speaker_centroids: Optional[List[dict]] = None  # [{"speaker_id": "speaker_0", "x": 0.1, "y": -0.2, "sample_count": 5}]
+    pairwise_similarity: Optional[List[dict]] = None  # [{"speaker_a": "speaker_0", "speaker_b": "speaker_1", "similarity": 0.85}]
+    pca_processing_time_ms: float = 0.0
 
 class SpeakerMemory:
     """
@@ -81,7 +84,7 @@ class SpeakerMemory:
     
     def __init__(
         self,
-        threshold: float = 0.72,
+        threshold: float = 0.81,
         recency_boost: float = 0.05,
         history_size: int = 20,
         min_samples_for_match: int = 5,
@@ -846,6 +849,19 @@ class SpeakerMemory:
             logger.warning("sklearn PCA not available, returning empty centroids")
             return []
         
+        # Need at least 2 speakers for PCA 2D projection
+        if len(self.centroids) < 2:
+            # Return single speaker with default coordinates
+            speaker_ids = list(self.centroids.keys())
+            return [
+                {
+                    "speaker_id": speaker_ids[0],
+                    "x": 0.0,
+                    "y": 0.0,
+                    "sample_count": self.counts[speaker_ids[0]]
+                }
+            ]
+        
         # Stack embeddings into matrix
         embeddings = np.array([
             self.centroids[sid] for sid in self.centroids
@@ -950,7 +966,7 @@ def diarization_worker(hf_token: str, request_queue, result_queue):
     # Initialize speaker memory with validation (using v2 defaults)
     # min_samples_for_match=1 allows immediate matching after first sample
     # Embedding validation and short segment filtering provide safeguards against false positives
-    speakers = SpeakerMemory(threshold=0.78, min_samples_for_match=1, ema_alpha=0.28)
+    speakers = SpeakerMemory(threshold=0.81, min_samples_for_match=1, ema_alpha=0.28)
 
     shutdown_received = False
     while True:
@@ -1061,12 +1077,22 @@ def diarization_worker(hf_token: str, request_queue, result_queue):
                 # Get merge events that occurred during this processing
                 merged_speakers = speakers.get_and_clear_merges()
                 
+                # Get centroid data for the current speakers with timing
+                import time
+                start_time = time.monotonic()
+                speaker_centroids = speakers.get_centroids()
+                pairwise_similarity = speakers.get_pairwise_similarity()
+                pca_time_ms = (time.monotonic() - start_time) * 1000
+                
                 # Send result
                 result = DiarizationResult(
                     request_id=request.request_id,
                     audio_path=request.audio_path,
                     segments=segments,
-                    merged_speakers=merged_speakers if merged_speakers else None
+                    merged_speakers=merged_speakers if merged_speakers else None,
+                    speaker_centroids=speaker_centroids,
+                    pairwise_similarity=pairwise_similarity,
+                    pca_processing_time_ms=pca_time_ms
                 )
                 result_queue.put(result)
                 logger.info(f"WORKER: Sent diarization result for {request.request_id}, segments={len(segments)}")
@@ -1187,7 +1213,8 @@ class DiarizationClient:
         recency_boost: Optional[float] = None,
         history_size: Optional[int] = None,
         min_samples_for_match: Optional[int] = None,
-        min_segment_duration: Optional[float] = None
+        min_segment_duration: Optional[float] = None,
+        merge_speakers: Optional[List[Dict[str, str]]] = None
     ):
         """
         Update client parameters dynamically.
@@ -1198,6 +1225,7 @@ class DiarizationClient:
             history_size: New history size
             min_samples_for_match: New min samples for match
             min_segment_duration: New minimum segment duration in seconds
+            merge_speakers: List of merge requests [{"source": "speaker_1", "target": "speaker_0"}]
         """
         if threshold is not None:
             self.threshold = threshold
@@ -1210,6 +1238,17 @@ class DiarizationClient:
         if min_segment_duration is not None:
             self.min_segment_duration = min_segment_duration
         
+        # Execute speaker merges immediately
+        if merge_speakers and self._speaker_memory:
+            for merge in merge_speakers:
+                source_id = merge.get("source")
+                target_id = merge.get("target")
+                if source_id and target_id:
+                    try:
+                        self._speaker_memory.merge_speakers(target_id, source_id)
+                    except ValueError as e:
+                        logger.warning(f"Could not merge {source_id} -> {target_id}: {e}")
+        
         logger.info(f"DiarizationClient params updated: threshold={self.threshold}, recency_boost={self.recency_boost}, min_segment_duration={self.min_segment_duration}")
     
     def get_stats(self) -> dict:
@@ -1218,20 +1257,32 @@ class DiarizationClient:
             return self._speaker_memory.get_stats()
         return {}
     
-    def get_centroids(self) -> dict:
+    def get_centroids(self) -> Tuple[dict, float]:
         """
         Get speaker centroids for graph visualization.
         
         Returns:
-            Dict with speakers (2D coords) and pairwise_similarity
+            Tuple of (dict with speakers and pairwise_similarity, processing_time_ms)
         """
+        import time
+        
         if self._speaker_memory is None:
-            return {"speakers": [], "pairwise_similarity": []}
+            return {"speakers": [], "pairwise_similarity": []}, 0.0
+        
+        start_time = time.monotonic()
+        
+        # Get speakers with PCA calculation
+        speakers = self._speaker_memory.get_centroids()
+        
+        # Get pairwise similarity
+        pairwise_similarity = self._speaker_memory.get_pairwise_similarity()
+        
+        processing_time_ms = (time.monotonic() - start_time) * 1000
         
         return {
-            "speakers": self._speaker_memory.get_centroids(),
-            "pairwise_similarity": self._speaker_memory.get_pairwise_similarity()
-        }
+            "speakers": speakers,
+            "pairwise_similarity": pairwise_similarity
+        }, processing_time_ms
     
     def reset(self):
         """Reset all accumulated state.

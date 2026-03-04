@@ -344,6 +344,42 @@ async def _handle_diarization_result(result: DiarizationResult):
             window_end_ts = window_start_ts + (win_len / float(sr))
         
         await _send_speakers_message(result.segments, window_start_ts, window_end_ts, result.merged_speakers)
+        
+        # Get centroid data from the diarization result (computed in worker)
+        centroids_data = {
+            "speakers": result.speaker_centroids or [],
+            "pairwise_similarity": result.pairwise_similarity or []
+        }
+        speaker_count = len(centroids_data["speakers"])
+        pca_time_ms = result.pca_processing_time_ms
+        logger.info(f"Got centroid data for {speaker_count} speakers, PCA took {pca_time_ms:.2f}ms")
+        
+        # Send centroid data to client (always send, even if empty, to maintain consistency)
+        await _send_speaker_embedding_data(centroids_data, pca_time_ms)
+        
+        # Add PCA timing to stats for monitoring
+        if hasattr(STATE, 'stats'):
+            STATE.stats['pca_processing_time_ms'] = pca_time_ms
+
+
+async def _send_speaker_embedding_data(centroids_data: dict, pca_time_ms: float):
+    """Send speaker centroid data to client."""
+    if PROCESSOR is None:
+        return
+    
+    payload = {
+        "type": "speaker_embedding_data",
+        "timestamp_utc": datetime.now(timezone.utc).isoformat(),
+        "speakers": centroids_data["speakers"],
+        "pairwise_similarity": centroids_data["pairwise_similarity"],
+        "pca_processing_time_ms": pca_time_ms
+    }
+    
+    try:
+        await PROCESSOR.send_data(json.dumps(payload))
+        logger.info(f"Sent speaker_embedding_data with {len(centroids_data['speakers'])} speakers, pca_time={pca_time_ms:.2f}ms")
+    except Exception as e:
+        logger.warning(f"Failed to send speaker_embedding_data: {e}")
 
 
 async def _poll_diarization_results():
@@ -713,16 +749,7 @@ async def _handle_graceful_shutdown():
         if all_workers_done and diarization_idle:
             STATE.shutdown_completed = True
             
-            # Send final speaker embedding data before shutdown
-            if STATE.diarization_client is not None:
-                centroids_data = STATE.diarization_client.get_centroids()
-                await PROCESSOR.send_data(json.dumps({
-                    "type": "speaker_embedding_data",
-                    "timestamp_utc": datetime.now(timezone.utc).isoformat(),
-                    "speakers": centroids_data["speakers"],
-                    "pairwise_similarity": centroids_data["pairwise_similarity"]
-                }))
-                logger.info(f"Sent final speaker_embedding_data: {len(centroids_data['speakers'])} speakers")
+            # Note: speaker_embedding_data is sent with each diarization result, not at shutdown
             
             await PROCESSOR.send_data(json.dumps({
                 "type": "shutdown_complete",
@@ -849,14 +876,22 @@ async def update_params(params: dict):
     # Diarization centroids request - get 2D PCA coords for graph visualization
     if params.get("get_speaker_embeddings"):
         if STATE.diarization_client is not None:
-            centroids_data = STATE.diarization_client.get_centroids()
+            centroids_data, pca_time_ms = STATE.diarization_client.get_centroids()
             await PROCESSOR.send_data(json.dumps({
                 "type": "speaker_embedding_data",
                 "timestamp_utc": datetime.now(timezone.utc).isoformat(),
                 "speakers": centroids_data["speakers"],
-                "pairwise_similarity": centroids_data["pairwise_similarity"]
+                "pairwise_similarity": centroids_data["pairwise_similarity"],
+                "pca_processing_time_ms": pca_time_ms
             }))
             logger.info(f"Sent speaker_embedding_data: {len(centroids_data['speakers'])} speakers")
+    
+    # Diarization merge speakers request
+    if "merge_speakers" in params:
+        merge_speakers = params["merge_speakers"]
+        if STATE.diarization_client is not None and merge_speakers:
+            STATE.diarization_client.update_params(merge_speakers=merge_speakers)
+            logger.info(f"Applied speaker merges: {merge_speakers}")
 
 async def on_stream_start(params: dict):
     global STATE
