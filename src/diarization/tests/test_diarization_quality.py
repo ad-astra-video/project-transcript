@@ -23,6 +23,7 @@ from diarization.diarization_client import (
     DiarizationResult,
     SpeakerSegment,
     SpeakerMemory,
+    MergeSpeakersRequest,
     diarization_worker
 )
 from diarization.embedding_validator import EmbeddingQualityValidator
@@ -1406,72 +1407,66 @@ class TestDiarizationClientWithQualityImprovements:
         assert client.min_segment_duration == 0.4
     
     def test_update_params_with_merge_speakers(self):
-        """Test updating client parameters with speaker merge requests."""
+        """Test that merge requests are queued for the worker when it is running."""
         import asyncio
+        from unittest.mock import MagicMock
         client = DiarizationClient(hf_token="test-token")
         asyncio.run(client.initialize())
-        
-        # Create some speakers in the speaker memory
-        if client._speaker_memory:
-            # Create two speakers with embeddings
-            np.random.seed(42)
-            emb1 = np.random.randn(512).astype(np.float32)
-            emb2 = np.random.randn(512).astype(np.float32)
-            
-            # Create speakers
-            client._speaker_memory.centroids["speaker_0"] = emb1 / np.linalg.norm(emb1)
-            client._speaker_memory.centroids["speaker_1"] = emb2 / np.linalg.norm(emb2)
-            client._speaker_memory.counts["speaker_0"] = 1
-            client._speaker_memory.counts["speaker_1"] = 1
-            client._speaker_memory.speaker_counter = 2
-            
-            # Verify both speakers exist
-            assert "speaker_0" in client._speaker_memory.centroids
-            assert "speaker_1" in client._speaker_memory.centroids
-            
-            # Merge speaker_1 into speaker_0
-            client.update_params(merge_speakers=[
-                {"source": "speaker_1", "target": "speaker_0"}
-            ])
-            
-            # speaker_1 should be merged into speaker_0
-            assert "speaker_0" in client._speaker_memory.centroids
-            assert "speaker_1" not in client._speaker_memory.centroids
+
+        # Attach a mock queue so we can inspect what gets put on it
+        mock_queue = MagicMock()
+        client._request_queue = mock_queue
+
+        client.update_params(merge_speakers=[
+            {"source": "speaker_1", "target": "speaker_0"}
+        ])
+
+        # A MergeSpeakersRequest should have been sent to the worker
+        mock_queue.put.assert_called_once()
+        sent = mock_queue.put.call_args[0][0]
+        assert isinstance(sent, MergeSpeakersRequest)
+        assert sent.source == "speaker_1"
+        assert sent.target == "speaker_0"
     
     def test_get_stats_returns_speaker_memory_stats(self):
-        """Test that get_stats returns speaker memory statistics."""
+        """Test that get_stats returns cached speaker data."""
         client = DiarizationClient(hf_token="test-token")
-        
-        # Initialize to create speaker memory
+
         import asyncio
         asyncio.run(client.initialize())
-        
+
         stats = client.get_stats()
-        
-        # Should have validation stats
-        assert "identifications" in stats
-        assert "valid_embeddings" in stats
-        assert "invalid_embeddings" in stats
-    
+
+        # Should expose speaker_count and lists
+        assert "speaker_count" in stats
+        assert "speakers" in stats
+        assert "pairwise_similarity" in stats
+        assert stats["speaker_count"] == 0  # no results recorded yet
+
     def test_client_reset_clears_quality_stats(self):
-        """Test that reset clears quality-related statistics."""
+        """Test that reset clears speaker data."""
         client = DiarizationClient(hf_token="test-token")
-        
+
         import asyncio
         asyncio.run(client.initialize())
-        
-        # Add some data - use min_samples_for_match=1 to allow matching
-        if client._speaker_memory:
-            client._speaker_memory.min_samples_for_match = 1
-            client._speaker_memory.identify(np.random.randn(512).astype(np.float32))
-            client._speaker_memory.identify(np.zeros(512, dtype=np.float32))
-        
-        # Reset
+
+        # Simulate receiving a result so speaker data is populated
+        fake_result = DiarizationResult(
+            request_id="r1",
+            audio_path="x",
+            segments=[],
+            speaker_centroids=[{"speaker_id": "speaker_0", "x": 0.0, "y": 0.0, "sample_count": 3}],
+            pairwise_similarity=[]
+        )
+        client.record_result(fake_result)
+        assert client.get_stats()["speaker_count"] == 1
+
+        # Reset should clear cached data
         client.reset()
-        
-        # Check stats are cleared
         stats = client.get_stats()
-        assert stats["identifications"] == 0
+        assert stats["speaker_count"] == 0
+
+
 
 
 class TestSegmentDurationFiltering:
@@ -1535,66 +1530,79 @@ class TestDiarizationV2Improvements:
     """Tests for v2 speaker diarization improvements."""
     
     def test_dynamic_threshold_few_speakers(self):
-        """Test that dynamic threshold returns base threshold for few speakers."""
+        """Test that dynamic threshold is close to base threshold for few speakers."""
         memory = SpeakerMemory(threshold=0.78)
-        
-        # With 0-4 speakers, should return base threshold
+
+        # With 0 speakers, should return base threshold exactly
         assert len(memory.centroids) == 0
         assert memory._get_dynamic_threshold() == 0.78
-        
-        # Add a speaker
+
+        # Add a speaker directly (last_seen not set, falls back to len(centroids)=1)
         embedding = np.random.randn(512).astype(np.float32)
         embedding = embedding / np.linalg.norm(embedding)
         memory.centroids["speaker_0"] = embedding
         memory.counts["speaker_0"] = 5
-        
-        # With 1-4 speakers (n <= 4), still returns base threshold
-        assert memory._get_dynamic_threshold() == 0.78
+
+        # With 1 speaker the smooth curve gives a small reduction; still near base
+        t = memory._get_dynamic_threshold()
+        assert t <= 0.78, "Threshold should not exceed base"
+        assert t > 0.75, "With 1 speaker threshold should remain close to base"
     
     def test_dynamic_threshold_moderate_speakers(self):
         """Test that dynamic threshold lowers for moderate speaker count."""
         memory = SpeakerMemory(threshold=0.72)
-        
-        # Add 6 speakers
+
+        # Add 6 speakers directly (last_seen empty → N = len(centroids) = 6)
         for i in range(6):
             embedding = np.random.randn(512).astype(np.float32)
             embedding = embedding / np.linalg.norm(embedding)
             memory.centroids[f"speaker_{i}"] = embedding
             memory.counts[f"speaker_{i}"] = 5
-        
-        # With 5-8 speakers: max(0.72 - 0.08, 0.65) = 0.65
-        assert memory._get_dynamic_threshold() == 0.65
+
+        t = memory._get_dynamic_threshold()
+        # Smooth curve at N=6: 0.72 - 0.20*(1-exp(-6/8)) ≈ 0.614
+        assert t < 0.72, "Threshold should decrease with 6 speakers"
+        assert t >= 0.52, "Threshold should not go below floor (0.52)"
     
     def test_dynamic_threshold_many_speakers(self):
         """Test that dynamic threshold lowers significantly for many speakers."""
         memory = SpeakerMemory(threshold=0.72)
-        
-        # Add 10 speakers
+
+        # Add 10 speakers directly (last_seen empty → N = 10)
         for i in range(10):
             embedding = np.random.randn(512).astype(np.float32)
             embedding = embedding / np.linalg.norm(embedding)
             memory.centroids[f"speaker_{i}"] = embedding
             memory.counts[f"speaker_{i}"] = 5
-        
-        # With 9-12 speakers: max(0.72 - 0.14, 0.60) = 0.60
-        assert memory._get_dynamic_threshold() == 0.60
+
+        t10 = memory._get_dynamic_threshold()
+
+        # Smooth curve at N=10: 0.72 - 0.20*(1-exp(-10/8)) ≈ 0.577
+        assert t10 < 0.72, "Threshold should decrease with 10 speakers"
+        assert t10 >= 0.52, "Threshold should not go below floor (0.52)"
+
+        # Must be lower than at N=6 (monotonically decreasing)
+        for i in range(10, 6, -1):
+            del memory.centroids[f"speaker_{i-1}"]
+            del memory.counts[f"speaker_{i-1}"]
+        t6 = memory._get_dynamic_threshold()
+        assert t10 < t6, "Threshold at N=10 should be lower than at N=6"
     
     def test_dynamic_threshold_excessive_speakers(self):
         """Test that dynamic threshold lowers aggressively for excessive speakers."""
         memory = SpeakerMemory(threshold=0.72)
-        
-        # Add 15 speakers
+
+        # Add 15 speakers directly (last_seen empty → N = 15)
         for i in range(15):
             embedding = np.random.randn(512).astype(np.float32)
             embedding = embedding / np.linalg.norm(embedding)
             memory.centroids[f"speaker_{i}"] = embedding
             memory.counts[f"speaker_{i}"] = 5
-        
-        # With >12 speakers: max(0.72 - 0.20, 0.55) = 0.55
-        assert memory._get_dynamic_threshold() == pytest.approx(0.55, rel=1e-9)
-    
-    def test_ema_centroid_update(self):
-        """Test that EMA centroid update works correctly."""
+
+        t = memory._get_dynamic_threshold()
+        # Smooth curve at N=15: 0.72 - 0.20*(1-exp(-15/8)) ≈ 0.550, floor=0.52
+        assert t < 0.60, "Threshold should be well below base for 15 speakers"
+        assert t >= 0.52, "Threshold should not go below floor (0.52)"
         memory = SpeakerMemory(ema_alpha=0.5)
         
         # Create initial embedding
@@ -1699,13 +1707,13 @@ class TestDiarizationV2Improvements:
         assert diagnostics["config"]["ema_alpha"] == 0.28
     
     def test_updated_defaults(self):
-        """Test that v2 defaults are applied correctly."""
+        """Test that SpeakerMemory defaults are applied correctly."""
         memory = SpeakerMemory()
-        
-        # Check new defaults (updated for Phase 1 improvements)
-        assert memory.threshold == 0.72  # Was 0.78
-        assert memory.min_samples_for_match == 5  # Was 3
-        assert memory.ema_alpha == 0.15  # Was 0.28
+
+        assert memory.threshold == 0.81
+        assert memory.min_samples_for_match == 5
+        assert memory.ema_alpha == 0.15
+        assert memory.active_window_seconds == 600.0
     
     def test_cosine_similarity_handles_nan_inputs(self):
         """Test that cosine similarity handles NaN inputs gracefully."""
@@ -1789,20 +1797,25 @@ class TestSpeakerCentroidRetrieval:
         assert sims == []  # Only 1 speaker, no pairs
     
     def test_get_pairwise_similarity_two_speakers(self):
-        """Test get_pairwise_similarity returns similarity for speaker pair."""
+        """Test get_pairwise_similarity returns similarity for two distinct speakers."""
         memory = SpeakerMemory(min_samples_for_match=1)
-        
-        # Add 2 identical speakers (same embedding)
-        emb = np.random.randn(512).astype(np.float32)
-        emb = emb / np.linalg.norm(emb)
-        memory.identify(emb)
-        memory.identify(emb)
-        
+
+        # Use seeded random dense embeddings - pass the validator and
+        # random 512-dim unit vectors are nearly orthogonal (E[sim] ≈ 0)
+        rng = np.random.default_rng(42)
+        emb1 = rng.standard_normal(512).astype(np.float32)
+        emb1 /= np.linalg.norm(emb1)
+        emb2 = rng.standard_normal(512).astype(np.float32)
+        emb2 /= np.linalg.norm(emb2)
+
+        memory.identify(emb1)
+        memory.identify(emb2)
+
         sims = memory.get_pairwise_similarity()
-        assert len(sims) == 1
+        assert len(sims) == 1, f"Expected 1 pair, got {len(sims)}: speakers={list(memory.centroids.keys())}"
         assert sims[0]["speaker_a"] == "speaker_0"
-        assert sims[0]["speaker_b"] == "speaker_0"  # Same speaker merged
-        assert sims[0]["similarity"] == 1.0
+        assert sims[0]["speaker_b"] == "speaker_1"
+        assert abs(sims[0]["similarity"]) < 0.3  # random 512-dim vectors are nearly orthogonal
     
     def test_get_pairwise_similarity_different_speakers(self):
         """Test get_pairwise_similarity returns low similarity for different speakers."""

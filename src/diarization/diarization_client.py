@@ -16,6 +16,7 @@ import logging
 import multiprocessing
 import threading
 import os
+import time
 from dataclasses import dataclass
 from typing import List, Optional, Tuple, Dict, Callable, Union
 from collections import deque
@@ -57,6 +58,12 @@ class DiarizationRequest:
     request_id: str
 
 @dataclass
+class MergeSpeakersRequest:
+    """Request to merge two speakers in the worker's SpeakerMemory."""
+    source: str   # speaker to remove
+    target: str   # speaker to keep
+
+@dataclass
 class DiarizationResult:
     """Result from diarization processing."""
     request_id: str
@@ -90,6 +97,7 @@ class SpeakerMemory:
         min_samples_for_match: int = 5,
         min_segment_duration: float = 0.5,
         ema_alpha: float = 0.15,
+        active_window_seconds: float = 1200.0,
         embedding_validator: Optional[EmbeddingQualityValidator] = None,
         on_invalid_embedding: Optional[Callable[[np.ndarray, str, Optional[dict]], None]] = None,
         on_low_confidence: Optional[Callable[[str, float, Optional[dict]], None]] = None
@@ -101,16 +109,20 @@ class SpeakerMemory:
             history_size: Number of recent speaker IDs to track
             min_samples_for_match: Minimum observations before matching against a speaker
             min_segment_duration: Minimum segment duration in seconds (default: 0.5)
+            ema_alpha: EMA smoothing factor for centroid updates (default: 0.15)
+            active_window_seconds: Seconds since last seen before a speaker is skipped
+                during matching. Inactive speakers are retained in memory and can
+                become active again if a new segment looks similar. (default: 600 = 10 min)
             embedding_validator: Custom embedding validator (uses default if None)
             on_invalid_embedding: Callback for invalid embeddings: (embedding, reason, segment_info)
             on_low_confidence: Callback for low confidence matches: (speaker_id, confidence, segment_info)
-            ema_alpha: EMA smoothing factor for centroid updates (default: 0.15)
         """
         self.threshold = threshold
         self.recency_boost = recency_boost
         self.min_samples_for_match = min_samples_for_match
         self.min_segment_duration = min_segment_duration
         self.ema_alpha = ema_alpha
+        self.active_window_seconds = active_window_seconds
         
         # Embedding quality validation
         if embedding_validator is not None:
@@ -128,7 +140,8 @@ class SpeakerMemory:
         
         # Speaker profiles
         self.centroids: Dict[str, np.ndarray] = {}  # speaker_id -> normalized embedding
-        self.counts: Dict[int, int] = {}             # speaker_id -> sample count
+        self.counts: Dict[str, int] = {}             # speaker_id -> sample count
+        self.last_seen: Dict[str, float] = {}        # speaker_id -> time.time() of last match
         self.speaker_counter = 0
         
         # Temporal tracking
@@ -159,23 +172,28 @@ class SpeakerMemory:
     
     def _get_dynamic_threshold(self) -> float:
         """
-        Lower threshold as speaker count grows to reduce over-segmentation.
-        
-        This dynamic adjustment helps prevent creating too many speakers
-        in meetings with many participants by lowering the similarity
-        threshold when speaker count increases.
+        Lower threshold smoothly as active speaker count grows to reduce over-segmentation.
+
+        Uses exponential decay so the threshold never cliffs at arbitrary step boundaries.
+        Formula: threshold = base - max_reduction * (1 - exp(-N / lambda))
+          - At N=0:  threshold ≈ base
+          - At N=8:  threshold ≈ base - 0.126  (λ=8, max_reduction=0.20)
+          - At N=20: threshold ≈ base - 0.183
+          - At N=∞:  threshold → base - 0.20 (floor)
         """
-        n = len(self.centroids)
-        base = self.threshold  # 0.72 (updated from 0.78)
-        
-        if n <= 4:
-            return base
-        elif n <= 8:
-            return max(base - 0.08, 0.65)   # 0.64
-        elif n <= 12:
-            return max(base - 0.14, 0.60)   # 0.58
-        else:
-            return max(base - 0.20, 0.55)   # 0.52 (aggressive latch-on)
+        # Count speakers seen within 2τ as "effectively active" for threshold scaling.
+        # Speakers outside this window still compete but with heavily decayed scores.
+        now = time.time()
+        tau = self.active_window_seconds
+        n = sum(
+            1 for sid in self.centroids
+            if now - self.last_seen.get(sid, now) <= 2 * tau
+        ) if self.last_seen else len(self.centroids)
+        base = self.threshold
+        max_reduction = 0.20
+        lam = 8.0  # controls how quickly threshold drops
+        threshold = base - max_reduction * (1.0 - float(np.exp(-n / lam)))
+        return max(threshold, 0.52)
     
     def _cosine_similarity(self, a: np.ndarray, b: np.ndarray) -> float:
         """
@@ -313,14 +331,24 @@ class SpeakerMemory:
         # DEBUG: Log speaker state before matching
         total_samples = sum(self.counts.values())
         logger.info(f"Matching: {len(self.centroids)} speakers, total_samples={total_samples}, min_samples_for_match={self.min_samples_for_match}, effective_min={effective_min}")
+        now = time.time()
         for speaker_id, centroid in self.centroids.items():
             # Skip speakers with too few samples (unstable centroids)
             if self.counts[speaker_id] < effective_min:
                 logger.info(f"Skipping {speaker_id}: count={self.counts[speaker_id]} < effective_min={effective_min}")
                 continue
-            
+
             score = self._cosine_similarity(embedding, centroid)
-            
+
+            # Age-based score decay: score *= exp(-age / τ).
+            # Recent speakers are unpenalised; absent speakers fade continuously.
+            # No hard cutoff — a very strong embedding match can always reactivate a speaker.
+            age = now - self.last_seen.get(speaker_id, now)
+            if age > 0 and self.active_window_seconds > 0:
+                decay = float(np.exp(-age / self.active_window_seconds))
+                score *= decay
+                logger.debug(f"{speaker_id}: raw_score before decay={score/decay:.3f}, age={age:.0f}s, decay={decay:.3f}, adjusted={score:.3f}")
+
             # Recency boost: prefer continuing same speaker
             if speaker_id == self.last_speaker:
                 score += self.recency_boost
@@ -387,11 +415,6 @@ class SpeakerMemory:
                 if merges:
                     logger.info(f"Periodic consolidation: {merges} merges")
             
-            # Emergency cap: if speaker count exceeds 18, aggressive merge
-            if len(self.centroids) > 18:
-                self.auto_merge_similar_speakers(similarity_threshold=0.73, max_merges=10)
-                logger.warning("Emergency merge triggered - speaker count exceeded 18")
-            
             return best_id, best_score, alt_speakers
         else:
             self._stats["new_speakers"] += 1
@@ -423,6 +446,7 @@ class SpeakerMemory:
         
         self.centroids[speaker_id] = embedding
         self.counts[speaker_id] = 1
+        self.last_seen[speaker_id] = time.time()
         self.last_speaker = speaker_id
         self.history.append(speaker_id)
         
@@ -444,6 +468,7 @@ class SpeakerMemory:
         # Re-normalize to maintain unit length
         self.centroids[speaker_id] = self._normalize(self.centroids[speaker_id])
         self.counts[speaker_id] += 1
+        self.last_seen[speaker_id] = time.time()
     
     def _check_and_merge_after_creation(self, new_speaker_id: str, new_embedding: np.ndarray) -> Optional[str]:
         """Check if new speaker should be merged immediately."""
@@ -749,10 +774,16 @@ class SpeakerMemory:
         
         self.centroids[speaker_a] = self._normalize(merged)
         self.counts[speaker_a] = n_a + n_b
-        
+        # Keep the most recent last_seen time across both speakers
+        self.last_seen[speaker_a] = max(
+            self.last_seen.get(speaker_a, 0),
+            self.last_seen.get(speaker_b, 0)
+        )
+
         # Remove speaker_b
         del self.centroids[speaker_b]
         del self.counts[speaker_b]
+        self.last_seen.pop(speaker_b, None)
 
         #log merge event for debugging
         self._recent_merges_log.append({
@@ -786,6 +817,7 @@ class SpeakerMemory:
         for speaker_id in invalid_speakers:
             del self.centroids[speaker_id]
             del self.counts[speaker_id]
+            self.last_seen.pop(speaker_id, None)
             # Also remove from history
             self.history = deque(
                 [s for s in self.history if s != speaker_id],
@@ -801,6 +833,7 @@ class SpeakerMemory:
         """Clear all speaker data and statistics."""
         self.centroids.clear()
         self.counts.clear()
+        self.last_seen.clear()
         self.history.clear()
         self.last_speaker = None
         self.speaker_counter = 0
@@ -966,7 +999,7 @@ def diarization_worker(hf_token: str, request_queue, result_queue):
     # Initialize speaker memory with validation (using v2 defaults)
     # min_samples_for_match=1 allows immediate matching after first sample
     # Embedding validation and short segment filtering provide safeguards against false positives
-    speakers = SpeakerMemory(threshold=0.81, min_samples_for_match=1, ema_alpha=0.28)
+    speakers = SpeakerMemory(threshold=0.81, min_samples_for_match=1, ema_alpha=0.28, active_window_seconds=1200.0)
 
     shutdown_received = False
     while True:
@@ -994,6 +1027,15 @@ def diarization_worker(hf_token: str, request_queue, result_queue):
                     logger.info("Diarization worker shutting down - queue empty")
                     break
             
+            # Handle speaker merge request
+            if isinstance(request, MergeSpeakersRequest):
+                try:
+                    speakers.merge_speakers(request.target, request.source)
+                    logger.info(f"WORKER: Merged {request.source} -> {request.target}")
+                except ValueError as e:
+                    logger.warning(f"WORKER: Could not merge {request.source} -> {request.target}: {e}")
+                continue
+
             # Handle reset signal for new stream
             if request == RESET_SIGNAL:
                 shutdown_received = False  # Reset for new stream
@@ -1124,13 +1166,14 @@ class DiarizationClient:
         min_samples_for_match: int = 5,
         min_segment_duration: float = 0.5,
         ema_alpha: float = 0.15,
+        active_window_seconds: float = 1200.0,
         embedding_validator: Optional[EmbeddingQualityValidator] = None,
         on_invalid_embedding: Optional[Callable[[np.ndarray, str, Optional[dict]], None]] = None,
         on_low_confidence: Optional[Callable[[str, float, Optional[dict]], None]] = None
     ):
         """
         Initialize the diarization client.
-        
+
         Args:
             hf_token: HuggingFace token for accessing pyannote models
             threshold: Cosine similarity threshold for speaker match
@@ -1138,6 +1181,10 @@ class DiarizationClient:
             history_size: Number of recent speaker IDs to track
             min_samples_for_match: Minimum observations before matching against a speaker
             min_segment_duration: Minimum segment duration in seconds (default: 0.5)
+            ema_alpha: EMA smoothing factor for centroid updates
+            active_window_seconds: Decay time constant τ for absence penalty. A speaker
+                last seen τ seconds ago has their score multiplied by e^⁻¹ (≈0.37).
+                Set to 0 to disable decay entirely. (default: 1200 = 20 min)
             embedding_validator: Custom embedding validator (uses default if None)
             on_invalid_embedding: Callback for invalid embeddings
             on_low_confidence: Callback for low confidence matches
@@ -1149,13 +1196,16 @@ class DiarizationClient:
         self.min_samples_for_match = min_samples_for_match
         self.min_segment_duration = min_segment_duration
         self.ema_alpha = ema_alpha
+        self.active_window_seconds = active_window_seconds
         self.embedding_validator = embedding_validator
         self.on_invalid_embedding = on_invalid_embedding
         self.on_low_confidence = on_low_confidence
         
         # State management
         self._lock: Optional[threading.Lock] = None
-        self._speaker_memory: Optional[SpeakerMemory] = None
+        # Cache of the latest speaker data received from the worker process.
+        # Populated by record_result() after each DiarizationResult arrives.
+        self._speaker_memory_data: dict = {"speakers": [], "pairwise_similarity": []}
         self._process: Optional[multiprocessing.Process] = None
         self._request_queue: Optional[multiprocessing.Queue] = None
         self._result_queue: Optional[multiprocessing.Queue] = None
@@ -1165,23 +1215,9 @@ class DiarizationClient:
         self.in_flight_requests: set[str] = set()  # Track request IDs being processed
     
     async def initialize(self):
-        """Initialize lock and speaker memory."""
-        
+        """Initialize lock."""
         if self._lock is None:
             self._lock = threading.Lock()
-        
-        self._speaker_memory = SpeakerMemory(
-            threshold=self.threshold,
-            recency_boost=self.recency_boost,
-            history_size=self.history_size,
-            min_samples_for_match=self.min_samples_for_match,
-            min_segment_duration=self.min_segment_duration,
-            ema_alpha=self.ema_alpha,
-            embedding_validator=self.embedding_validator,
-            on_invalid_embedding=self.on_invalid_embedding,
-            on_low_confidence=self.on_low_confidence
-        )
-        
         logger.info(f"DiarizationClient initialized with threshold={self.threshold}, min_segment_duration={self.min_segment_duration}s")
     
     async def start(self):
@@ -1214,6 +1250,7 @@ class DiarizationClient:
         history_size: Optional[int] = None,
         min_samples_for_match: Optional[int] = None,
         min_segment_duration: Optional[float] = None,
+        active_window_seconds: Optional[float] = None,
         merge_speakers: Optional[List[Dict[str, str]]] = None
     ):
         """
@@ -1225,6 +1262,7 @@ class DiarizationClient:
             history_size: New history size
             min_samples_for_match: New min samples for match
             min_segment_duration: New minimum segment duration in seconds
+            active_window_seconds: New active window duration in seconds
             merge_speakers: List of merge requests [{"source": "speaker_1", "target": "speaker_0"}]
         """
         if threshold is not None:
@@ -1237,52 +1275,50 @@ class DiarizationClient:
             self.min_samples_for_match = min_samples_for_match
         if min_segment_duration is not None:
             self.min_segment_duration = min_segment_duration
-        
-        # Execute speaker merges immediately
-        if merge_speakers and self._speaker_memory:
+        if active_window_seconds is not None:
+            self.active_window_seconds = active_window_seconds
+
+        # Send merge requests directly to the worker so they take effect
+        if merge_speakers and self._request_queue is not None:
             for merge in merge_speakers:
                 source_id = merge.get("source")
                 target_id = merge.get("target")
                 if source_id and target_id:
-                    try:
-                        self._speaker_memory.merge_speakers(target_id, source_id)
-                    except ValueError as e:
-                        logger.warning(f"Could not merge {source_id} -> {target_id}: {e}")
-        
+                    self._request_queue.put(MergeSpeakersRequest(source=source_id, target=target_id))
+                    logger.info(f"Queued merge {source_id} -> {target_id} for worker")
+        elif merge_speakers:
+            logger.warning("merge_speakers requested but worker not running; ignoring")
+
         logger.info(f"DiarizationClient params updated: threshold={self.threshold}, recency_boost={self.recency_boost}, min_segment_duration={self.min_segment_duration}")
     
     def get_stats(self) -> dict:
-        """Get comprehensive statistics from speaker memory."""
-        if self._speaker_memory is not None:
-            return self._speaker_memory.get_stats()
-        return {}
+        """Get the latest speaker statistics cached from the worker."""
+        speakers = self._speaker_memory_data.get("speakers", [])
+        return {
+            "speaker_count": len(speakers),
+            "speakers": speakers,
+            "pairwise_similarity": self._speaker_memory_data.get("pairwise_similarity", []),
+        }
+
+    def record_result(self, result: "DiarizationResult") -> None:
+        """Update cached speaker data from an incoming worker result."""
+        if result.speaker_centroids is not None:
+            self._speaker_memory_data["speakers"] = result.speaker_centroids
+        if result.pairwise_similarity is not None:
+            self._speaker_memory_data["pairwise_similarity"] = result.pairwise_similarity
     
     def get_centroids(self) -> Tuple[dict, float]:
         """
         Get speaker centroids for graph visualization.
-        
+
+        Returns the latest data cached from the worker (PCA and similarity
+        are computed inside the worker process and delivered via record_result).
+
         Returns:
             Tuple of (dict with speakers and pairwise_similarity, processing_time_ms)
+            processing_time_ms is 0.0 because computation is done in the worker.
         """
-        import time
-        
-        if self._speaker_memory is None:
-            return {"speakers": [], "pairwise_similarity": []}, 0.0
-        
-        start_time = time.monotonic()
-        
-        # Get speakers with PCA calculation
-        speakers = self._speaker_memory.get_centroids()
-        
-        # Get pairwise similarity
-        pairwise_similarity = self._speaker_memory.get_pairwise_similarity()
-        
-        processing_time_ms = (time.monotonic() - start_time) * 1000
-        
-        return {
-            "speakers": speakers,
-            "pairwise_similarity": pairwise_similarity
-        }, processing_time_ms
+        return dict(self._speaker_memory_data), 0.0
     
     def reset(self):
         """Reset all accumulated state.
@@ -1292,8 +1328,7 @@ class DiarizationClient:
         The worker process continues running across stream boundaries.
         """
         logger.info("DiarizationClient.reset() - clearing state and signaling worker")
-        if self._speaker_memory is not None:
-            self._speaker_memory.reset()
+        self._speaker_memory_data = {"speakers": [], "pairwise_similarity": []}
         self.in_flight_requests.clear()
         
         # Send RESET_SIGNAL to worker to clear its speaker memory

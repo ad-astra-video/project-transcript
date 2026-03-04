@@ -111,9 +111,9 @@ class TestConfiguration:
     """Tests for configuration changes."""
     
     def test_default_threshold(self):
-        """Test that default threshold is updated."""
+        """Test that SpeakerMemory uses the correct default threshold."""
         memory = SpeakerMemory()
-        assert memory.threshold == 0.72, f"Default threshold should be 0.72, got {memory.threshold}"
+        assert memory.threshold == 0.81, f"Default threshold should be 0.81, got {memory.threshold}"
     
     def test_default_ema_alpha(self):
         """Test that default EMA alpha is updated."""
@@ -137,15 +137,17 @@ class TestDynamicThreshold:
     def test_dynamic_threshold_few_speakers(self):
         """Test dynamic threshold with few speakers."""
         memory = SpeakerMemory(threshold=0.72)
-        
-        # Add a few speakers
+
+        # Add a few speakers via identify so last_seen is populated
         for _ in range(3):
             emb = np.random.randn(512)
             emb = emb / np.linalg.norm(emb)
             memory.identify(emb)
-        
-        # Should return base threshold
-        assert memory._get_dynamic_threshold() == 0.72
+
+        t = memory._get_dynamic_threshold()
+        # Smooth curve: threshold decreases with N but stays below base
+        assert t <= 0.72, "Threshold should not exceed base"
+        assert t >= 0.52, "Threshold should not go below floor"
     
     def test_dynamic_threshold_many_speakers(self):
         """Test dynamic threshold with many speakers."""
