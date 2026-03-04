@@ -75,13 +75,25 @@ class TestWindowManagerRapidSummary:
             transcription_window_ids=[]
         )
 
-        # Get text since timestamp 10.0 (should include windows 2 and 3, since timestamp_start >= timestamp)
+        # Get text since timestamp 10.0 (should include all windows since timestamp_end >= timestamp)
+        # Using timestamp_end >= timestamp: Window1(10.0) >= 10.0, Window2(20.0) >= 10.0, Window3(30.0) >= 10.0
         text, window_ids = window_manager.get_text_and_window_ids_since_timestamp(10.0)
         
+        assert "First window text" in text
         assert "Second window text" in text
         assert "Third window text" in text
-        assert "First window text" not in text
-        assert len(window_ids) == 2
+        assert len(window_ids) == 3
+        
+        # Test with timestamp 15.0 - should include windows with timestamp_end >= 15.0
+        # Window1: timestamp_end=10.0 < 15.0 (excluded)
+        # Window2: timestamp_end=20.0 >= 15.0 (included)
+        # Window3: timestamp_end=30.0 >= 15.0 (included)
+        text2, window_ids2 = window_manager.get_text_and_window_ids_since_timestamp(15.0)
+        
+        assert "First window text" not in text2
+        assert "Second window text" in text2
+        assert "Third window text" in text2
+        assert len(window_ids2) == 2
         
         # Also test with timestamp 0.0 to get all windows
         text_all, window_ids_all = window_manager.get_text_and_window_ids_since_timestamp(0.0)
@@ -106,11 +118,12 @@ class TestWindowManagerRapidSummary:
         )
 
         # Get text since timestamp 10.0 (exact boundary)
+        # Using timestamp_end >= timestamp: Window1(10.0) >= 10.0, Window2(20.0) >= 10.0
         text, window_ids = window_manager.get_text_and_window_ids_since_timestamp(10.0)
         
+        assert "First window text" in text
         assert "Second window text" in text
-        assert "First window text" not in text
-        assert len(window_ids) == 1
+        assert len(window_ids) == 2
 
 
 class TestSummaryClientRapidSummary:

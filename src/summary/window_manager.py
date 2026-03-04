@@ -495,7 +495,7 @@ class WindowManager:
         text_parts = []
         window_ids = []
         for window in self._summary_windows:
-            if window.timestamp_start >= timestamp:
+            if window.timestamp_end >= timestamp:
                 if window.text:
                     text_parts.append(window.text)
                 window_ids.append(window.window_id)
