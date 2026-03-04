@@ -352,7 +352,7 @@ async def _handle_diarization_result(result: DiarizationResult):
         }
         speaker_count = len(centroids_data["speakers"])
         pca_time_ms = result.pca_processing_time_ms
-        logger.info(f"Got centroid data for {speaker_count} speakers, PCA took {pca_time_ms:.2f}ms")
+        logger.debug(f"Got centroid data for {speaker_count} speakers, PCA took {pca_time_ms:.2f}ms")
         
         # Send centroid data to client (always send, even if empty, to maintain consistency)
         await _send_speaker_embedding_data(centroids_data, pca_time_ms)
@@ -377,7 +377,7 @@ async def _send_speaker_embedding_data(centroids_data: dict, pca_time_ms: float)
     
     try:
         await PROCESSOR.send_data(json.dumps(payload))
-        logger.info(f"Sent speaker_embedding_data with {len(centroids_data['speakers'])} speakers, pca_time={pca_time_ms:.2f}ms")
+        logger.debug(f"Sent speaker_embedding_data with {len(centroids_data['speakers'])} speakers, pca_time={pca_time_ms:.2f}ms")
     except Exception as e:
         logger.warning(f"Failed to send speaker_embedding_data: {e}")
 
@@ -584,7 +584,7 @@ async def _process_diarization_async(window_samples: np.ndarray, window_start_ts
     temp_path = _write_wav(window_samples, sr)
     diarization_request_id = str(uuid.uuid4())
     
-    logger.info(f"Diarization: preparing window [{window_start_ts:.3f}s - {window_end_ts:.3f}s], temp_path={temp_path}")
+    logger.debug(f"Diarization: preparing window [{window_start_ts:.3f}s - {window_end_ts:.3f}s], temp_path={temp_path}")
     
     try:
         # Auto-restart diarization process if it's not running
@@ -613,7 +613,7 @@ async def _process_diarization_async(window_samples: np.ndarray, window_start_ts
         # Send to diarization process
         logger.debug(f"Diarization: calling process_audio with request_id={diarization_request_id}")
         await STATE.diarization_client.process_audio(temp_path, diarization_request_id)
-        logger.info(f"Diarization: successfully sent window [{window_start_ts:.3f}s - {window_end_ts:.3f}s] for processing")
+        logger.debug(f"Diarization: successfully sent window [{window_start_ts:.3f}s - {window_end_ts:.3f}s] for processing")
         
     except Exception as e:
         logger.error(f"Diarization error in _process_diarization_async: {type(e).__name__}: {e}")
@@ -1054,6 +1054,9 @@ if __name__ == "__main__":
     # Set aiohttp logger to WARNING level (not configurable)
     logging.getLogger("aiohttp").setLevel(logging.WARNING)
 
+    # Set faster_whisper logger to WARNING level (not configurable)
+    logging.getLogger("faster_whisper").setLevel(logging.WARNING)
+    
     #loop = asyncio.get_event_loop()
     #loop.run_until_complete(load_model())
 

@@ -330,7 +330,7 @@ class SpeakerMemory:
         
         # DEBUG: Log speaker state before matching
         total_samples = sum(self.counts.values())
-        logger.info(f"Matching: {len(self.centroids)} speakers, total_samples={total_samples}, min_samples_for_match={self.min_samples_for_match}, effective_min={effective_min}")
+        logger.debug(f"Matching: {len(self.centroids)} speakers, total_samples={total_samples}, min_samples_for_match={self.min_samples_for_match}, effective_min={effective_min}")
         now = time.time()
         for speaker_id, centroid in self.centroids.items():
             # Skip speakers with too few samples (unstable centroids)
@@ -391,7 +391,7 @@ class SpeakerMemory:
             )
             
             # Log calibrated confidence for debugging
-            logger.info(f"Calibrated confidence: {calibrated_confidence:.3f}, probs: {speaker_probs}")
+            logger.debug(f"Calibrated confidence: {calibrated_confidence:.3f}, probs: {speaker_probs}")
             
             # Check for low confidence match using calibrated confidence
             # Lower threshold (0.65) since we now have calibrated scores
@@ -411,7 +411,7 @@ class SpeakerMemory:
             
             # Periodic consolidation: every 5 identifications or if speaker count exceeds 10
             if (self._stats["identifications"] % 5 == 0) or len(self.centroids) > 10:
-                merges = self.auto_merge_similar_speakers(similarity_threshold=0.82)
+                merges = self.auto_merge_similar_speakers(similarity_threshold=0.85)
                 if merges:
                     logger.info(f"Periodic consolidation: {merges} merges")
             
@@ -669,21 +669,21 @@ class SpeakerMemory:
     
     def auto_merge_similar_speakers(
         self,
-        similarity_threshold: float = 0.76,
+        similarity_threshold: float = 0.85,
         max_merges: int = 5
     ) -> int:
         """
         Automatically merge speakers using hierarchical approach.
         
         - Immediate merge: similarity >= 0.92 (very likely same speaker)
-        - Standard merge: similarity >= threshold (0.76 default)
+        - Standard merge: similarity >= threshold (0.85 default)
         
         This helps consolidate speakers that were incorrectly split during
         diarization. Uses a greedy approach: merge the most similar pair,
         update centroids, then repeat until no more pairs exceed threshold.
         
         Args:
-            similarity_threshold: Pairs above this threshold will be merged (default: 0.76)
+            similarity_threshold: Pairs above this threshold will be merged (default: 0.85)
             max_merges: Maximum number of merges to perform in one call
             
         Returns:
