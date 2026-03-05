@@ -1543,14 +1543,13 @@ class TestDiarizationV2Improvements:
         memory.centroids["speaker_0"] = embedding
         memory.counts["speaker_0"] = 5
 
-        # With 1 speaker the smooth curve gives a small reduction; still near base
+        # With 1 speaker the smooth curve gives a small increase; still near base
         t = memory._get_dynamic_threshold()
-        assert t <= 0.78, "Threshold should not exceed base"
-        assert t > 0.75, "With 1 speaker threshold should remain close to base"
+        assert t >= 0.78, "Threshold should not go below base"
+        assert t < 0.81, "With 1 speaker threshold should remain close to base"
     
     def test_dynamic_threshold_moderate_speakers(self):
-        """Test that dynamic threshold lowers for moderate speaker count."""
-        # Use a high base (0.90) to give headroom to demonstrate the reduction.
+        """Test that dynamic threshold raises for moderate speaker count."""
         memory = SpeakerMemory(threshold=0.90)
 
         # Add 6 speakers directly (last_seen empty → N = len(centroids) = 6)
@@ -1561,13 +1560,12 @@ class TestDiarizationV2Improvements:
             memory.counts[f"speaker_{i}"] = 5
 
         t = memory._get_dynamic_threshold()
-        # Smooth curve at N=6: 0.90 - 0.20*(1-exp(-6/8)) ≈ 0.794
-        assert t < 0.90, "Threshold should decrease below base with 6 speakers"
-        assert t >= 0.62, "Threshold should not go below floor (0.62)"
+        # Smooth curve at N=6: 0.90 + 0.06*(1-exp(-6/8)) ≈ 0.932
+        assert t > 0.90, "Threshold should increase above base with 6 speakers"
+        assert t <= 0.96, "Threshold should not exceed base + max_increase (0.96)"
     
     def test_dynamic_threshold_many_speakers(self):
-        """Test that dynamic threshold lowers significantly for many speakers."""
-        # Use a high base (0.90) to give headroom to demonstrate the reduction.
+        """Test that dynamic threshold raises significantly for many speakers."""
         memory = SpeakerMemory(threshold=0.90)
 
         # Add 10 speakers directly (last_seen empty → N = 10)
@@ -1579,20 +1577,19 @@ class TestDiarizationV2Improvements:
 
         t10 = memory._get_dynamic_threshold()
 
-        # Smooth curve at N=10: 0.90 - 0.20*(1-exp(-10/8)) ≈ 0.757, floor=0.72
-        assert t10 < 0.90, "Threshold should decrease below base with 10 speakers"
-        assert t10 >= 0.72, "Threshold should not go below floor (0.72)"
+        # Smooth curve at N=10: 0.90 + 0.06*(1-exp(-10/8)) ≈ 0.943
+        assert t10 > 0.90, "Threshold should increase above base with 10 speakers"
+        assert t10 <= 0.96, "Threshold should not exceed base + max_increase (0.96)"
 
-        # Must be lower than at N=6 (monotonically decreasing, while both above floor)
+        # Must be higher than at N=6 (monotonically increasing)
         for i in range(10, 6, -1):
             del memory.centroids[f"speaker_{i-1}"]
             del memory.counts[f"speaker_{i-1}"]
         t6 = memory._get_dynamic_threshold()
-        assert t10 <= t6, "Threshold at N=10 should not be higher than at N=6"
+        assert t10 >= t6, "Threshold at N=10 should not be lower than at N=6"
     
     def test_dynamic_threshold_excessive_speakers(self):
-        """Test that dynamic threshold lowers for excessive speakers and hits the floor."""
-        # Use a high base (0.90) to show both reduction behavior and floor clamping.
+        """Test that dynamic threshold raises for excessive speakers toward ceiling."""
         memory = SpeakerMemory(threshold=0.90)
 
         # Add 15 speakers directly (last_seen empty → N = 15)
@@ -1603,9 +1600,9 @@ class TestDiarizationV2Improvements:
             memory.counts[f"speaker_{i}"] = 5
 
         t = memory._get_dynamic_threshold()
-        # Reduction at N=15: 0.90 - 0.20*(1-exp(-15/8)) ≈ 0.731, above floor 0.62
-        assert t < 0.90, "Threshold should decrease below base for 15 speakers"
-        assert t >= 0.62, "Threshold should not go below floor (0.62)"
+        # Increase at N=15: 0.90 + 0.06*(1-exp(-15/8)) ≈ 0.951, below ceiling 0.96
+        assert t > 0.90, "Threshold should increase above base for 15 speakers"
+        assert t <= 0.96, "Threshold should not exceed base + max_increase (0.96)"
         memory = SpeakerMemory(ema_alpha=0.5)
         
         # Create initial embedding
@@ -1713,9 +1710,9 @@ class TestDiarizationV2Improvements:
         """Test that SpeakerMemory defaults are applied correctly."""
         memory = SpeakerMemory()
 
-        assert memory.threshold == 0.72
+        assert memory.threshold == 0.68
         assert memory.min_samples_for_match == 5
-        assert memory.ema_alpha == 0.10
+        assert memory.ema_alpha == 0.05
         assert memory.active_window_seconds == 1200.0
     
     def test_cosine_similarity_handles_nan_inputs(self):

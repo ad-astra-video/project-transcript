@@ -221,11 +221,11 @@ class TestMarginBasedDecisions:
 
 
 class TestTemporalCoOccurrenceGuard:
-    """Tests for temporal co-occurrence merge guard."""
+    """Tests for chunk-based co-occurrence merge guard."""
 
     def test_co_occurrence_blocks_merge(self):
-        """Speakers seen within 2 seconds of each other should never be merged."""
-        memory = SpeakerMemory(threshold=0.81, min_samples_for_match=1)
+        """Speakers from the same chunk with different pyannote labels should be flagged as co-occurring."""
+        memory = SpeakerMemory(threshold=0.70, min_samples_for_match=1)
 
         # Create two speakers
         emb_a = np.random.randn(512).astype(np.float64)
@@ -233,23 +233,38 @@ class TestTemporalCoOccurrenceGuard:
         emb_b = np.random.randn(512).astype(np.float64)
         emb_b /= np.linalg.norm(emb_b)
 
-        memory.identify(emb_a)
-        memory.identify(emb_b)
+        memory.identify(emb_a, {"request_id": "chunk_1", "speaker_label": "SPEAKER_00"})
+        memory.identify(emb_b, {"request_id": "chunk_1", "speaker_label": "SPEAKER_01"})
 
-        # Record them as co-occurring
-        now = time.time()
-        memory._record_segment_time("speaker_0", now)
-        memory._record_segment_time("speaker_1", now + 0.5)
-
+        # They came from the same chunk with different labels → co-occurred
         assert memory._speakers_co_occurred("speaker_0", "speaker_1") is True
 
     def test_non_co_occurring_speakers_can_merge(self):
-        """Speakers that never co-occurred should not be blocked."""
-        memory = SpeakerMemory()
-        now = time.time()
-        memory._record_segment_time("speaker_0", now)
-        memory._record_segment_time("speaker_1", now + 100)  # 100 seconds apart
+        """Speakers from different chunks should not be flagged as co-occurring."""
+        memory = SpeakerMemory(threshold=0.70, min_samples_for_match=1)
 
+        emb_a = np.random.randn(512).astype(np.float64)
+        emb_a /= np.linalg.norm(emb_a)
+        emb_b = np.random.randn(512).astype(np.float64)
+        emb_b /= np.linalg.norm(emb_b)
+
+        memory.identify(emb_a, {"request_id": "chunk_1", "speaker_label": "SPEAKER_00"})
+        memory.identify(emb_b, {"request_id": "chunk_2", "speaker_label": "SPEAKER_00"})
+
+        # Different chunks → not co-occurring
+        assert memory._speakers_co_occurred("speaker_0", "speaker_1") is False
+
+    def test_same_label_same_chunk_not_co_occurring(self):
+        """Two SpeakerMemory IDs that map to the same pyannote label in a chunk
+        are NOT co-occurring (pyannote may have rightfully merged them)."""
+        memory = SpeakerMemory()
+        memory._segment_chunks["speaker_0"] = [("chunk_1", "SPEAKER_00")]
+        memory._segment_chunks["speaker_1"] = [("chunk_1", "SPEAKER_00")]
+        assert memory._speakers_co_occurred("speaker_0", "speaker_1") is False
+
+    def test_no_data_means_no_co_occurrence(self):
+        """Speakers with no chunk records should not co-occur."""
+        memory = SpeakerMemory()
         assert memory._speakers_co_occurred("speaker_0", "speaker_1") is False
 
 
@@ -289,14 +304,14 @@ class TestTemporalTransitionModel:
 class TestRaisedMergeThresholds:
     """Tests for elevated merge thresholds."""
 
-    def test_auto_merge_default_threshold_is_082(self):
-        """Default auto_merge threshold should be 0.82."""
+    def test_auto_merge_default_threshold_is_088(self):
+        """Default auto_merge threshold should be 0.88."""
         memory = SpeakerMemory()
         # Inspect the default parameter
         import inspect
         sig = inspect.signature(memory.auto_merge_similar_speakers)
         default = sig.parameters['similarity_threshold'].default
-        assert default == 0.82, f"Expected 0.82, got {default}"
+        assert default == 0.88, f"Expected 0.88, got {default}"
 
     def test_speakers_at_092_not_auto_merged(self):
         """Speakers with cosine similarity ~0.92 should NOT be auto-merged."""
@@ -311,7 +326,7 @@ class TestRaisedMergeThresholds:
                 emb = make_speaker_embedding(base, noise_scale=0.02, rng=rng)
                 memory.identify(emb)
 
-        # Try auto-merge with default threshold (0.82)
+        # Try auto-merge with default threshold (0.88)
         # Centroids with ~0.92 similarity should NOT merge
         n_before = len(memory.centroids)
         memory.auto_merge_similar_speakers()
@@ -337,10 +352,10 @@ class TestPrecisionAndThresholds:
         assert sim != round(sim, 2) or abs(sim - 1.0) > 0.001, \
             f"Similarity {sim} appears to be rounded"
 
-    def test_dynamic_threshold_floor_is_060(self):
-        """Dynamic threshold should not go below 0.60."""
-        memory = SpeakerMemory(threshold=0.72)
-        # Add many speakers to push threshold down
+    def test_dynamic_threshold_ceiling_is_base_plus_004(self):
+        """Dynamic threshold should not exceed base + 0.04 (ceiling = 0.72 for default base)."""
+        memory = SpeakerMemory(threshold=0.68)
+        # Add many speakers to push threshold up
         for i in range(50):
             sid = f"speaker_{i}"
             memory.centroids[sid] = np.random.randn(512)
@@ -348,7 +363,8 @@ class TestPrecisionAndThresholds:
             memory.last_seen[sid] = time.time()
 
         threshold = memory._get_dynamic_threshold()
-        assert threshold >= 0.60, f"Floor violated: threshold={threshold}"
+        assert threshold <= 0.72, f"Ceiling violated: threshold={threshold}"
+        assert threshold >= 0.68, f"Threshold below base: threshold={threshold}"
 
 
 class TestResetClearsNewState:
@@ -368,7 +384,7 @@ class TestResetClearsNewState:
         memory.reset()
         assert len(memory.prototypes) == 0
         assert len(memory._transitions) == 0
-        assert len(memory._segment_times) == 0
+        assert len(memory._segment_chunks) == 0
         assert memory._stats["margin_penalties_applied"] == 0
         assert memory._stats["margin_new_speaker_forced"] == 0
 
@@ -399,3 +415,85 @@ class TestMergePrototypeHandling:
         assert "speaker_0" in memory.prototypes
         # Merged prototypes should be at most MAX_PROTOTYPES
         assert len(memory.prototypes["speaker_0"]) <= memory.MAX_PROTOTYPES
+
+
+class TestPrototypeMergeGuard:
+    """Tests for the prototype-based merge guard."""
+
+    def test_guard_blocks_incompatible_speakers(self):
+        """Speakers with a vocal mode that has no counterpart in the other
+        speaker's pool should be blocked from merging."""
+        memory = SpeakerMemory(threshold=0.70, min_samples_for_match=1)
+        rng = np.random.default_rng(99)
+
+        # Speaker A: 2 quite different prototypes (e.g., normal + low timber)
+        base_a1 = rng.normal(0, 1, 512).astype(np.float64)
+        base_a1 /= np.linalg.norm(base_a1)
+        base_a2 = rng.normal(0, 1, 512).astype(np.float64)
+        base_a2 /= np.linalg.norm(base_a2)
+        memory.prototypes["speaker_0"] = [
+            (base_a1, 5, time.time()),
+            (base_a2, 3, time.time()),
+        ]
+
+        # Speaker B: 1 prototype that is close to base_a1 but far from base_a2
+        close_to_a1 = base_a1 + rng.normal(0, 0.05, 512)
+        close_to_a1 /= np.linalg.norm(close_to_a1)
+        memory.prototypes["speaker_1"] = [(close_to_a1, 4, time.time())]
+
+        # The min cross-prototype best match should be low because base_a2
+        # has no good counterpart in speaker_1's pool
+        cross_min = memory._min_cross_prototype_best_match("speaker_0", "speaker_1")
+        assert cross_min < memory.PROTOTYPE_MERGE_GUARD_THRESHOLD, \
+            f"Expected cross_min < {memory.PROTOTYPE_MERGE_GUARD_THRESHOLD}, got {cross_min:.3f}"
+
+    def test_guard_allows_compatible_speakers(self):
+        """Speakers whose prototypes all have counterparts should pass the guard."""
+        memory = SpeakerMemory()
+        rng = np.random.default_rng(77)
+
+        base = rng.normal(0, 1, 512).astype(np.float64)
+        base /= np.linalg.norm(base)
+
+        # Two speakers with very similar prototypes
+        p1 = base + rng.normal(0, 0.02, 512)
+        p1 /= np.linalg.norm(p1)
+        p2 = base + rng.normal(0, 0.02, 512)
+        p2 /= np.linalg.norm(p2)
+
+        memory.prototypes["speaker_0"] = [(p1, 5, time.time())]
+        memory.prototypes["speaker_1"] = [(p2, 5, time.time())]
+
+        cross_min = memory._min_cross_prototype_best_match("speaker_0", "speaker_1")
+        assert cross_min >= memory.PROTOTYPE_MERGE_GUARD_THRESHOLD, \
+            f"Expected cross_min >= {memory.PROTOTYPE_MERGE_GUARD_THRESHOLD}, got {cross_min:.3f}"
+
+    def test_guard_returns_1_when_no_prototypes(self):
+        """When either speaker has no prototypes, the guard should allow merge (return 1.0)."""
+        memory = SpeakerMemory()
+        assert memory._min_cross_prototype_best_match("speaker_0", "speaker_1") == 1.0
+
+
+class TestChunkCoOccurrenceIntegration:
+    """Integration tests verifying chunk-based co-occurrence works end-to-end."""
+
+    def test_identify_records_chunk_data(self):
+        """identify() should record chunk+label in _segment_chunks."""
+        memory = SpeakerMemory(threshold=0.70, min_samples_for_match=1)
+        emb = np.random.randn(512).astype(np.float64)
+        emb /= np.linalg.norm(emb)
+
+        memory.identify(emb, {"request_id": "req_001", "speaker_label": "SPEAKER_00"})
+
+        assert len(memory._segment_chunks.get("speaker_0", [])) == 1
+        assert memory._segment_chunks["speaker_0"][0] == ("req_001", "SPEAKER_00")
+
+    def test_identify_without_segment_info_no_crash(self):
+        """identify() without segment_info should still work (no chunk data recorded)."""
+        memory = SpeakerMemory(threshold=0.70, min_samples_for_match=1)
+        emb = np.random.randn(512).astype(np.float64)
+        emb /= np.linalg.norm(emb)
+
+        sid, score, _ = memory.identify(emb)
+        assert sid == "speaker_0"
+        assert len(memory._segment_chunks.get("speaker_0", [])) == 0

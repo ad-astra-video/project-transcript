@@ -113,12 +113,12 @@ class TestConfiguration:
     def test_default_threshold(self):
         """Test that SpeakerMemory uses the correct default threshold."""
         memory = SpeakerMemory()
-        assert memory.threshold == 0.72, f"Default threshold should be 0.72, got {memory.threshold}"
+        assert memory.threshold == 0.68, f"Default threshold should be 0.68, got {memory.threshold}"
     
     def test_default_ema_alpha(self):
         """Test that default EMA alpha is updated."""
         memory = SpeakerMemory()
-        assert memory.ema_alpha == 0.10, f"Default EMA alpha should be 0.10, got {memory.ema_alpha}"
+        assert memory.ema_alpha == 0.05, f"Default EMA alpha should be 0.05, got {memory.ema_alpha}"
     
     def test_default_min_samples(self):
         """Test that default min_samples_for_match is updated."""
@@ -128,7 +128,7 @@ class TestConfiguration:
     def test_default_recency_boost(self):
         """Test that default recency_boost is updated."""
         memory = SpeakerMemory()
-        assert memory.recency_boost == 0.03, f"Default recency_boost should be 0.03, got {memory.recency_boost}"
+        assert memory.recency_boost == 0.02, f"Default recency_boost should be 0.02, got {memory.recency_boost}"
 
 
 class TestDynamicThreshold:
@@ -145,13 +145,12 @@ class TestDynamicThreshold:
             memory.identify(emb)
 
         t = memory._get_dynamic_threshold()
-        # Smooth curve: threshold decreases with N but stays below base
-        assert t <= 0.72, "Threshold should not exceed base"
-        assert t >= 0.52, "Threshold should not go below floor"
+        # Smooth curve: threshold increases with N to prevent similar speakers merging
+        assert t >= 0.72, "Threshold should not go below base"
+        assert t <= 0.76, "Threshold should not exceed base + max_increase (0.04)"
     
     def test_dynamic_threshold_many_speakers(self):
         """Test dynamic threshold with many speakers."""
-        # High base so the reduction is visible above the floor.
         memory = SpeakerMemory(threshold=0.90)
         
         # Add many speakers
@@ -160,10 +159,10 @@ class TestDynamicThreshold:
             emb = emb / np.linalg.norm(emb)
             memory.identify(emb)
         
-        # Should return a threshold below the base (possibly clamped to floor)
+        # Should return a threshold above the base (capped at base + 0.04)
         threshold = memory._get_dynamic_threshold()
-        assert threshold < 0.90, f"Threshold should be lowered below base for many speakers, got {threshold}"
-        assert threshold >= 0.62, f"Threshold should not go below the floor (0.62), got {threshold}"
+        assert threshold > 0.90, f"Threshold should be raised above base for many speakers, got {threshold}"
+        assert threshold <= 0.94, f"Threshold should not exceed base + max_increase (0.94), got {threshold}"
 
 
 class TestEnhancedDiagnostics:

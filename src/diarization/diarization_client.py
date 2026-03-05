@@ -96,15 +96,19 @@ class SpeakerMemory:
     """
 
     # Maximum number of prototype embeddings per speaker
-    MAX_PROTOTYPES = 4
+    MAX_PROTOTYPES = 8
     # Cosine similarity threshold for assigning to an existing prototype vs creating new
-    PROTOTYPE_MATCH_THRESHOLD = 0.85
+    PROTOTYPE_MATCH_THRESHOLD = 0.78
     # When pairwise centroid similarity exceeds this, merge even if speakers
-    # co-occurred temporally.  Co-occurrence timestamps are wall-clock (processing
-    # time), not audio time, so segments from the *same* chunk will always appear
-    # co-occurring.  A centroid similarity this high means they are almost
-    # certainly the same person.
-    CO_OCCURRENCE_OVERRIDE_SIMILARITY = 0.85
+    # co-occurred in the same audio chunk.  Now that co-occurrence uses reliable
+    # chunk+label tracking (not wall-clock time), this override should only fire
+    # for near-certain same-speaker matches where stale chunk data might block.
+    CO_OCCURRENCE_OVERRIDE_SIMILARITY = 0.92
+    # Minimum "best-match" across prototype pools for a merge to be allowed.
+    # For each prototype of speaker A, find its best match in speaker B's pool;
+    # if the *minimum* of these best-matches is below this threshold, at least
+    # one vocal mode of A has no counterpart in B → block the merge.
+    PROTOTYPE_MERGE_GUARD_THRESHOLD = 0.65
     # Minimum margin between top-2 candidates before margin penalty kicks in
     MIN_MARGIN = 0.02
     # Margin penalty multiplier (kept mild to avoid over-fragmenting)
@@ -120,12 +124,12 @@ class SpeakerMemory:
     
     def __init__(
         self,
-        threshold: float = 0.72,
-        recency_boost: float = 0.03,
+        threshold: float = 0.68,
+        recency_boost: float = 0.02,
         history_size: int = 20,
         min_samples_for_match: int = 5,
         min_segment_duration: float = 0.5,
-        ema_alpha: float = 0.10,
+        ema_alpha: float = 0.05,
         active_window_seconds: float = 1200.0,
         embedding_validator: Optional[EmbeddingQualityValidator] = None,
         on_invalid_embedding: Optional[Callable[[np.ndarray, str, Optional[dict]], None]] = None,
@@ -184,8 +188,11 @@ class SpeakerMemory:
         # Temporal transition model: (speaker_a, speaker_b) -> count
         self._transitions: Dict[Tuple[str, str], int] = {}
         
-        # Segment timing for co-occurrence checks
-        self._segment_times: Dict[str, List[float]] = {}  # speaker_id -> [timestamp, ...]
+        # Segment chunk/label tracking for co-occurrence checks.
+        # Stores (chunk_id, pyannote_label) tuples so we know when two
+        # SpeakerMemory IDs originated from different pyannote clusters in
+        # the *same* audio chunk — meaning they are definitively different people.
+        self._segment_chunks: Dict[str, List[Tuple[str, str]]] = {}  # speaker_id -> [(chunk_id, label), ...]
         
         # Debugging
         self._match_log: List[dict] = []
@@ -213,19 +220,24 @@ class SpeakerMemory:
     
     def _get_dynamic_threshold(self) -> float:
         """
-        Lower threshold smoothly as active speaker count grows to reduce over-segmentation.
+        Raise threshold smoothly as active speaker count grows to prevent
+        similar speakers from collapsing into each other.
 
-        Uses exponential decay so the threshold never cliffs at arbitrary step boundaries.
-        Formula: threshold = base - max_reduction * (1 - exp(-N / lambda))
-          - At N=0:  threshold ≈ base (0.72)
-          - At N=4:  threshold ≈ 0.67
-          - At N=8:  threshold ≈ 0.64
-          - At N=20: threshold ≈ 0.61
-          - At N=∞:  threshold → base - 0.12 = 0.60
-          - Hard floor: 0.60
+        More active speakers → higher chance of a close-but-wrong match →
+        require stricter similarity to assign to an existing speaker.
 
-        Co-occurrence guards (not thresholds) are the primary mechanism for
-        keeping truly different speakers apart.
+        Uses exponential saturation so the threshold never cliffs at arbitrary
+        step boundaries.
+        Formula: threshold = base + max_increase * (1 - exp(-N / lambda))
+          - At N=0:  threshold = base (0.68)
+          - At N=4:  threshold ≈ 0.694
+          - At N=8:  threshold ≈ 0.707
+          - At N=20: threshold ≈ 0.717
+          - At N=∞:  threshold → base + 0.04 = 0.72
+          - Hard ceiling: base + max_increase
+
+        Co-occurrence guards and prototype merge guards are the primary
+        mechanism for keeping truly different speakers apart.
         """
         # Count speakers seen within 2τ as "effectively active" for threshold scaling.
         # Speakers outside this window still compete but with heavily decayed scores.
@@ -236,10 +248,10 @@ class SpeakerMemory:
             if now - self.last_seen.get(sid, now) <= 2 * tau
         ) if self.last_seen else len(self.centroids)
         base = self.threshold
-        max_reduction = 0.12
-        lam = 8.0  # controls how quickly threshold drops
-        threshold = base - max_reduction * (1.0 - float(np.exp(-n / lam)))
-        return max(threshold, 0.60)
+        max_increase = 0.04
+        lam = 8.0  # controls how quickly threshold rises
+        threshold = base + max_increase * (1.0 - float(np.exp(-n / lam)))
+        return min(threshold, base + max_increase)
     
     def _cosine_similarity(self, a: np.ndarray, b: np.ndarray) -> float:
         """
@@ -332,6 +344,30 @@ class SpeakerMemory:
             return self._cosine_similarity(embedding, centroid)
         return -1.0
 
+    def _min_cross_prototype_best_match(self, speaker_a: str, speaker_b: str) -> float:
+        """Return the minimum "best-match" when comparing prototype pools.
+
+        For each prototype of *speaker_a*, find its highest cosine similarity
+        to any prototype of *speaker_b*.  Return the **minimum** of these
+        best-matches.
+
+        A low value means at least one vocal mode of speaker_a has no
+        counterpart in speaker_b — strong evidence they are different people.
+        If either speaker has no prototypes, falls back to centroid comparison
+        (returning 1.0 so the guard never blocks for lack of data).
+        """
+        protos_a = self.prototypes.get(speaker_a, [])
+        protos_b = self.prototypes.get(speaker_b, [])
+        if not protos_a or not protos_b:
+            return 1.0  # no prototype data — do not block merge
+
+        min_best = 1.0
+        for emb_a, _, _ in protos_a:
+            best = max(self._cosine_similarity(emb_a, emb_b) for emb_b, _, _ in protos_b)
+            if best < min_best:
+                min_best = best
+        return min_best
+
     def _compute_margin_penalty(self, best_score: float, second_best_score: float) -> float:
         """
         Penalise match score when the gap between top-2 candidates is too small.
@@ -371,29 +407,51 @@ class SpeakerMemory:
             key = (from_speaker, to_speaker)
             self._transitions[key] = self._transitions.get(key, 0) + 1
 
-    def _record_segment_time(self, speaker_id: str, timestamp: float):
-        """Record the timestamp of a segment for co-occurrence checks."""
-        if speaker_id not in self._segment_times:
-            self._segment_times[speaker_id] = []
-        times = self._segment_times[speaker_id]
-        times.append(timestamp)
-        # Keep only the last 50 timestamps per speaker to bound memory
-        if len(times) > 50:
-            self._segment_times[speaker_id] = times[-50:]
+    def _record_segment_time(self, speaker_id: str, segment_info: Optional[dict] = None):
+        """Record the chunk+label of a segment for co-occurrence checks.
 
-    def _speakers_co_occurred(self, speaker_a: str, speaker_b: str, window: float = 2.0) -> bool:
+        Uses the *request_id* (chunk identifier) and *speaker_label* (pyannote
+        per-chunk cluster label) from *segment_info*.  When two SpeakerMemory
+        IDs share a chunk_id but have different pyannote labels, pyannote
+        explicitly decided they are different speakers within the same audio —
+        the strongest evidence that they should not be merged.
         """
-        Return True if speaker_a and speaker_b have both been seen within
-        *window* seconds of each other.  Used as a merge guard — if two
-        speakers co-occur temporally they are by definition different people.
+        if segment_info is None:
+            return
+        chunk_id = segment_info.get("request_id")
+        label = segment_info.get("speaker_label")
+        if chunk_id is None or label is None:
+            return
+        entry = (str(chunk_id), str(label))
+        if speaker_id not in self._segment_chunks:
+            self._segment_chunks[speaker_id] = []
+        entries = self._segment_chunks[speaker_id]
+        entries.append(entry)
+        # Keep only the last 50 entries per speaker to bound memory
+        if len(entries) > 50:
+            self._segment_chunks[speaker_id] = entries[-50:]
+
+    def _speakers_co_occurred(self, speaker_a: str, speaker_b: str) -> bool:
+        """Return True if speaker_a and speaker_b were assigned different
+        pyannote labels within the *same* audio chunk.
+
+        This is a reliable co-occurrence signal: pyannote explicitly separated
+        them in the same audio, so they are by definition different people.
+        Unlike the previous wall-clock approach, this is independent of
+        processing speed and chunk ordering.
         """
-        times_a = self._segment_times.get(speaker_a, [])
-        times_b = self._segment_times.get(speaker_b, [])
-        if not times_a or not times_b:
+        entries_a = self._segment_chunks.get(speaker_a, [])
+        entries_b = self._segment_chunks.get(speaker_b, [])
+        if not entries_a or not entries_b:
             return False
-        for ta in times_a:
-            for tb in times_b:
-                if abs(ta - tb) <= window:
+        # Build a mapping from chunk_id → set of labels for speaker_a
+        chunks_a: Dict[str, set] = {}
+        for cid, lbl in entries_a:
+            chunks_a.setdefault(cid, set()).add(lbl)
+        for cid, lbl in entries_b:
+            if cid in chunks_a:
+                # Same chunk — did they have *different* pyannote labels?
+                if lbl not in chunks_a[cid]:
                     return True
         return False
 
@@ -442,7 +500,10 @@ class SpeakerMemory:
 
         if len(self.centroids) == 0:
             # First speaker
-            return self._create_speaker(embedding, segment_info, confidence=1.0)
+            speaker_id, confidence, alt = self._create_speaker(embedding, segment_info, confidence=1.0)
+            self._record_segment_time(speaker_id, segment_info)
+            self.last_speaker = speaker_id
+            return speaker_id, confidence, alt
 
         # ------- Compare against all known speakers (multi-prototype) -------
         best_id = None
@@ -565,13 +626,13 @@ class SpeakerMemory:
             # Update speaker prototypes & centroid
             self._update_speaker(best_id, embedding)
             self._record_transition(self.last_speaker, best_id)
-            self._record_segment_time(best_id, now)
+            self._record_segment_time(best_id, segment_info)
             self.last_speaker = best_id
             self.history.append(best_id)
 
             # Periodic consolidation: every 5 identifications or if speaker count exceeds 10.
             if (self._stats["identifications"] % 5 == 0) or len(self.centroids) > 10:
-                merges = self.auto_merge_similar_speakers(similarity_threshold=0.82)
+                merges = self.auto_merge_similar_speakers(similarity_threshold=0.88)
                 if merges:
                     logger.info(f"Periodic consolidation: {merges} merges")
 
@@ -581,7 +642,7 @@ class SpeakerMemory:
             speaker_id, confidence, _ = self._create_speaker(embedding, segment_info, confidence=1.0)
 
             self._record_transition(self.last_speaker, speaker_id)
-            self._record_segment_time(speaker_id, now)
+            self._record_segment_time(speaker_id, segment_info)
 
             # Proactive merge: check if new speaker should be merged immediately
             merge_result = self._check_and_merge_after_creation(speaker_id, embedding)
@@ -674,10 +735,10 @@ class SpeakerMemory:
     def _check_and_merge_after_creation(self, new_speaker_id: str, new_embedding: np.ndarray) -> Optional[str]:
         """Check if new speaker should be merged immediately.
 
-        Guarded by temporal co-occurrence, with a high-similarity override.
-        Co-occurrence timestamps are wall-clock time, so speakers from the same
-        audio chunk always appear co-occurring — the override prevents that
-        artefact from blocking valid merges.
+        Guarded by chunk-based co-occurrence and prototype merge guard.
+        The co-occurrence check uses chunk+label tracking (reliable), and
+        the prototype guard prevents merging speakers with incompatible
+        vocal mode distributions.
         """
         for existing_id, centroid in list(self.centroids.items()):
             if existing_id == new_speaker_id:
@@ -687,20 +748,25 @@ class SpeakerMemory:
                 continue
             sim = self._cosine_similarity(new_embedding, centroid)
 
-            # High-similarity override: if centroids are nearly identical,
-            # merge regardless of co-occurrence (processing-time artefact).
+            # High-similarity override: nearly identical centroids → merge
             if sim >= self.CO_OCCURRENCE_OVERRIDE_SIMILARITY:
                 self._merge_speakers_internal(existing_id, new_speaker_id)
                 logger.info(f"Immediate merge (override): {new_speaker_id} → {existing_id} (sim={sim:.3f})")
                 return existing_id
 
-            # Otherwise honour the co-occurrence guard
+            # Co-occurrence guard: pyannote separated them in the same chunk
             if self._speakers_co_occurred(existing_id, new_speaker_id):
                 logger.debug(f"Co-occurrence guard: {new_speaker_id} and {existing_id} co-occurred, skipping merge")
                 continue
 
-            # Merge at a lower threshold when co-occurrence is clear
-            if sim >= 0.80:
+            # Prototype merge guard: at least one vocal mode has no counterpart
+            cross_min = self._min_cross_prototype_best_match(existing_id, new_speaker_id)
+            if cross_min < self.PROTOTYPE_MERGE_GUARD_THRESHOLD:
+                logger.debug(f"Prototype guard: {new_speaker_id} and {existing_id} cross_min={cross_min:.3f} "
+                             f"< {self.PROTOTYPE_MERGE_GUARD_THRESHOLD}, skipping merge")
+                continue
+
+            if sim >= 0.88:
                 self._merge_speakers_internal(existing_id, new_speaker_id)
                 logger.info(f"Immediate merge: {new_speaker_id} → {existing_id} (sim={sim:.3f})")
                 return existing_id
@@ -884,21 +950,22 @@ class SpeakerMemory:
     
     def auto_merge_similar_speakers(
         self,
-        similarity_threshold: float = 0.82,
+        similarity_threshold: float = 0.88,
         max_merges: int = 5
     ) -> int:
         """
         Automatically merge speakers using hierarchical approach.
         
-        - Immediate merge: similarity >= 0.90 (near-certain same speaker)
-        - Standard merge: similarity >= threshold (0.82 default)
+        - Immediate merge: similarity >= 0.92 (near-certain same speaker)
+        - Standard merge: similarity >= threshold (0.88 default)
         
-        Temporal co-occurrence guards prevent merging speakers that have been
-        seen within 2 seconds of each other — this is the primary protection
-        against collapsing truly different speakers.
+        Guards:
+          1. Chunk-based co-occurrence: pyannote separated them → block
+          2. Prototype merge guard: incompatible vocal modes → block
+          3. CO_OCCURRENCE_OVERRIDE_SIMILARITY (0.92): bypass both guards
         
         Args:
-            similarity_threshold: Pairs above this threshold will be merged (default: 0.82)
+            similarity_threshold: Pairs above this threshold will be merged (default: 0.88)
             max_merges: Maximum number of merges to perform in one call
             
         Returns:
@@ -906,8 +973,8 @@ class SpeakerMemory:
         """
         merges_performed = 0
         
-        # Phase 1: Immediate merges for near-certain same-speaker (>= 0.90)
-        immediate_threshold = 0.90
+        # Phase 1: Immediate merges for near-certain same-speaker (>= 0.92)
+        immediate_threshold = 0.92
         for _ in range(max_merges):
             similar_pairs = self.find_similar_speakers(immediate_threshold)
             
@@ -917,16 +984,23 @@ class SpeakerMemory:
             # Filter out co-occurring pairs (with high-similarity override)
             merge_pair = None
             for speaker_a, speaker_b, similarity in similar_pairs:
-                # High-similarity override: wall-clock co-occurrence is unreliable
+                # High-similarity override: bypass guards
                 if similarity >= self.CO_OCCURRENCE_OVERRIDE_SIMILARITY:
                     merge_pair = (speaker_a, speaker_b, similarity)
                     break
-                if not self._speakers_co_occurred(speaker_a, speaker_b):
-                    merge_pair = (speaker_a, speaker_b, similarity)
-                    break
-                else:
+                # Co-occurrence guard
+                if self._speakers_co_occurred(speaker_a, speaker_b):
                     logger.info(f"Co-occurrence guard blocked merge: {speaker_a} <-> {speaker_b} "
                                f"(sim={similarity:.3f})")
+                    continue
+                # Prototype merge guard
+                cross_min = self._min_cross_prototype_best_match(speaker_a, speaker_b)
+                if cross_min < self.PROTOTYPE_MERGE_GUARD_THRESHOLD:
+                    logger.info(f"Prototype guard blocked merge: {speaker_a} <-> {speaker_b} "
+                               f"(sim={similarity:.3f}, cross_min={cross_min:.3f})")
+                    continue
+                merge_pair = (speaker_a, speaker_b, similarity)
+                break
             
             if merge_pair is None:
                 break
@@ -953,16 +1027,23 @@ class SpeakerMemory:
             # Filter out co-occurring pairs (with high-similarity override)
             merge_pair = None
             for speaker_a, speaker_b, similarity in similar_pairs:
-                # High-similarity override: wall-clock co-occurrence is unreliable
+                # High-similarity override: bypass guards
                 if similarity >= self.CO_OCCURRENCE_OVERRIDE_SIMILARITY:
                     merge_pair = (speaker_a, speaker_b, similarity)
                     break
-                if not self._speakers_co_occurred(speaker_a, speaker_b):
-                    merge_pair = (speaker_a, speaker_b, similarity)
-                    break
-                else:
+                # Co-occurrence guard
+                if self._speakers_co_occurred(speaker_a, speaker_b):
                     logger.info(f"Co-occurrence guard blocked merge: {speaker_a} <-> {speaker_b} "
                                f"(sim={similarity:.3f})")
+                    continue
+                # Prototype merge guard
+                cross_min = self._min_cross_prototype_best_match(speaker_a, speaker_b)
+                if cross_min < self.PROTOTYPE_MERGE_GUARD_THRESHOLD:
+                    logger.info(f"Prototype guard blocked merge: {speaker_a} <-> {speaker_b} "
+                               f"(sim={similarity:.3f}, cross_min={cross_min:.3f})")
+                    continue
+                merge_pair = (speaker_a, speaker_b, similarity)
+                break
             
             if merge_pair is None:
                 break
@@ -1043,12 +1124,12 @@ class SpeakerMemory:
             self.last_seen.get(speaker_b, 0)
         )
 
-        # ---- Merge segment times ----
-        times_a = self._segment_times.get(speaker_a, [])
-        times_b = self._segment_times.get(speaker_b, [])
-        merged_times = sorted(times_a + times_b)[-50:]
-        self._segment_times[speaker_a] = merged_times
-        self._segment_times.pop(speaker_b, None)
+        # ---- Merge segment chunk records ----
+        entries_a = self._segment_chunks.get(speaker_a, [])
+        entries_b = self._segment_chunks.get(speaker_b, [])
+        merged_entries = (entries_a + entries_b)[-50:]
+        self._segment_chunks[speaker_a] = merged_entries
+        self._segment_chunks.pop(speaker_b, None)
 
         # ---- Merge transition counts ----
         # Remap all transitions from/to speaker_b → speaker_a
@@ -1100,7 +1181,7 @@ class SpeakerMemory:
             del self.counts[speaker_id]
             self.last_seen.pop(speaker_id, None)
             self.prototypes.pop(speaker_id, None)
-            self._segment_times.pop(speaker_id, None)
+            self._segment_chunks.pop(speaker_id, None)
             # Also remove from history
             self.history = deque(
                 [s for s in self.history if s != speaker_id],
@@ -1124,7 +1205,7 @@ class SpeakerMemory:
         self._match_log.clear()
         self._recent_merges_log.clear()
         self._transitions.clear()
-        self._segment_times.clear()
+        self._segment_chunks.clear()
         
         # Reset statistics
         self._stats = {
@@ -1284,13 +1365,13 @@ def diarization_worker(hf_token: str, request_queue, result_queue):
     # Minimum segment duration to process (skip very short segments)
     MIN_SEGMENT_DURATION = 0.5  # seconds
     
-    # Initialize speaker memory with validation (using v2 defaults)
+    # Initialize speaker memory with validation
     # min_samples_for_match=1 allows immediate matching after first sample;
-    # the merge guards (_check_and_merge_after_creation count<5, auto_merge count<min_samples)
+    # the merge guards (_check_and_merge_after_creation, auto_merge, prototype guard)
     # independently enforce higher observation counts before any merge is attempted.
-    # ema_alpha=0.08 (was 0.15) slows prototype drift so profiles of similar-sounding
+    # ema_alpha=0.05 slows prototype drift so profiles of similar-sounding
     # speakers stay distinct over time rather than converging.
-    speakers = SpeakerMemory(threshold=0.72, min_samples_for_match=1, ema_alpha=0.10, active_window_seconds=1200.0)
+    speakers = SpeakerMemory(threshold=0.68, min_samples_for_match=1, ema_alpha=0.05, active_window_seconds=1200.0)
 
     shutdown_received = False
     while True:
@@ -1451,12 +1532,12 @@ class DiarizationClient:
     def __init__(
         self,
         hf_token: str = "",
-        threshold: float = 0.72,
-        recency_boost: float = 0.03,
+        threshold: float = 0.68,
+        recency_boost: float = 0.02,
         history_size: int = 20,
         min_samples_for_match: int = 5,
         min_segment_duration: float = 0.5,
-        ema_alpha: float = 0.10,
+        ema_alpha: float = 0.05,
         active_window_seconds: float = 1200.0,
         embedding_validator: Optional[EmbeddingQualityValidator] = None,
         on_invalid_embedding: Optional[Callable[[np.ndarray, str, Optional[dict]], None]] = None,
