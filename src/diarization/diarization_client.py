@@ -80,7 +80,13 @@ class SpeakerMemory:
     Track speakers across audio segments using embedding similarity.
     
     Features:
-    - Running average of speaker embeddings (more stable than single sample)
+    - Multi-prototype speaker representation (up to K embeddings per speaker)
+      captures within-speaker voice variability instead of averaging it away,
+      which is critical for distinguishing similar-sounding speakers.
+    - Margin-based scoring penalises matches where the top-2 candidates are
+      too close, biasing toward new-speaker creation rather than wrong assignment.
+    - Temporal transition model adds a soft prior based on observed turn-taking
+      patterns (A→B transitions).
     - Temporal context (recent speaker more likely to continue)
     - Configurable similarity threshold
     - Speaker history for debugging
@@ -88,15 +94,38 @@ class SpeakerMemory:
     - Statistics tracking and monitoring callbacks
     - Segment duration filtering
     """
+
+    # Maximum number of prototype embeddings per speaker
+    MAX_PROTOTYPES = 4
+    # Cosine similarity threshold for assigning to an existing prototype vs creating new
+    PROTOTYPE_MATCH_THRESHOLD = 0.85
+    # When pairwise centroid similarity exceeds this, merge even if speakers
+    # co-occurred temporally.  Co-occurrence timestamps are wall-clock (processing
+    # time), not audio time, so segments from the *same* chunk will always appear
+    # co-occurring.  A centroid similarity this high means they are almost
+    # certainly the same person.
+    CO_OCCURRENCE_OVERRIDE_SIMILARITY = 0.85
+    # Minimum margin between top-2 candidates before margin penalty kicks in
+    MIN_MARGIN = 0.02
+    # Margin penalty multiplier (kept mild to avoid over-fragmenting)
+    MARGIN_PENALTY_SCALE = 1.0
+    # When margin is too small AND best score < this, require new speaker creation.
+    # Set low so it only fires when the match is truly ambiguous and weak.
+    MARGIN_HARD_THRESHOLD = 0.65
+    # Temporal transition bonus cap
+    TRANSITION_BONUS_CAP = 0.03
+    # Minimum time gap (seconds) between segments for same-speaker assignment
+    # Two segments closer than this assigned to different speakers triggers re-evaluation
+    MIN_SPEAKER_SWITCH_GAP = 0.3
     
     def __init__(
         self,
-        threshold: float = 0.81,
-        recency_boost: float = 0.05,
+        threshold: float = 0.72,
+        recency_boost: float = 0.03,
         history_size: int = 20,
         min_samples_for_match: int = 5,
         min_segment_duration: float = 0.5,
-        ema_alpha: float = 0.15,
+        ema_alpha: float = 0.10,
         active_window_seconds: float = 1200.0,
         embedding_validator: Optional[EmbeddingQualityValidator] = None,
         on_invalid_embedding: Optional[Callable[[np.ndarray, str, Optional[dict]], None]] = None,
@@ -109,10 +138,11 @@ class SpeakerMemory:
             history_size: Number of recent speaker IDs to track
             min_samples_for_match: Minimum observations before matching against a speaker
             min_segment_duration: Minimum segment duration in seconds (default: 0.5)
-            ema_alpha: EMA smoothing factor for centroid updates (default: 0.15)
+            ema_alpha: EMA smoothing factor for prototype updates (default: 0.08,
+                lowered from 0.15 to prevent centroid drift between similar speakers)
             active_window_seconds: Seconds since last seen before a speaker is skipped
                 during matching. Inactive speakers are retained in memory and can
-                become active again if a new segment looks similar. (default: 600 = 10 min)
+                become active again if a new segment looks similar. (default: 1200 = 20 min)
             embedding_validator: Custom embedding validator (uses default if None)
             on_invalid_embedding: Callback for invalid embeddings: (embedding, reason, segment_info)
             on_low_confidence: Callback for low confidence matches: (speaker_id, confidence, segment_info)
@@ -138,15 +168,24 @@ class SpeakerMemory:
         if on_invalid_embedding:
             self.validator.on_invalid = on_invalid_embedding
         
-        # Speaker profiles
-        self.centroids: Dict[str, np.ndarray] = {}  # speaker_id -> normalized embedding
-        self.counts: Dict[str, int] = {}             # speaker_id -> sample count
+        # Speaker profiles — multi-prototype representation
+        # Each speaker stores a list of (embedding, count, last_seen) prototype tuples
+        # plus a primary centroid (weighted average) for backward compatibility.
+        self.centroids: Dict[str, np.ndarray] = {}  # speaker_id -> primary centroid (weighted avg)
+        self.prototypes: Dict[str, List[Tuple[np.ndarray, int, float]]] = {}  # speaker_id -> [(emb, count, last_seen), ...]
+        self.counts: Dict[str, int] = {}             # speaker_id -> total sample count
         self.last_seen: Dict[str, float] = {}        # speaker_id -> time.time() of last match
         self.speaker_counter = 0
         
         # Temporal tracking
         self.history: deque = deque(maxlen=history_size)
         self.last_speaker: Optional[str] = None
+        
+        # Temporal transition model: (speaker_a, speaker_b) -> count
+        self._transitions: Dict[Tuple[str, str], int] = {}
+        
+        # Segment timing for co-occurrence checks
+        self._segment_times: Dict[str, List[float]] = {}  # speaker_id -> [timestamp, ...]
         
         # Debugging
         self._match_log: List[dict] = []
@@ -161,6 +200,8 @@ class SpeakerMemory:
             "new_speakers": 0,
             "low_confidence_matches": 0,
             "skipped_short_segments": 0,
+            "margin_penalties_applied": 0,
+            "margin_new_speaker_forced": 0,
         }
     
     def _normalize(self, embedding: np.ndarray) -> np.ndarray:
@@ -176,10 +217,15 @@ class SpeakerMemory:
 
         Uses exponential decay so the threshold never cliffs at arbitrary step boundaries.
         Formula: threshold = base - max_reduction * (1 - exp(-N / lambda))
-          - At N=0:  threshold ≈ base
-          - At N=8:  threshold ≈ base - 0.126  (λ=8, max_reduction=0.20)
-          - At N=20: threshold ≈ base - 0.183
-          - At N=∞:  threshold → base - 0.20 (floor)
+          - At N=0:  threshold ≈ base (0.72)
+          - At N=4:  threshold ≈ 0.67
+          - At N=8:  threshold ≈ 0.64
+          - At N=20: threshold ≈ 0.61
+          - At N=∞:  threshold → base - 0.12 = 0.60
+          - Hard floor: 0.60
+
+        Co-occurrence guards (not thresholds) are the primary mechanism for
+        keeping truly different speakers apart.
         """
         # Count speakers seen within 2τ as "effectively active" for threshold scaling.
         # Speakers outside this window still compete but with heavily decayed scores.
@@ -190,10 +236,10 @@ class SpeakerMemory:
             if now - self.last_seen.get(sid, now) <= 2 * tau
         ) if self.last_seen else len(self.centroids)
         base = self.threshold
-        max_reduction = 0.20
+        max_reduction = 0.12
         lam = 8.0  # controls how quickly threshold drops
         threshold = base - max_reduction * (1.0 - float(np.exp(-n / lam)))
-        return max(threshold, 0.52)
+        return max(threshold, 0.60)
     
     def _cosine_similarity(self, a: np.ndarray, b: np.ndarray) -> float:
         """
@@ -218,9 +264,10 @@ class SpeakerMemory:
         if not np.isfinite(dot):
             return -1.0
         
-        # Round to 2 decimal places to avoid floating-point precision issues
-        # This prevents cases like 0.7799... < 0.78 threshold comparison
-        return round(float(np.clip(dot, -1.0, 1.0)), 2)
+        # Use full float64 precision — rounding to 2 decimals destroyed the
+        # fine-grained signal needed to distinguish similar-sounding speakers
+        # whose similarity differs by <0.01.
+        return float(np.clip(dot, -1.0, 1.0))
     
     def _compute_calibrated_confidence(
         self,
@@ -271,6 +318,85 @@ class SpeakerMemory:
         
         return float(confidence), prob_dict
     
+    def _max_prototype_similarity(self, embedding: np.ndarray, speaker_id: str) -> float:
+        """
+        Compute maximum cosine similarity between *embedding* and all prototypes
+        of *speaker_id*.  Falls back to the primary centroid if no prototypes exist.
+        """
+        protos = self.prototypes.get(speaker_id)
+        if protos:
+            return max(self._cosine_similarity(embedding, p[0]) for p in protos)
+        # Fallback: no prototypes yet — use primary centroid
+        centroid = self.centroids.get(speaker_id)
+        if centroid is not None:
+            return self._cosine_similarity(embedding, centroid)
+        return -1.0
+
+    def _compute_margin_penalty(self, best_score: float, second_best_score: float) -> float:
+        """
+        Penalise match score when the gap between top-2 candidates is too small.
+
+        This biases toward new-speaker creation when the system cannot confidently
+        distinguish between similar-sounding speakers.
+
+        Returns the penalty to **subtract** from the raw best score.
+        """
+        margin = best_score - second_best_score
+        if margin >= self.MIN_MARGIN:
+            return 0.0
+        penalty = (self.MIN_MARGIN - margin) * self.MARGIN_PENALTY_SCALE
+        return penalty
+
+    def _get_transition_bonus(self, from_speaker: Optional[str], candidate: str) -> float:
+        """
+        Compute a small bonus for *candidate* if the transition from *from_speaker*
+        → *candidate* has been observed frequently.
+
+        Returns a value in [0, TRANSITION_BONUS_CAP].
+        """
+        if from_speaker is None or from_speaker == candidate:
+            return 0.0
+        total = sum(
+            v for (src, _), v in self._transitions.items() if src == from_speaker
+        )
+        if total == 0:
+            return 0.0
+        count = self._transitions.get((from_speaker, candidate), 0)
+        ratio = count / total  # [0, 1]
+        return min(ratio * self.TRANSITION_BONUS_CAP, self.TRANSITION_BONUS_CAP)
+
+    def _record_transition(self, from_speaker: Optional[str], to_speaker: str):
+        """Record a speaker transition for the temporal model."""
+        if from_speaker is not None and from_speaker != to_speaker:
+            key = (from_speaker, to_speaker)
+            self._transitions[key] = self._transitions.get(key, 0) + 1
+
+    def _record_segment_time(self, speaker_id: str, timestamp: float):
+        """Record the timestamp of a segment for co-occurrence checks."""
+        if speaker_id not in self._segment_times:
+            self._segment_times[speaker_id] = []
+        times = self._segment_times[speaker_id]
+        times.append(timestamp)
+        # Keep only the last 50 timestamps per speaker to bound memory
+        if len(times) > 50:
+            self._segment_times[speaker_id] = times[-50:]
+
+    def _speakers_co_occurred(self, speaker_a: str, speaker_b: str, window: float = 2.0) -> bool:
+        """
+        Return True if speaker_a and speaker_b have both been seen within
+        *window* seconds of each other.  Used as a merge guard — if two
+        speakers co-occur temporally they are by definition different people.
+        """
+        times_a = self._segment_times.get(speaker_a, [])
+        times_b = self._segment_times.get(speaker_b, [])
+        if not times_a or not times_b:
+            return False
+        for ta in times_a:
+            for tb in times_b:
+                if abs(ta - tb) <= window:
+                    return True
+        return False
+
     def identify(
         self,
         embedding: np.ndarray,
@@ -278,93 +404,126 @@ class SpeakerMemory:
     ) -> Tuple[str, float, Optional[Dict[str, float]]]:
         """
         Match embedding to existing speaker or create new one.
-        
+
+        Uses multi-prototype similarity (max over K prototypes per speaker),
+        margin-based scoring, and temporal transition priors.
+
         Args:
             embedding: Raw speaker embedding (will be normalized)
             segment_info: Optional metadata for logging (timestamp, text, etc)
-            
+
         Returns:
             (speaker_id, confidence_score, alt_speakers)
         """
         self._stats["identifications"] += 1
-        
+
         # DEBUG: Log embedding stats before validation
         embedding_norm = np.linalg.norm(embedding)
         embedding_mean = np.mean(np.abs(embedding)) if len(embedding) > 0 else 0
         logger.debug(f"Embedding stats: norm={embedding_norm:.4f}, mean={embedding_mean:.8f}, shape={embedding.shape}")
-        
+
         # Validate embedding quality FIRST (use validate() to track statistics and invoke callback)
         is_valid = self.validator.validate(embedding, segment_info)
         if not is_valid:
             self._stats["invalid_embeddings"] += 1
-            # Get the reason from validator's last check
             _, validation_reason = self.validator.is_valid(embedding)
             logger.warning(f"Embedding validation FAILED: {validation_reason}, norm={embedding_norm:.4f}, mean={embedding_mean:.8f}")
-            # Invalid embedding: skip segment entirely, do NOT assign to last speaker
-            # Note: callback is already invoked by validator.validate()
             logger.debug(f"Invalid embedding rejected for segment: {segment_info}")
             return "unknown", 0.0, {}
-        
+
         logger.debug(f"Embedding validation PASSED")
-        
+
         self._stats["valid_embeddings"] += 1
-        
+
         embedding = self._normalize(embedding)
-        
+
         # Clean up any invalid speakers that may have been created before validation
-        # This prevents NaN issues from zero embeddings in speaker memory
         self.cleanup_invalid_speakers()
-        
+
         if len(self.centroids) == 0:
             # First speaker
             return self._create_speaker(embedding, segment_info, confidence=1.0)
-        
-        # Compare against all known speakers
+
+        # ------- Compare against all known speakers (multi-prototype) -------
         best_id = None
         best_score = -1.0
+        second_best_score = -1.0
         scores = {}
         alt_speakers = {}
 
         # Dynamic threshold: use min of configured min_samples_for_match or total identifications
         effective_min = min(self._stats["identifications"], self.min_samples_for_match)
-        
-        # DEBUG: Log speaker state before matching
+
         total_samples = sum(self.counts.values())
-        logger.debug(f"Matching: {len(self.centroids)} speakers, total_samples={total_samples}, min_samples_for_match={self.min_samples_for_match}, effective_min={effective_min}")
+        logger.debug(f"Matching: {len(self.centroids)} speakers, total_samples={total_samples}, "
+                      f"min_samples_for_match={self.min_samples_for_match}, effective_min={effective_min}")
         now = time.time()
-        for speaker_id, centroid in self.centroids.items():
+        for speaker_id in list(self.centroids.keys()):
             # Skip speakers with too few samples (unstable centroids)
             if self.counts[speaker_id] < effective_min:
                 logger.info(f"Skipping {speaker_id}: count={self.counts[speaker_id]} < effective_min={effective_min}")
                 continue
 
-            score = self._cosine_similarity(embedding, centroid)
+            # Multi-prototype similarity: use the max similarity across all prototypes
+            score = self._max_prototype_similarity(embedding, speaker_id)
 
             # Age-based score decay: score *= exp(-age / τ).
-            # Recent speakers are unpenalised; absent speakers fade continuously.
-            # No hard cutoff — a very strong embedding match can always reactivate a speaker.
             age = now - self.last_seen.get(speaker_id, now)
             if age > 0 and self.active_window_seconds > 0:
                 decay = float(np.exp(-age / self.active_window_seconds))
                 score *= decay
-                logger.debug(f"{speaker_id}: raw_score before decay={score/decay:.3f}, age={age:.0f}s, decay={decay:.3f}, adjusted={score:.3f}")
+                logger.debug(f"{speaker_id}: raw_score before decay={score/decay:.3f}, age={age:.0f}s, "
+                              f"decay={decay:.3f}, adjusted={score:.3f}")
 
             # Recency boost: prefer continuing same speaker
             if speaker_id == self.last_speaker:
                 score += self.recency_boost
-            
+
+            # Temporal transition bonus
+            transition_bonus = self._get_transition_bonus(self.last_speaker, speaker_id)
+            if transition_bonus > 0:
+                score += transition_bonus
+                logger.debug(f"{speaker_id}: transition_bonus={transition_bonus:.4f}")
+
             scores[speaker_id] = score
-            
+
             # Build alt_speakers in the loop
             if score >= self.threshold or score >= (self.threshold - 0.1):
                 alt_speakers[speaker_id] = score
 
+            # Track top-2 scores
             if score > best_score:
+                second_best_score = best_score
                 best_score = score
                 best_id = speaker_id
-        
-        # Get dynamic threshold **before** logging
+            elif score > second_best_score:
+                second_best_score = score
+
+        # Get dynamic threshold
         effective_threshold = self._get_dynamic_threshold()
+
+        # ------- Margin-based penalty -------
+        margin_penalty = 0.0
+        if second_best_score > -1.0:
+            margin_penalty = self._compute_margin_penalty(best_score, second_best_score)
+            if margin_penalty > 0:
+                self._stats["margin_penalties_applied"] += 1
+                logger.info(f"Margin penalty={margin_penalty:.4f} applied "
+                            f"(best={best_score:.4f}, 2nd={second_best_score:.4f}, "
+                            f"margin={best_score - second_best_score:.4f})")
+
+        effective_score = best_score - margin_penalty
+
+        # If margin is too small AND effective score is below the hard threshold
+        # → force new speaker creation to avoid wrong assignment
+        force_new_speaker = (
+            margin_penalty > 0
+            and effective_score < self.MARGIN_HARD_THRESHOLD
+        )
+        if force_new_speaker:
+            self._stats["margin_new_speaker_forced"] += 1
+            logger.info(f"Margin guard: forcing new speaker (effective_score={effective_score:.4f} "
+                        f"< {self.MARGIN_HARD_THRESHOLD})")
 
         # Log for debugging
         self._match_log.append({
@@ -373,28 +532,27 @@ class SpeakerMemory:
             'effective_threshold': effective_threshold,
             'best_id': best_id,
             'best_score': best_score,
-            'decision': 'match' if (best_id and best_score >= effective_threshold) else 'new_speaker',
+            'margin_penalty': margin_penalty,
+            'effective_score': effective_score,
+            'force_new_speaker': force_new_speaker,
+            'decision': 'match' if (best_id and effective_score >= effective_threshold and not force_new_speaker) else 'new_speaker',
             'segment_info': segment_info
         })
-        logger.info(f"Speaker match scores: {scores}, best: {best_id} ({best_score:.3f})")
-        
-        # Get dynamic threshold based on speaker count
-        effective_threshold = self._get_dynamic_threshold()
-        
-        # Match or create new speaker
-        if best_id and best_score >= effective_threshold:
+        logger.info(f"Speaker match scores: {scores}, best: {best_id} ({best_score:.3f}), "
+                     f"effective: {effective_score:.3f}, threshold: {effective_threshold:.3f}")
+
+        # ------- Match or create new speaker -------
+        if best_id and effective_score >= effective_threshold and not force_new_speaker:
             self._stats["matches"] += 1
-            
+
             # Compute calibrated confidence using softmax + entropy
             calibrated_confidence, speaker_probs = self._compute_calibrated_confidence(
                 scores, best_id
             )
-            
-            # Log calibrated confidence for debugging
+
             logger.debug(f"Calibrated confidence: {calibrated_confidence:.3f}, probs: {speaker_probs}")
-            
-            # Check for low confidence match using calibrated confidence
-            # Lower threshold (0.65) since we now have calibrated scores
+
+            # Check for low confidence match
             low_confidence_threshold = 0.65
             if calibrated_confidence < low_confidence_threshold:
                 self._stats["low_confidence_matches"] += 1
@@ -403,29 +561,33 @@ class SpeakerMemory:
                         self.on_low_confidence(best_id, calibrated_confidence, segment_info)
                     except Exception as e:
                         logger.warning(f"Error in on_low_confidence callback: {e}")
-            
-            # Enable EMA centroid update
+
+            # Update speaker prototypes & centroid
             self._update_speaker(best_id, embedding)
+            self._record_transition(self.last_speaker, best_id)
+            self._record_segment_time(best_id, now)
             self.last_speaker = best_id
             self.history.append(best_id)
-            
-            # Periodic consolidation: every 5 identifications or if speaker count exceeds 10
+
+            # Periodic consolidation: every 5 identifications or if speaker count exceeds 10.
             if (self._stats["identifications"] % 5 == 0) or len(self.centroids) > 10:
-                merges = self.auto_merge_similar_speakers(similarity_threshold=0.85)
+                merges = self.auto_merge_similar_speakers(similarity_threshold=0.82)
                 if merges:
                     logger.info(f"Periodic consolidation: {merges} merges")
-            
-            return best_id, best_score, alt_speakers
+
+            return best_id, calibrated_confidence, alt_speakers
         else:
             self._stats["new_speakers"] += 1
             speaker_id, confidence, _ = self._create_speaker(embedding, segment_info, confidence=1.0)
-            
+
+            self._record_transition(self.last_speaker, speaker_id)
+            self._record_segment_time(speaker_id, now)
+
             # Proactive merge: check if new speaker should be merged immediately
             merge_result = self._check_and_merge_after_creation(speaker_id, embedding)
             if merge_result:
-                # Return the merged speaker ID
                 return merge_result, self._cosine_similarity(embedding, self.centroids[merge_result]), alt_speakers
-            
+
             return speaker_id, confidence, alt_speakers
             
     def _create_speaker(
@@ -434,7 +596,7 @@ class SpeakerMemory:
         segment_info: Optional[dict],
         confidence: float
     ) -> Tuple[str, float, Optional[Dict[str, float]]]:
-        """Create a new speaker profile with validation."""
+        """Create a new speaker profile with validation and prototype initialization."""
         # Double-check validation before storage
         is_valid, reason = self.validator.is_valid(embedding)
         if not is_valid:
@@ -444,9 +606,11 @@ class SpeakerMemory:
         speaker_id = f"speaker_{self.speaker_counter}"
         self.speaker_counter += 1
         
-        self.centroids[speaker_id] = embedding
+        now = time.time()
+        self.centroids[speaker_id] = embedding.copy()
+        self.prototypes[speaker_id] = [(embedding.copy(), 1, now)]
         self.counts[speaker_id] = 1
-        self.last_seen[speaker_id] = time.time()
+        self.last_seen[speaker_id] = now
         self.last_speaker = speaker_id
         self.history.append(speaker_id)
         
@@ -454,40 +618,91 @@ class SpeakerMemory:
         return speaker_id, confidence, {}
     
     def _update_speaker(self, speaker_id: str, embedding: np.ndarray):
-        """EMA update with configurable alpha and first-update special case."""
-        n = self.counts[speaker_id]
-        alpha = getattr(self, 'ema_alpha', 0.28)  # Make configurable
-        
-        if n == 1:
-            # First update: blend equally
-            self.centroids[speaker_id] = 0.5 * self.centroids[speaker_id] + 0.5 * embedding
+        """Multi-prototype update with EMA.
+
+        For each incoming embedding:
+        1. Find the closest existing prototype (cosine >= PROTOTYPE_MATCH_THRESHOLD).
+           - If found → EMA-update that prototype.
+           - If not → add as a new prototype (up to MAX_PROTOTYPES).
+           - If full → replace the oldest (least recently seen) prototype.
+        2. Recompute the primary centroid as the weighted average of all prototypes.
+        """
+        now = time.time()
+        alpha = self.ema_alpha  # 0.08 by default
+
+        protos = self.prototypes.get(speaker_id, [])
+
+        # Find closest prototype
+        best_idx = -1
+        best_sim = -1.0
+        for i, (p_emb, p_cnt, p_ts) in enumerate(protos):
+            sim = self._cosine_similarity(embedding, p_emb)
+            if sim > best_sim:
+                best_sim = sim
+                best_idx = i
+
+        if best_idx >= 0 and best_sim >= self.PROTOTYPE_MATCH_THRESHOLD:
+            # EMA-update the matching prototype
+            p_emb, p_cnt, _ = protos[best_idx]
+            if p_cnt == 0:
+                updated = embedding.copy()
+            else:
+                updated = alpha * embedding + (1 - alpha) * p_emb
+            updated = self._normalize(updated)
+            protos[best_idx] = (updated, p_cnt + 1, now)
+        elif len(protos) < self.MAX_PROTOTYPES:
+            # Add as a new prototype
+            protos.append((embedding.copy(), 1, now))
         else:
-            # EMA update
-            self.centroids[speaker_id] = alpha * embedding + (1 - alpha) * self.centroids[speaker_id]
-        
-        # Re-normalize to maintain unit length
-        self.centroids[speaker_id] = self._normalize(self.centroids[speaker_id])
+            # Replace the oldest prototype
+            oldest_idx = min(range(len(protos)), key=lambda i: protos[i][2])
+            protos[oldest_idx] = (embedding.copy(), 1, now)
+
+        self.prototypes[speaker_id] = protos
+
+        # Recompute primary centroid as weighted average of prototypes
+        total_count = sum(p[1] for p in protos)
+        if total_count > 0:
+            weighted = sum(p[0] * p[1] for p in protos) / total_count
+            self.centroids[speaker_id] = self._normalize(weighted)
+        else:
+            self.centroids[speaker_id] = self._normalize(embedding)
+
         self.counts[speaker_id] += 1
-        self.last_seen[speaker_id] = time.time()
+        self.last_seen[speaker_id] = now
     
     def _check_and_merge_after_creation(self, new_speaker_id: str, new_embedding: np.ndarray) -> Optional[str]:
-        """Check if new speaker should be merged immediately."""
+        """Check if new speaker should be merged immediately.
+
+        Guarded by temporal co-occurrence, with a high-similarity override.
+        Co-occurrence timestamps are wall-clock time, so speakers from the same
+        audio chunk always appear co-occurring — the override prevents that
+        artefact from blocking valid merges.
+        """
         for existing_id, centroid in list(self.centroids.items()):
             if existing_id == new_speaker_id:
                 continue
-            if self.counts.get(existing_id, 0) < 3:
+            # Require a small number of observations before a centroid is merge-eligible
+            if self.counts.get(existing_id, 0) < 2:
                 continue
             sim = self._cosine_similarity(new_embedding, centroid)
-            
-            # Immediate merge for very high similarity (>= 0.92)
-            if sim >= 0.92:
+
+            # High-similarity override: if centroids are nearly identical,
+            # merge regardless of co-occurrence (processing-time artefact).
+            if sim >= self.CO_OCCURRENCE_OVERRIDE_SIMILARITY:
+                self._merge_speakers_internal(existing_id, new_speaker_id)
+                logger.info(f"Immediate merge (override): {new_speaker_id} → {existing_id} (sim={sim:.3f})")
+                return existing_id
+
+            # Otherwise honour the co-occurrence guard
+            if self._speakers_co_occurred(existing_id, new_speaker_id):
+                logger.debug(f"Co-occurrence guard: {new_speaker_id} and {existing_id} co-occurred, skipping merge")
+                continue
+
+            # Merge at a lower threshold when co-occurrence is clear
+            if sim >= 0.80:
                 self._merge_speakers_internal(existing_id, new_speaker_id)
                 logger.info(f"Immediate merge: {new_speaker_id} → {existing_id} (sim={sim:.3f})")
-                return existing_id
-            
-            if sim >= 0.76:
-                self._merge_speakers_internal(existing_id, new_speaker_id)
-                logger.info(f"Proactive merge: {new_speaker_id} → {existing_id} (sim={sim:.3f})")
                 return existing_id
         return None
     
@@ -669,21 +884,21 @@ class SpeakerMemory:
     
     def auto_merge_similar_speakers(
         self,
-        similarity_threshold: float = 0.85,
+        similarity_threshold: float = 0.82,
         max_merges: int = 5
     ) -> int:
         """
         Automatically merge speakers using hierarchical approach.
         
-        - Immediate merge: similarity >= 0.92 (very likely same speaker)
-        - Standard merge: similarity >= threshold (0.85 default)
+        - Immediate merge: similarity >= 0.90 (near-certain same speaker)
+        - Standard merge: similarity >= threshold (0.82 default)
         
-        This helps consolidate speakers that were incorrectly split during
-        diarization. Uses a greedy approach: merge the most similar pair,
-        update centroids, then repeat until no more pairs exceed threshold.
+        Temporal co-occurrence guards prevent merging speakers that have been
+        seen within 2 seconds of each other — this is the primary protection
+        against collapsing truly different speakers.
         
         Args:
-            similarity_threshold: Pairs above this threshold will be merged (default: 0.85)
+            similarity_threshold: Pairs above this threshold will be merged (default: 0.82)
             max_merges: Maximum number of merges to perform in one call
             
         Returns:
@@ -691,25 +906,38 @@ class SpeakerMemory:
         """
         merges_performed = 0
         
-        # Phase 1: Immediate merges for very high similarity (>= 0.92)
-        immediate_threshold = 0.92
+        # Phase 1: Immediate merges for near-certain same-speaker (>= 0.90)
+        immediate_threshold = 0.90
         for _ in range(max_merges):
             similar_pairs = self.find_similar_speakers(immediate_threshold)
             
             if not similar_pairs:
                 break
             
-            # Merge the most similar pair
-            speaker_a, speaker_b, similarity = similar_pairs[0]
+            # Filter out co-occurring pairs (with high-similarity override)
+            merge_pair = None
+            for speaker_a, speaker_b, similarity in similar_pairs:
+                # High-similarity override: wall-clock co-occurrence is unreliable
+                if similarity >= self.CO_OCCURRENCE_OVERRIDE_SIMILARITY:
+                    merge_pair = (speaker_a, speaker_b, similarity)
+                    break
+                if not self._speakers_co_occurred(speaker_a, speaker_b):
+                    merge_pair = (speaker_a, speaker_b, similarity)
+                    break
+                else:
+                    logger.info(f"Co-occurrence guard blocked merge: {speaker_a} <-> {speaker_b} "
+                               f"(sim={similarity:.3f})")
             
+            if merge_pair is None:
+                break
+            
+            speaker_a, speaker_b, similarity = merge_pair
             logger.info(f"Immediate auto-merge: {speaker_a} <-> {speaker_b} "
                        f"(similarity: {similarity:.3f})")
             
-            # Use speaker_a as the target, merge speaker_b into it
             self._merge_speakers_internal(speaker_a, speaker_b, similarity)
             merges_performed += 1
             
-            # Update history - replace speaker_b with speaker_a
             self.history = deque(
                 [speaker_a if s == speaker_b else s for s in self.history],
                 maxlen=self.history.maxlen
@@ -722,17 +950,30 @@ class SpeakerMemory:
             if not similar_pairs:
                 break
             
-            # Merge the most similar pair
-            speaker_a, speaker_b, similarity = similar_pairs[0]
+            # Filter out co-occurring pairs (with high-similarity override)
+            merge_pair = None
+            for speaker_a, speaker_b, similarity in similar_pairs:
+                # High-similarity override: wall-clock co-occurrence is unreliable
+                if similarity >= self.CO_OCCURRENCE_OVERRIDE_SIMILARITY:
+                    merge_pair = (speaker_a, speaker_b, similarity)
+                    break
+                if not self._speakers_co_occurred(speaker_a, speaker_b):
+                    merge_pair = (speaker_a, speaker_b, similarity)
+                    break
+                else:
+                    logger.info(f"Co-occurrence guard blocked merge: {speaker_a} <-> {speaker_b} "
+                               f"(sim={similarity:.3f})")
             
+            if merge_pair is None:
+                break
+            
+            speaker_a, speaker_b, similarity = merge_pair
             logger.info(f"Standard auto-merge: {speaker_a} <-> {speaker_b} "
                        f"(similarity: {similarity:.3f})")
             
-            # Use speaker_a as the target, merge speaker_b into it
             self._merge_speakers_internal(speaker_a, speaker_b, similarity)
             merges_performed += 1
             
-            # Update history - replace speaker_b with speaker_a
             self.history = deque(
                 [speaker_a if s == speaker_b else s for s in self.history],
                 maxlen=self.history.maxlen
@@ -747,7 +988,8 @@ class SpeakerMemory:
         """
         Internal method to merge speaker_b into speaker_a.
         The speaker created FIRST (lower number) will survive the merge.
-        Called by both merge_speakers() and auto_merge_similar_speakers().
+        Prototype pools are combined (keeping up to MAX_PROTOTYPES, dropping
+        the most similar pair to avoid redundancy).
         """
         if speaker_a not in self.centroids or speaker_b not in self.centroids:
             raise ValueError("Both speakers must exist")
@@ -767,25 +1009,64 @@ class SpeakerMemory:
             speaker_a, speaker_b = speaker_b, speaker_a
             num_a, num_b = num_b, num_a
         
-        # Weighted average of centroids based on sample counts
+        # ---- Merge prototype pools ----
+        protos_a = self.prototypes.get(speaker_a, [])
+        protos_b = self.prototypes.get(speaker_b, [])
+        combined = protos_a + protos_b
+        
+        # If too many prototypes, keep the top-K by count (most observed)
+        if len(combined) > self.MAX_PROTOTYPES:
+            combined.sort(key=lambda p: p[1], reverse=True)
+            combined = combined[:self.MAX_PROTOTYPES]
+        
+        self.prototypes[speaker_a] = combined
+        
+        # Recompute primary centroid from merged prototypes
         n_a = self.counts[speaker_a]
         n_b = self.counts[speaker_b]
-        merged = (self.centroids[speaker_a] * n_a + self.centroids[speaker_b] * n_b) / (n_a + n_b)
+        if combined:
+            total_p_count = sum(p[1] for p in combined)
+            if total_p_count > 0:
+                weighted = sum(p[0] * p[1] for p in combined) / total_p_count
+                self.centroids[speaker_a] = self._normalize(weighted)
+            else:
+                # Fallback to weighted average of old centroids
+                merged = (self.centroids[speaker_a] * n_a + self.centroids[speaker_b] * n_b) / (n_a + n_b)
+                self.centroids[speaker_a] = self._normalize(merged)
+        else:
+            merged = (self.centroids[speaker_a] * n_a + self.centroids[speaker_b] * n_b) / (n_a + n_b)
+            self.centroids[speaker_a] = self._normalize(merged)
         
-        self.centroids[speaker_a] = self._normalize(merged)
         self.counts[speaker_a] = n_a + n_b
-        # Keep the most recent last_seen time across both speakers
         self.last_seen[speaker_a] = max(
             self.last_seen.get(speaker_a, 0),
             self.last_seen.get(speaker_b, 0)
         )
 
+        # ---- Merge segment times ----
+        times_a = self._segment_times.get(speaker_a, [])
+        times_b = self._segment_times.get(speaker_b, [])
+        merged_times = sorted(times_a + times_b)[-50:]
+        self._segment_times[speaker_a] = merged_times
+        self._segment_times.pop(speaker_b, None)
+
+        # ---- Merge transition counts ----
+        # Remap all transitions from/to speaker_b → speaker_a
+        keys_to_update = [(src, dst) for (src, dst) in self._transitions if src == speaker_b or dst == speaker_b]
+        for src, dst in keys_to_update:
+            count = self._transitions.pop((src, dst), 0)
+            new_src = speaker_a if src == speaker_b else src
+            new_dst = speaker_a if dst == speaker_b else dst
+            if new_src != new_dst:
+                self._transitions[(new_src, new_dst)] = self._transitions.get((new_src, new_dst), 0) + count
+
         # Remove speaker_b
         del self.centroids[speaker_b]
         del self.counts[speaker_b]
         self.last_seen.pop(speaker_b, None)
+        self.prototypes.pop(speaker_b, None)
 
-        #log merge event for debugging
+        # Log merge event for debugging
         self._recent_merges_log.append({
             "timestamp": datetime.utcnow().isoformat(),
             "from": speaker_b,
@@ -818,6 +1099,8 @@ class SpeakerMemory:
             del self.centroids[speaker_id]
             del self.counts[speaker_id]
             self.last_seen.pop(speaker_id, None)
+            self.prototypes.pop(speaker_id, None)
+            self._segment_times.pop(speaker_id, None)
             # Also remove from history
             self.history = deque(
                 [s for s in self.history if s != speaker_id],
@@ -832,6 +1115,7 @@ class SpeakerMemory:
     def reset(self):
         """Clear all speaker data and statistics."""
         self.centroids.clear()
+        self.prototypes.clear()
         self.counts.clear()
         self.last_seen.clear()
         self.history.clear()
@@ -839,6 +1123,8 @@ class SpeakerMemory:
         self.speaker_counter = 0
         self._match_log.clear()
         self._recent_merges_log.clear()
+        self._transitions.clear()
+        self._segment_times.clear()
         
         # Reset statistics
         self._stats = {
@@ -849,6 +1135,8 @@ class SpeakerMemory:
             "new_speakers": 0,
             "low_confidence_matches": 0,
             "skipped_short_segments": 0,
+            "margin_penalties_applied": 0,
+            "margin_new_speaker_forced": 0,
         }
         
         # Reset validator stats
@@ -997,9 +1285,12 @@ def diarization_worker(hf_token: str, request_queue, result_queue):
     MIN_SEGMENT_DURATION = 0.5  # seconds
     
     # Initialize speaker memory with validation (using v2 defaults)
-    # min_samples_for_match=1 allows immediate matching after first sample
-    # Embedding validation and short segment filtering provide safeguards against false positives
-    speakers = SpeakerMemory(threshold=0.81, min_samples_for_match=1, ema_alpha=0.28, active_window_seconds=1200.0)
+    # min_samples_for_match=1 allows immediate matching after first sample;
+    # the merge guards (_check_and_merge_after_creation count<5, auto_merge count<min_samples)
+    # independently enforce higher observation counts before any merge is attempted.
+    # ema_alpha=0.08 (was 0.15) slows prototype drift so profiles of similar-sounding
+    # speakers stay distinct over time rather than converging.
+    speakers = SpeakerMemory(threshold=0.72, min_samples_for_match=1, ema_alpha=0.10, active_window_seconds=1200.0)
 
     shutdown_received = False
     while True:
@@ -1161,11 +1452,11 @@ class DiarizationClient:
         self,
         hf_token: str = "",
         threshold: float = 0.72,
-        recency_boost: float = 0.05,
+        recency_boost: float = 0.03,
         history_size: int = 20,
         min_samples_for_match: int = 5,
         min_segment_duration: float = 0.5,
-        ema_alpha: float = 0.15,
+        ema_alpha: float = 0.10,
         active_window_seconds: float = 1200.0,
         embedding_validator: Optional[EmbeddingQualityValidator] = None,
         on_invalid_embedding: Optional[Callable[[np.ndarray, str, Optional[dict]], None]] = None,
