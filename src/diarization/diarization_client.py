@@ -589,27 +589,16 @@ class SpeakerMemory:
         scores = {}
         alt_speakers = {}
 
-        # Dynamic threshold: use min of configured min_samples_for_match or total identifications.
-        # Guard: if applying effective_min would skip ALL candidates, disable it to prevent a
-        # deadlock where new speakers can never accumulate observations.
-        effective_min = min(self._stats["identifications"], self.min_samples_for_match)
-        qualifying_speakers = [sid for sid in self.centroids if self.counts.get(sid, 0) >= effective_min]
-        if not qualifying_speakers and self.centroids:
-            # All speakers are below the threshold — include them all so at least one can match
-            # and accumulate observations needed to eventually qualify normally.
-            effective_min = 1
-            qualifying_speakers = list(self.centroids.keys())
-            logger.debug(f"effective_min forced to 1: all {len(self.centroids)} speakers below threshold")
-
         total_samples = sum(self.counts.values())
         logger.debug(f"Matching: {len(self.centroids)} speakers, total_samples={total_samples}, "
-                      f"min_samples_for_match={self.min_samples_for_match}, effective_min={effective_min}")
+                      f"min_samples_for_match={self.min_samples_for_match} (threshold gates matching, not count)")
         now = time.time()
         for speaker_id in list(self.centroids.keys()):
-            # Skip speakers with too few samples (unstable centroids)
-            if self.counts[speaker_id] < effective_min:
-                logger.info(f"Skipping {speaker_id}: count={self.counts[speaker_id]} < effective_min={effective_min}")
-                continue
+            # NOTE: we do NOT skip low-count speakers here — the similarity threshold (0.72)
+            # is the gating criterion.  Filtering by count caused fragmentation cascades where
+            # newly created speakers (count=1) could never accumulate observations because they
+            # were always skipped, forcing yet another new speaker on every segment.
+            # min_samples_for_match is still used below to guard *new speaker creation*.
 
             # Multi-prototype similarity: use the max similarity across all prototypes
             score = self._max_prototype_similarity(embedding, speaker_id)
@@ -1870,7 +1859,7 @@ class DiarizationClient:
         threshold: float = 0.72,
         recency_boost: float = 0.02,
         history_size: int = 20,
-        min_samples_for_match: int = 5,
+        min_samples_for_match: int = 2,
         min_segment_duration: float = 0.15,
         ema_alpha: float = 0.05,
         active_window_seconds: float = 28800.0,
@@ -1886,7 +1875,8 @@ class DiarizationClient:
             threshold: Cosine similarity threshold for speaker match
             recency_boost: Bonus added to most recent speaker's similarity
             history_size: Number of recent speaker IDs to track
-            min_samples_for_match: Minimum observations before matching against a speaker
+            min_samples_for_match: Minimum samples before including a speaker in auto-merge
+                checks. No longer gates the matching loop (threshold does that).
             min_segment_duration: Minimum segment duration in seconds (default: 0.5)
             ema_alpha: EMA smoothing factor for centroid updates
             active_window_seconds: Decay time constant τ for absence penalty. A speaker
