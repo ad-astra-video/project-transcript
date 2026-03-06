@@ -419,7 +419,7 @@ async def _poll_diarization_results():
             logger.info(f"Diarization process no longer running, stopping polling")
             break
         poll_count += 1
-        if poll_count % 50 == 0:
+        if poll_count % 75 == 0:
             elapsed = time.monotonic() - poll_start_time
             logger.info(f"Diarization polling cycle {poll_count} ({elapsed:.1f}s elapsed)")
         result = await STATE.diarization_client.get_result(timeout=0.05)
