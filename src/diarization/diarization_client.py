@@ -145,7 +145,7 @@ class SpeakerMemory:
     
     def __init__(
         self,
-        threshold: float = 0.65,
+        threshold: float = 0.71,
         recency_boost: float = 0.02,
         history_size: int = 20,
         min_samples_for_match: int = 2,
@@ -268,12 +268,11 @@ class SpeakerMemory:
         Uses exponential saturation so the threshold never cliffs at arbitrary
         step boundaries.
         Formula: threshold = base + max_increase * (1 - exp(-N / lambda))
-          - At N=0:  threshold = base (0.72)
-          - At N=4:  threshold ≈ 0.734
-          - At N=8:  threshold ≈ 0.747
-          - At N=20: threshold ≈ 0.757
-          - At N=∞:  threshold → base + 0.04 = 0.76
-          - Hard ceiling: base + max_increase
+          - At N=0:  threshold = base (0.71)
+          - At N=4:  threshold ≈ 0.718
+          - At N=8:  threshold ≈ 0.723
+          - At N=∞:  threshold → base + 0.02 = 0.73
+          - Hard ceiling: base + max_increase (0.73)
 
         Co-occurrence guards and prototype merge guards are the primary
         mechanism for keeping truly different speakers apart.
@@ -1600,7 +1599,7 @@ def diarization_worker(hf_token: str, request_queue, result_queue):
     # before their centroid can be a merge target, reducing ghost-speaker merges
     # from short contaminated segments.
     speakers = SpeakerMemory(
-        threshold=0.72,
+        threshold=0.71,
         min_samples_for_match=2,
         min_segment_duration_for_creation=MIN_DURATION_FOR_CREATION,
         ema_alpha=0.05,
@@ -1856,7 +1855,7 @@ class DiarizationClient:
     def __init__(
         self,
         hf_token: str = "",
-        threshold: float = 0.72,
+        threshold: float = 0.71,
         recency_boost: float = 0.02,
         history_size: int = 20,
         min_samples_for_match: int = 2,

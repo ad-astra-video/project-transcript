@@ -113,7 +113,7 @@ class TestConfiguration:
     def test_default_threshold(self):
         """Test that SpeakerMemory uses the correct default threshold."""
         memory = SpeakerMemory()
-        assert memory.threshold == 0.65, f"Default threshold should be 0.65, got {memory.threshold}"
+        assert memory.threshold == 0.71, f"Default threshold should be 0.71, got {memory.threshold}"
     
     def test_default_ema_alpha(self):
         """Test that default EMA alpha is updated."""
