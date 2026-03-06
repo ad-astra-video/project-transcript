@@ -113,7 +113,7 @@ class TestConfiguration:
     def test_default_threshold(self):
         """Test that SpeakerMemory uses the correct default threshold."""
         memory = SpeakerMemory()
-        assert memory.threshold == 0.72, f"Default threshold should be 0.72, got {memory.threshold}"
+        assert memory.threshold == 0.65, f"Default threshold should be 0.65, got {memory.threshold}"
     
     def test_default_ema_alpha(self):
         """Test that default EMA alpha is updated."""
@@ -123,7 +123,7 @@ class TestConfiguration:
     def test_default_min_samples(self):
         """Test that default min_samples_for_match is updated."""
         memory = SpeakerMemory()
-        assert memory.min_samples_for_match == 5, f"Default min_samples should be 5, got {memory.min_samples_for_match}"
+        assert memory.min_samples_for_match == 3, f"Default min_samples should be 3, got {memory.min_samples_for_match}"
     
     def test_default_recency_boost(self):
         """Test that default recency_boost is updated."""

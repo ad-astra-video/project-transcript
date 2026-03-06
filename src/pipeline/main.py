@@ -21,7 +21,7 @@ from aiohttp import web
 src_path = Path(__file__).parent.parent
 sys.path.insert(0, str(src_path))
 
-from diarization.diarization_client import DiarizationClient, DiarizationResult, SpeakerSegment
+from diarization.diarization_client import DiarizationClient, DiarizationResult, ConsolidationResult, SpeakerSegment
 from transcription.whisper_client import WhisperClient, TranscriptionSegment, WordTimestamp
 from summary.summary_client import SummaryClient
 from pytrickle import StreamProcessor
@@ -313,6 +313,32 @@ async def _send_speakers_message(segments: list[SpeakerSegment], window_start_ts
         logger.warning(f"Failed to send speakers message: {e}")
 
 
+async def _handle_consolidation_result(result: ConsolidationResult):
+    """Handle post-session consolidation result and emit speakers_merged event."""
+    if not result.merges:
+        logger.info("Post-session consolidation result: no merges")
+        return
+    merged_list = [
+        {"source": src, "target": tgt}
+        for tgt, src in result.merges
+    ]
+    logger.info(
+        f"Post-session consolidation: {len(merged_list)} merge(s), "
+        f"speakers {result.speaker_count_before} → {result.speaker_count_after}"
+    )
+    if PROCESSOR is not None:
+        try:
+            await PROCESSOR.send_data(json.dumps({
+                "type": "speakers_merged",
+                "timestamp_utc": datetime.now(timezone.utc).isoformat(),
+                "merges": merged_list,
+                "speaker_count_before": result.speaker_count_before,
+                "speaker_count_after": result.speaker_count_after,
+            }))
+        except Exception as e:
+            logger.warning(f"Failed to send speakers_merged event: {e}")
+
+
 async def _handle_diarization_result(result: DiarizationResult):
     """Handle diarization result and send to client."""
     logger.debug(f"Handling diarization result: {result.request_id}")
@@ -398,8 +424,12 @@ async def _poll_diarization_results():
             logger.info(f"Diarization polling cycle {poll_count} ({elapsed:.1f}s elapsed)")
         result = await STATE.diarization_client.get_result(timeout=0.05)
         if result is not None:
-            logger.info(f"POLLING: Got diarization result: {result.request_id}, segments={len(result.segments)}")
-            await _handle_diarization_result(result)
+            if isinstance(result, ConsolidationResult):
+                logger.info(f"POLLING: Got consolidation result: {len(result.merges)} merge(s)")
+                await _handle_consolidation_result(result)
+            else:
+                logger.info(f"POLLING: Got diarization result: {result.request_id}, segments={len(result.segments)}")
+                await _handle_diarization_result(result)
             # Reset poll count and timer after receiving result
             poll_count = 0
             poll_start_time = time.monotonic()

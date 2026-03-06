@@ -64,6 +64,27 @@ class MergeSpeakersRequest:
     target: str   # speaker to keep
 
 @dataclass
+class ConsolidateRequest:
+    """Request to run a post-session consolidation pass in the worker."""
+    relaxed_threshold: float = 0.65
+    relaxed_guard: float = 0.55
+
+@dataclass
+class ConsolidationResult:
+    """Result from a post-session consolidation pass."""
+    merges: List[Tuple[str, str]]  # (merged_into, merged_from)
+    speaker_count_before: int
+    speaker_count_after: int
+
+@dataclass
+class WorkerConfigMessage:
+    """Configuration message forwarded from DiarizationClient to the worker at startup."""
+    threshold: float
+    min_samples_for_match: int
+    ema_alpha: float
+    active_window_seconds: float
+
+@dataclass
 class DiarizationResult:
     """Result from diarization processing."""
     request_id: str
@@ -129,6 +150,7 @@ class SpeakerMemory:
         history_size: int = 20,
         min_samples_for_match: int = 3,
         min_segment_duration: float = 0.15,
+        min_segment_duration_for_creation: float = 0.40,
         ema_alpha: float = 0.05,
         active_window_seconds: float = 1200.0,
         embedding_validator: Optional[EmbeddingQualityValidator] = None,
@@ -141,8 +163,12 @@ class SpeakerMemory:
             recency_boost: Bonus added to most recent speaker's similarity
             history_size: Number of recent speaker IDs to track
             min_samples_for_match: Minimum observations before matching against a speaker
-            min_segment_duration: Minimum segment duration in seconds (default: 0.15)
-            ema_alpha: EMA smoothing factor for prototype updates (default: 0.08,
+            min_segment_duration: Minimum segment duration in seconds — below this the
+                segment is dropped entirely by the worker (default: 0.15)
+            min_segment_duration_for_creation: Below this duration a new speaker will NOT
+                be created; short segments are soft-assigned to the best match (if score
+                >= 0.50) or discarded.  Does not affect matching known speakers. (default: 0.40)
+            ema_alpha: EMA smoothing factor for prototype updates (default: 0.05,
                 lowered from 0.15 to prevent centroid drift between similar speakers)
             active_window_seconds: Seconds since last seen before a speaker is skipped
                 during matching. Inactive speakers are retained in memory and can
@@ -155,6 +181,7 @@ class SpeakerMemory:
         self.recency_boost = recency_boost
         self.min_samples_for_match = min_samples_for_match
         self.min_segment_duration = min_segment_duration
+        self.min_segment_duration_for_creation = min_segment_duration_for_creation
         self.ema_alpha = ema_alpha
         self.active_window_seconds = active_window_seconds
         
@@ -198,7 +225,15 @@ class SpeakerMemory:
         self._match_log: List[dict] = []
         self._recent_merges_log: List[dict] = []
         self._invalid_embedding_reasons: List[str] = []  # Track reasons for invalid embeddings
-        
+
+        # Per-speaker intra-prototype variance (1 - mean_pairwise_cosine).
+        # Used by the variance-adjusted prototype merge guard so speakers with
+        # naturally wide vocal range don't block legitimate self-merges.
+        self._intra_variance: Dict[str, float] = {}
+
+        # Tracks last segment end time for MIN_SPEAKER_SWITCH_GAP continuity bonus
+        self._last_segment_end: float = 0.0
+
         # Statistics tracking
         self._stats = {
             "identifications": 0,
@@ -210,6 +245,9 @@ class SpeakerMemory:
             "skipped_short_segments": 0,
             "margin_penalties_applied": 0,
             "margin_new_speaker_forced": 0,
+            "overlap_segments_skipped_update": 0,
+            "short_segments_skipped_update": 0,
+            "short_segments_soft_assigned": 0,
         }
     
     def _normalize(self, embedding: np.ndarray) -> np.ndarray:
@@ -469,7 +507,15 @@ class SpeakerMemory:
 
         Args:
             embedding: Raw speaker embedding (will be normalized)
-            segment_info: Optional metadata for logging (timestamp, text, etc)
+            segment_info: Optional metadata; recognised keys:
+                - segment_duration (float): length of this audio segment in seconds
+                - is_overlap (bool): True if this segment overlaps with another speaker —
+                  centroid updates are skipped and no new speaker is created.
+                - is_onset_contaminated (bool): True if the onset of this turn is
+                  within 500 ms of a previous speaker's end — centroid updates are skipped.
+                - start_time (float): turn start in seconds (used for switch-gap bonus)
+                - end_time (float): turn end in seconds (used to track _last_segment_end)
+                - request_id, speaker_label: chunk-level co-occurrence tracking
 
         Returns:
             (speaker_id, confidence_score, alt_speakers)
@@ -499,14 +545,41 @@ class SpeakerMemory:
 
         embedding = self._normalize(embedding)
 
+        # --- Extract quality flags from segment_info ---
+        seg = segment_info or {}
+        segment_duration = float(seg.get("segment_duration", 1.0))
+        is_overlap = bool(seg.get("is_overlap", False))
+        is_onset_contaminated = bool(seg.get("is_onset_contaminated", False))
+        seg_start_time: Optional[float] = seg.get("start_time")
+        seg_end_time: Optional[float] = seg.get("end_time")
+
+        # A segment should update speaker centroids only when it is:
+        #   - not from a region where two speakers overlap (embedding is a blend)
+        #   - not from a contaminated turn onset (residual bleed from previous speaker)
+        #   - long enough to represent the speaker's full vocal character
+        should_update_centroid = (
+            not is_overlap
+            and not is_onset_contaminated
+            and segment_duration >= 0.35
+        )
+
+        # Overlap-contaminated segments: never create a new speaker, skip update
+        if is_overlap:
+            logger.info(f"Overlap-contaminated segment (dur={segment_duration:.2f}s): skipping centroid update/creation")
+
         # Clean up any invalid speakers that may have been created before validation
         self.cleanup_invalid_speakers()
 
         if len(self.centroids) == 0:
+            if is_overlap:
+                # Don't bootstrap speaker memory from a contaminated embedding
+                return "unknown", 0.0, {}
             # First speaker
             speaker_id, confidence, alt = self._create_speaker(embedding, segment_info, confidence=1.0)
             self._record_segment_time(speaker_id, segment_info)
             self.last_speaker = speaker_id
+            if seg_end_time is not None:
+                self._last_segment_end = seg_end_time
             return speaker_id, confidence, alt
 
         # ------- Compare against all known speakers (multi-prototype) -------
@@ -543,6 +616,12 @@ class SpeakerMemory:
             # Recency boost: prefer continuing same speaker
             if speaker_id == self.last_speaker:
                 score += self.recency_boost
+                # MIN_SPEAKER_SWITCH_GAP: rapid turn-continuation bonus when the
+                # new segment starts very shortly after the last one ended.
+                if (seg_start_time is not None and self._last_segment_end > 0
+                        and 0.0 <= seg_start_time - self._last_segment_end < self.MIN_SPEAKER_SWITCH_GAP):
+                    score += 0.02
+                    logger.debug(f"{speaker_id}: fast-continuation bonus (+0.02)")
 
             # Temporal transition bonus
             transition_bonus = self._get_transition_bonus(self.last_speaker, speaker_id)
@@ -580,10 +659,12 @@ class SpeakerMemory:
         effective_score = best_score - margin_penalty
 
         # If margin is too small AND effective score is below the hard threshold
-        # → force new speaker creation to avoid wrong assignment
+        # → force new speaker creation to avoid wrong assignment.
+        # Does NOT apply to short segments (they are governed by their own branch below).
         force_new_speaker = (
             margin_penalty > 0
             and effective_score < self.MARGIN_HARD_THRESHOLD
+            and segment_duration >= self.min_segment_duration_for_creation
         )
         if force_new_speaker:
             self._stats["margin_new_speaker_forced"] += 1
@@ -600,11 +681,45 @@ class SpeakerMemory:
             'margin_penalty': margin_penalty,
             'effective_score': effective_score,
             'force_new_speaker': force_new_speaker,
+            'is_overlap': is_overlap,
+            'is_onset_contaminated': is_onset_contaminated,
+            'segment_duration': segment_duration,
             'decision': 'match' if (best_id and effective_score >= effective_threshold and not force_new_speaker) else 'new_speaker',
             'segment_info': segment_info
         })
         logger.info(f"Speaker match scores: {scores}, best: {best_id} ({best_score:.3f}), "
                      f"effective: {effective_score:.3f}, threshold: {effective_threshold:.3f}")
+
+        # ------- Short-segment soft assignment (Part 2 / Part 4) -------
+        # For segments too short to create a reliable new speaker, either:
+        #   a) soft-assign to the best existing match (score >= 0.50), or
+        #   b) discard (return "unknown") rather than spawning a ghost speaker.
+        # This branch is checked BEFORE the standard match/new-speaker decision so that
+        # the force_new_speaker flag cannot override it for short segments.
+        if segment_duration < self.min_segment_duration_for_creation and not is_overlap:
+            if best_id and best_score >= 0.50:
+                self._stats["short_segments_soft_assigned"] += 1
+                self._record_transition(self.last_speaker, best_id)
+                self._record_segment_time(best_id, segment_info)
+                self.last_speaker = best_id
+                self.history.append(best_id)
+                if seg_end_time is not None:
+                    self._last_segment_end = seg_end_time
+                logger.info(
+                    f"Short-segment soft assignment: {best_id} "
+                    f"(score={best_score:.3f}, dur={segment_duration:.2f}s)"
+                )
+                # Reduced confidence tag for downstream consumers
+                reduced_conf = best_score * 0.7
+                return best_id, reduced_conf, {**alt_speakers, "_short_segment_soft_assignment": 1.0}
+            else:
+                # Score too weak AND can't create → discard
+                self._stats["skipped_short_segments"] += 1
+                logger.info(
+                    f"Short segment discarded (score={best_score:.3f} < 0.50, "
+                    f"dur={segment_duration:.2f}s): no new speaker created"
+                )
+                return "unknown", 0.0, {}
 
         # ------- Match or create new speaker -------
         if best_id and effective_score >= effective_threshold and not force_new_speaker:
@@ -627,26 +742,53 @@ class SpeakerMemory:
                     except Exception as e:
                         logger.warning(f"Error in on_low_confidence callback: {e}")
 
-            # Update speaker prototypes & centroid
-            self._update_speaker(best_id, embedding)
+            # Update speaker prototypes & centroid — skip for contaminated segments
+            if should_update_centroid:
+                self._update_speaker(best_id, embedding)
+            else:
+                if is_overlap:
+                    self._stats["overlap_segments_skipped_update"] += 1
+                    logger.debug(f"Skipping centroid update for {best_id}: overlap segment")
+                else:
+                    self._stats["short_segments_skipped_update"] += 1
+                    logger.debug(
+                        f"Skipping centroid update for {best_id}: "
+                        f"{'onset contamination' if is_onset_contaminated else 'short segment'} "
+                        f"(dur={segment_duration:.2f}s)"
+                    )
+                # Still update last_seen so decay stays fresh
+                self.last_seen[best_id] = now
+
             self._record_transition(self.last_speaker, best_id)
             self._record_segment_time(best_id, segment_info)
             self.last_speaker = best_id
             self.history.append(best_id)
+            if seg_end_time is not None:
+                self._last_segment_end = seg_end_time
 
             # Periodic consolidation: every 5 identifications or if speaker count exceeds 10.
             if (self._stats["identifications"] % 5 == 0) or len(self.centroids) > 10:
-                merges = self.auto_merge_similar_speakers(similarity_threshold=0.80)
+                merges = self.auto_merge_similar_speakers(similarity_threshold=0.615)
                 if merges:
                     logger.info(f"Periodic consolidation: {merges} merges")
 
             return best_id, calibrated_confidence, alt_speakers
         else:
+            # Would create a new speaker — block if contaminated or too short
+            if is_overlap:
+                logger.info(
+                    f"Overlap contamination: refusing new speaker creation "
+                    f"(best_score={best_score:.3f}, dur={segment_duration:.2f}s)"
+                )
+                return "unknown", 0.0, {}
+
             self._stats["new_speakers"] += 1
             speaker_id, confidence, _ = self._create_speaker(embedding, segment_info, confidence=1.0)
 
             self._record_transition(self.last_speaker, speaker_id)
             self._record_segment_time(speaker_id, segment_info)
+            if seg_end_time is not None:
+                self._last_segment_end = seg_end_time
 
             # Proactive merge: check if new speaker should be merged immediately
             merge_result = self._check_and_merge_after_creation(speaker_id, embedding)
@@ -719,9 +861,21 @@ class SpeakerMemory:
             # Add as a new prototype
             protos.append((embedding.copy(), 1, now))
         else:
-            # Replace the oldest prototype
-            oldest_idx = min(range(len(protos)), key=lambda i: protos[i][2])
-            protos[oldest_idx] = (embedding.copy(), 1, now)
+            # Pool is full: replace the most redundant prototype (the one whose
+            # best similarity to any *other* prototype is highest — i.e. it adds
+            # the least unique information).  Prefer evicting similar prototypes
+            # over older ones so diverse vocal modes are preserved.
+            most_redundant_idx = 0
+            most_redundant_sim = -1.0
+            for i, (p_emb_i, _, _) in enumerate(protos):
+                best_other = max(
+                    self._cosine_similarity(p_emb_i, protos[j][0])
+                    for j in range(len(protos)) if j != i
+                )
+                if best_other > most_redundant_sim:
+                    most_redundant_sim = best_other
+                    most_redundant_idx = i
+            protos[most_redundant_idx] = (embedding.copy(), 1, now)
 
         self.prototypes[speaker_id] = protos
 
@@ -735,14 +889,26 @@ class SpeakerMemory:
 
         self.counts[speaker_id] += 1
         self.last_seen[speaker_id] = now
+
+        # Compute intra-prototype variance: 1 - mean(pairwise cosine similarity).
+        # High variance → speaker has wide vocal range → relax merge guard.
+        if len(protos) >= 2:
+            sims = []
+            for i in range(len(protos)):
+                for j in range(i + 1, len(protos)):
+                    sims.append(self._cosine_similarity(protos[i][0], protos[j][0]))
+            self._intra_variance[speaker_id] = 1.0 - float(np.mean(sims))
+        else:
+            self._intra_variance[speaker_id] = 0.0
     
     def _check_and_merge_after_creation(self, new_speaker_id: str, new_embedding: np.ndarray) -> Optional[str]:
         """Check if new speaker should be merged immediately.
 
-        Guarded by chunk-based co-occurrence and prototype merge guard.
+        Guarded by chunk-based co-occurrence and variance-adjusted prototype merge guard.
         The co-occurrence check uses chunk+label tracking (reliable), and
         the prototype guard prevents merging speakers with incompatible
-        vocal mode distributions.
+        vocal mode distributions, automatically relaxed for speakers with
+        naturally wide vocal range (high intra-prototype variance).
         """
         for existing_id, centroid in list(self.centroids.items()):
             if existing_id == new_speaker_id:
@@ -763,11 +929,22 @@ class SpeakerMemory:
                 logger.debug(f"Co-occurrence guard: {new_speaker_id} and {existing_id} co-occurred, skipping merge")
                 continue
 
-            # Prototype merge guard: at least one vocal mode has no counterpart
+            # Variance-adjusted prototype merge guard.
+            # Speakers with wider vocal range (high intra-variance) naturally produce
+            # lower cross-prototype similarity → compensate so legitimate merges aren't
+            # blocked.  Floor is 0.50 regardless of variance.
             cross_min = self._min_cross_prototype_best_match(existing_id, new_speaker_id)
-            if cross_min < self.PROTOTYPE_MERGE_GUARD_THRESHOLD:
-                logger.debug(f"Prototype guard: {new_speaker_id} and {existing_id} cross_min={cross_min:.3f} "
-                             f"< {self.PROTOTYPE_MERGE_GUARD_THRESHOLD}, skipping merge")
+            avg_variance = (
+                self._intra_variance.get(existing_id, 0.0)
+                + self._intra_variance.get(new_speaker_id, 0.0)
+            ) / 2.0
+            effective_guard = max(self.PROTOTYPE_MERGE_GUARD_THRESHOLD - avg_variance, 0.50)
+            if cross_min < effective_guard:
+                logger.debug(
+                    f"Prototype guard: {new_speaker_id} <-> {existing_id} "
+                    f"cross_min={cross_min:.3f} < effective_guard={effective_guard:.3f} "
+                    f"(base={self.PROTOTYPE_MERGE_GUARD_THRESHOLD}, avg_var={avg_variance:.3f}), skipping merge"
+                )
                 continue
 
             if sim >= 0.80:
@@ -781,7 +958,7 @@ class SpeakerMemory:
         Manually merge two speakers (useful for correcting errors).
         Keeps speaker_a, merges speaker_b into it.
         """
-        logger.info(f"Merging speakers: {speaker_a} <- {speaker_b}")
+        logger.info(f"Merging speakers: {speaker_b} -> {speaker_a}")
         if speaker_a not in self.centroids or speaker_b not in self.centroids:
             raise ValueError("Both speakers must exist")
         
@@ -955,120 +1132,148 @@ class SpeakerMemory:
     def auto_merge_similar_speakers(
         self,
         similarity_threshold: float = 0.88,
-        max_merges: int = 5
+        max_merges: int = 5,
+        post_session: bool = False,
+        override_guard: Optional[float] = None,
     ) -> int:
         """
         Automatically merge speakers using hierarchical approach.
-        
+
         - Immediate merge: similarity >= 0.92 (near-certain same speaker)
-        - Standard merge: similarity >= threshold (0.88 default)
-        
+        - Standard merge: similarity >= threshold (default: 0.88 for manual calls;
+          0.615 when called from identify() for live incremental consolidation)
+
         Guards:
           1. Chunk-based co-occurrence: pyannote separated them → block
-          2. Prototype merge guard: incompatible vocal modes → block
+             (bypassed when post_session=True — full-session context available)
+          2. Variance-adjusted prototype merge guard: incompatible vocal modes → block
+             (threshold = max(base - avg_intra_variance, 0.50))
           3. CO_OCCURRENCE_OVERRIDE_SIMILARITY (0.92): bypass both guards
-        
+
         Args:
-            similarity_threshold: Pairs above this threshold will be merged (default: 0.88)
+            similarity_threshold: Pairs above this threshold will be merged
             max_merges: Maximum number of merges to perform in one call
-            
+            post_session: When True, bypass the co-occurrence guard — used in
+              the end-of-stream consolidation pass where the full session context
+              makes it safe to merge speakers who happen to share a chunk.
+            override_guard: If set, override PROTOTYPE_MERGE_GUARD_THRESHOLD with
+              this value for this call (used by consolidate_post_session).
+
         Returns:
             Number of merges performed
         """
+        guard_threshold = override_guard if override_guard is not None else self.PROTOTYPE_MERGE_GUARD_THRESHOLD
         merges_performed = 0
-        
+
+        def _apply_guards(speaker_a: str, speaker_b: str, similarity: float) -> bool:
+            """Return True if the merge is allowed after applying guards."""
+            # High-similarity override: bypass all guards
+            if similarity >= self.CO_OCCURRENCE_OVERRIDE_SIMILARITY:
+                return True
+            # Co-occurrence guard (skipped in post-session pass)
+            if not post_session and self._speakers_co_occurred(speaker_a, speaker_b):
+                logger.info(f"Co-occurrence guard blocked merge: {speaker_a} <-> {speaker_b} "
+                            f"(sim={similarity:.3f})")
+                return False
+            # Variance-adjusted prototype guard
+            cross_min = self._min_cross_prototype_best_match(speaker_a, speaker_b)
+            avg_variance = (
+                self._intra_variance.get(speaker_a, 0.0)
+                + self._intra_variance.get(speaker_b, 0.0)
+            ) / 2.0
+            effective_guard = max(guard_threshold - avg_variance, 0.50)
+            if cross_min < effective_guard:
+                logger.info(
+                    f"Prototype guard blocked merge: {speaker_a} <-> {speaker_b} "
+                    f"(sim={similarity:.3f}, cross_min={cross_min:.3f}, "
+                    f"effective_guard={effective_guard:.3f}, avg_var={avg_variance:.3f})"
+                )
+                return False
+            return True
+
         # Phase 1: Immediate merges for near-certain same-speaker (>= 0.92)
         immediate_threshold = 0.92
         for _ in range(max_merges):
             similar_pairs = self.find_similar_speakers(immediate_threshold)
-            
             if not similar_pairs:
                 break
-            
-            # Filter out co-occurring pairs (with high-similarity override)
-            merge_pair = None
-            for speaker_a, speaker_b, similarity in similar_pairs:
-                # High-similarity override: bypass guards
-                if similarity >= self.CO_OCCURRENCE_OVERRIDE_SIMILARITY:
-                    merge_pair = (speaker_a, speaker_b, similarity)
-                    break
-                # Co-occurrence guard
-                if self._speakers_co_occurred(speaker_a, speaker_b):
-                    logger.info(f"Co-occurrence guard blocked merge: {speaker_a} <-> {speaker_b} "
-                               f"(sim={similarity:.3f})")
-                    continue
-                # Prototype merge guard
-                cross_min = self._min_cross_prototype_best_match(speaker_a, speaker_b)
-                if cross_min < self.PROTOTYPE_MERGE_GUARD_THRESHOLD:
-                    logger.info(f"Prototype guard blocked merge: {speaker_a} <-> {speaker_b} "
-                               f"(sim={similarity:.3f}, cross_min={cross_min:.3f})")
-                    continue
-                merge_pair = (speaker_a, speaker_b, similarity)
-                break
-            
+            merge_pair = next(
+                ((a, b, sim) for a, b, sim in similar_pairs if _apply_guards(a, b, sim)),
+                None
+            )
             if merge_pair is None:
                 break
-            
             speaker_a, speaker_b, similarity = merge_pair
-            logger.info(f"Immediate auto-merge: {speaker_a} <-> {speaker_b} "
-                       f"(similarity: {similarity:.3f})")
-            
+            logger.info(f"Immediate auto-merge: {speaker_a} <-> {speaker_b} (similarity: {similarity:.3f})")
             self._merge_speakers_internal(speaker_a, speaker_b, similarity)
             merges_performed += 1
-            
             self.history = deque(
                 [speaker_a if s == speaker_b else s for s in self.history],
                 maxlen=self.history.maxlen
             )
-        
+
         # Phase 2: Standard merges using the provided threshold
         for _ in range(max_merges - merges_performed):
             similar_pairs = self.find_similar_speakers(similarity_threshold)
-            
             if not similar_pairs:
                 break
-            
-            # Filter out co-occurring pairs (with high-similarity override)
-            merge_pair = None
-            for speaker_a, speaker_b, similarity in similar_pairs:
-                # High-similarity override: bypass guards
-                if similarity >= self.CO_OCCURRENCE_OVERRIDE_SIMILARITY:
-                    merge_pair = (speaker_a, speaker_b, similarity)
-                    break
-                # Co-occurrence guard
-                if self._speakers_co_occurred(speaker_a, speaker_b):
-                    logger.info(f"Co-occurrence guard blocked merge: {speaker_a} <-> {speaker_b} "
-                               f"(sim={similarity:.3f})")
-                    continue
-                # Prototype merge guard
-                cross_min = self._min_cross_prototype_best_match(speaker_a, speaker_b)
-                if cross_min < self.PROTOTYPE_MERGE_GUARD_THRESHOLD:
-                    logger.info(f"Prototype guard blocked merge: {speaker_a} <-> {speaker_b} "
-                               f"(sim={similarity:.3f}, cross_min={cross_min:.3f})")
-                    continue
-                merge_pair = (speaker_a, speaker_b, similarity)
-                break
-            
+            merge_pair = next(
+                ((a, b, sim) for a, b, sim in similar_pairs if _apply_guards(a, b, sim)),
+                None
+            )
             if merge_pair is None:
                 break
-            
             speaker_a, speaker_b, similarity = merge_pair
-            logger.info(f"Standard auto-merge: {speaker_a} <-> {speaker_b} "
-                       f"(similarity: {similarity:.3f})")
-            
+            logger.info(f"Standard auto-merge: {speaker_a} <-> {speaker_b} (similarity: {similarity:.3f})")
             self._merge_speakers_internal(speaker_a, speaker_b, similarity)
             merges_performed += 1
-            
             self.history = deque(
                 [speaker_a if s == speaker_b else s for s in self.history],
                 maxlen=self.history.maxlen
             )
-        
+
         if merges_performed > 0:
             logger.info(f"Auto-merge completed: {merges_performed} merges performed")
-        
+
         return merges_performed
     
+    def consolidate_post_session(
+        self,
+        relaxed_threshold: float = 0.65,
+        relaxed_guard: float = 0.55,
+        max_merges: int = 20,
+    ) -> List[Tuple[str, str]]:
+        """Run a post-session consolidation pass with relaxed merge criteria.
+
+        Should be called once, before the session is reset, when full-session
+        context is available.  Key differences from the live pass:
+          - Co-occurrence guard is bypassed (full session means pyannote chunk
+            boundaries are less reliable evidence of speaker identity).
+          - Prototype guard base threshold is lowered to ``relaxed_guard`` (0.55).
+          - ``relaxed_threshold`` (0.65) is used instead of the live 0.72 floor.
+          - Up to max_merges (20) merges are allowed.
+
+        Returns:
+            List of (merged_into, merged_from) string pairs for each merge performed.
+        """
+        log_before = len(self._recent_merges_log)
+        n = self.auto_merge_similar_speakers(
+            similarity_threshold=relaxed_threshold,
+            max_merges=max_merges,
+            post_session=True,
+            override_guard=relaxed_guard,
+        )
+        new_entries = self._recent_merges_log[log_before:]
+        result = [(m["to"], m["from"]) for m in new_entries]
+        if n > 0:
+            logger.info(
+                f"Post-session consolidation: {n} merge(s) "
+                f"({[f'{src}→{tgt}' for tgt, src in result]})"
+            )
+        else:
+            logger.info("Post-session consolidation: no merges needed")
+        return result
+
     def _merge_speakers_internal(self, speaker_a: str, speaker_b: str, similarity: float = 0.0):
         """
         Internal method to merge speaker_b into speaker_a.
@@ -1150,6 +1355,9 @@ class SpeakerMemory:
         del self.counts[speaker_b]
         self.last_seen.pop(speaker_b, None)
         self.prototypes.pop(speaker_b, None)
+        self._intra_variance.pop(speaker_b, None)
+        # Clear speaker_a's variance so it gets recomputed on next _update_speaker call
+        self._intra_variance.pop(speaker_a, None)
 
         # Log merge event for debugging
         self._recent_merges_log.append({
@@ -1210,6 +1418,8 @@ class SpeakerMemory:
         self._recent_merges_log.clear()
         self._transitions.clear()
         self._segment_chunks.clear()
+        self._intra_variance.clear()
+        self._last_segment_end = 0.0
         
         # Reset statistics
         self._stats = {
@@ -1222,6 +1432,9 @@ class SpeakerMemory:
             "skipped_short_segments": 0,
             "margin_penalties_applied": 0,
             "margin_new_speaker_forced": 0,
+            "overlap_segments_skipped_update": 0,
+            "short_segments_skipped_update": 0,
+            "short_segments_soft_assigned": 0,
         }
         
         # Reset validator stats
@@ -1377,16 +1590,24 @@ def diarization_worker(hf_token: str, request_queue, result_queue):
         logger.error(f"Failed to initialize diarization pipeline: {e}")
         return
     
-    # Minimum segment duration to process (skip very short segments)
+    # Minimum segment duration to process (drop entirely — no identify() call)
     MIN_SEGMENT_DURATION = 0.15  # seconds
-    
-    # Initialize speaker memory with validation
-    # min_samples_for_match=1 allows immediate matching after first sample;
-    # the merge guards (_check_and_merge_after_creation, auto_merge, prototype guard)
-    # independently enforce higher observation counts before any merge is attempted.
-    # ema_alpha=0.05 slows prototype drift so profiles of similar-sounding
-    # speakers stay distinct over time rather than converging.
-    speakers = SpeakerMemory(threshold=0.72, min_samples_for_match=1, ema_alpha=0.05, active_window_seconds=28800.0)
+    # Below this duration a new speaker will NOT be created; short segments are
+    # soft-assigned to the best existing match (if score >= 0.50) or discarded.
+    MIN_DURATION_FOR_CREATION = 0.40  # seconds
+
+    # Initialize speaker memory with defaults; a WorkerConfigMessage sent at
+    # startup by DiarizationClient.start() can override these values.
+    # min_samples_for_match=3 requires at least 3 observations of a speaker
+    # before their centroid can be a merge target, reducing ghost-speaker merges
+    # from short contaminated segments.
+    speakers = SpeakerMemory(
+        threshold=0.72,
+        min_samples_for_match=3,
+        min_segment_duration_for_creation=MIN_DURATION_FOR_CREATION,
+        ema_alpha=0.05,
+        active_window_seconds=28800.0,
+    )
 
     shutdown_received = False
     while True:
@@ -1414,6 +1635,42 @@ def diarization_worker(hf_token: str, request_queue, result_queue):
                     logger.info("Diarization worker shutting down - queue empty")
                     break
             
+            # Handle worker config message (sent by DiarizationClient.start())
+            if isinstance(request, WorkerConfigMessage):
+                speakers = SpeakerMemory(
+                    threshold=request.threshold,
+                    min_samples_for_match=request.min_samples_for_match,
+                    min_segment_duration_for_creation=MIN_DURATION_FOR_CREATION,
+                    ema_alpha=request.ema_alpha,
+                    active_window_seconds=request.active_window_seconds,
+                )
+                logger.info(
+                    f"WORKER: Applied config: threshold={request.threshold}, "
+                    f"min_samples={request.min_samples_for_match}, "
+                    f"ema_alpha={request.ema_alpha}, "
+                    f"active_window={request.active_window_seconds}"
+                )
+                continue
+
+            # Handle post-session consolidation request
+            if isinstance(request, ConsolidateRequest):
+                count_before = len(speakers.centroids)
+                merges = speakers.consolidate_post_session(
+                    relaxed_threshold=request.relaxed_threshold,
+                    relaxed_guard=request.relaxed_guard,
+                )
+                count_after = len(speakers.centroids)
+                logger.info(
+                    f"WORKER: Post-session consolidation: "
+                    f"{len(merges)} merge(s), speakers {count_before} → {count_after}"
+                )
+                result_queue.put(ConsolidationResult(
+                    merges=merges,
+                    speaker_count_before=count_before,
+                    speaker_count_after=count_after,
+                ))
+                continue
+
             # Handle speaker merge request
             if isinstance(request, MergeSpeakersRequest):
                 try:
@@ -1437,7 +1694,36 @@ def diarization_worker(hf_token: str, request_queue, result_queue):
             try:
                 # Run diarization
                 diarization_result = pipeline(request.audio_path)
-                
+
+                # --- Build overlap and onset-contamination maps for this chunk ---
+                # Collect all raw pyannote (start, end, speaker) turns from this chunk.
+                raw_turns = [
+                    (t.start, t.end, spk)
+                    for t, spk in diarization_result.speaker_diarization
+                ]
+                # Overlap intervals: time regions where 2+ different pyannote labels coexist.
+                overlap_intervals: List[Tuple[float, float]] = []
+                for i in range(len(raw_turns)):
+                    s1, e1, spk1 = raw_turns[i]
+                    for j in range(i + 1, len(raw_turns)):
+                        s2, e2, spk2 = raw_turns[j]
+                        if spk1 == spk2:
+                            continue
+                        ov_s = max(s1, s2)
+                        ov_e = min(e1, e2)
+                        if ov_e > ov_s:
+                            overlap_intervals.append((ov_s, ov_e))
+                # Onset-contamination: a turn whose start is within 500 ms of
+                # another speaker's end is considered onset-contaminated (residual
+                # bleed from previous speaker).
+                other_speaker_ends: Dict[str, List[float]] = {}
+                for ts, te, tspk in raw_turns:
+                    other_speaker_ends.setdefault(tspk, [])  # ensure key exists
+                for ts, te, tspk in raw_turns:
+                    for ospk, ends in other_speaker_ends.items():
+                        if ospk != tspk:
+                            ends.append(te)
+
                 # Combined loop: validate segment duration BEFORE speaker matching
                 # Build a mapping from speaker label to embedding index
                 speaker_to_embedding_idx = {speaker: idx for idx, speaker in enumerate(diarization_result.speaker_diarization.labels())}
@@ -1467,12 +1753,29 @@ def diarization_worker(hf_token: str, request_queue, result_queue):
                     speaker_embedding = diarization_result.speaker_embeddings[s]
                     emb_norm = np.linalg.norm(speaker_embedding)
                     logger.debug(f"Pyannote embedding[{s}] norm={emb_norm:.4f}, shape={speaker_embedding.shape}")
-                    
+
+                    # Overlap: this turn's time range intersects a known overlap interval
+                    is_overlap = any(
+                        min(turn.end, ov_e) > max(turn.start, ov_s)
+                        for ov_s, ov_e in overlap_intervals
+                    )
+                    # Onset contamination: this turn starts within 500 ms of
+                    # a different-speaker's segment end in this chunk.
+                    other_ends_for_this_spk = other_speaker_ends.get(speaker, [])
+                    is_onset_contaminated = any(
+                        0.0 <= turn.start - e <= 0.5
+                        for e in other_ends_for_this_spk
+                    )
+
                     segment_info = {
                         "request_id": request.request_id,
                         "speaker_label": speaker,
                         "embedding_index": s,
-                        "segment_duration": segment_duration
+                        "segment_duration": segment_duration,
+                        "start_time": turn.start,
+                        "end_time": turn.end,
+                        "is_overlap": is_overlap,
+                        "is_onset_contaminated": is_onset_contaminated,
                     }
                     
                     # STEP 3: Call identify() only for valid-duration segments
@@ -1636,6 +1939,15 @@ class DiarizationClient:
             )
             self._process.start()
             self._running = True
+
+            # Forward client configuration to the worker so its SpeakerMemory
+            # uses the same parameters as the DiarizationClient.
+            self._request_queue.put(WorkerConfigMessage(
+                threshold=self.threshold,
+                min_samples_for_match=self.min_samples_for_match,
+                ema_alpha=self.ema_alpha,
+                active_window_seconds=self.active_window_seconds,
+            ))
             logger.info("Diarization process started")
     
     def update_params(
@@ -1787,19 +2099,30 @@ class DiarizationClient:
     
     def reset_process(self):
         """Reset internal state without stopping the process.
-        
-        This clears queues and resets state for a new stream while
-        keeping the diarization worker process running.
+
+        Triggers a post-session consolidation pass in the worker (so speakers
+        like 41→2, 39→38 etc. are merged before the session state is cleared),
+        then drains stale audio requests and sends a RESET_SIGNAL to clear the
+        worker's speaker memory for the new stream.
         """
         with self._lock:
-            # Clear queues to discard pending requests from previous stream
             if self._request_queue is not None:
+                # Request post-session consolidation BEFORE draining — it was
+                # queued before any pending audio so it runs first-in-first-out.
+                # (The drain below clears the rest; ConsolidateRequest was already
+                # in the queue before any audio requests for the current stream.)
+                self._request_queue.put(ConsolidateRequest())
+                # Drain remaining audio requests from the previous stream
                 try:
                     while not self._request_queue.empty():
-                        self._request_queue.get_nowait()
+                        item = self._request_queue.get_nowait()
+                        if isinstance(item, ConsolidateRequest):
+                            # Re-queue so it executes before RESET_SIGNAL
+                            self._request_queue.put(item)
+                            break
                 except Exception:
                     pass
-                # Send reset signal to clear speaker memory in worker
+                # Signal worker to clear speaker memory for the new stream
                 self._request_queue.put(RESET_SIGNAL)
             if self._result_queue is not None:
                 try:
@@ -1807,7 +2130,28 @@ class DiarizationClient:
                         self._result_queue.get_nowait()
                 except Exception:
                     pass
-            logger.info("Diarization process state reset")
+            logger.info("Diarization process state reset (consolidation queued)")
+
+    def consolidate(self,
+                    relaxed_threshold: float = 0.65,
+                    relaxed_guard: float = 0.55) -> None:
+        """Queue a post-session consolidation pass in the worker.
+
+        The result arrives asynchronously as a :class:`ConsolidationResult` on
+        the result queue and is handled by the main polling loop, which emits a
+        ``speakers_merged`` event to the client.
+
+        Call this before :meth:`reset` (or during a graceful stream-end) so that
+        the consolidation always executes ahead of the RESET_SIGNAL.
+        """
+        if self._request_queue is not None:
+            self._request_queue.put(ConsolidateRequest(
+                relaxed_threshold=relaxed_threshold,
+                relaxed_guard=relaxed_guard,
+            ))
+            logger.info("DiarizationClient: consolidation request queued")
+        else:
+            logger.warning("consolidate() called but worker not running; ignoring")
     
     async def process_audio(self, audio_path: str, request_id: str):
         """
@@ -1829,15 +2173,15 @@ class DiarizationClient:
         self._request_queue.put(request)
         logger.debug(f"Request put in queue: {request_id}, queue size unknown (multiprocessing)")
     
-    async def get_result(self, timeout: float = 10.0) -> Optional[DiarizationResult]:
+    async def get_result(self, timeout: float = 10.0) -> Optional[Union[DiarizationResult, ConsolidationResult]]:
         """
-        Get a diarization result.
+        Get a diarization or consolidation result.
         
         Args:
             timeout: Maximum time to wait for a result
             
         Returns:
-            DiarizationResult or None if timeout
+            DiarizationResult, ConsolidationResult, or None if timeout
         """
         if not self._running:
             logger.warning(f"get_result called but _running=False, request_id would be unknown")
