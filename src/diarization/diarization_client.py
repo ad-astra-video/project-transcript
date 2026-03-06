@@ -2054,10 +2054,16 @@ class DiarizationClient:
         return len(self.in_flight_requests)
     
     def send_shutdown_signal(self):
-        """Send shutdown signal to worker process."""
+        """Queue a post-session consolidation pass then send shutdown signal to worker.
+
+        Consolidation is always queued ahead of the None sentinel so the worker
+        merges near-duplicate speakers while it still has full session context
+        before it exits.
+        """
         if self._request_queue is not None:
+            self._request_queue.put(ConsolidateRequest())
             self._request_queue.put(None)
-            logger.info("DiarizationClient sent shutdown signal to worker")
+            logger.info("DiarizationClient queued consolidation and sent shutdown signal to worker")
     
     def is_idle(self) -> bool:
         """Check if worker is idle (no pending work and queue empty)."""

@@ -759,7 +759,7 @@ async def _handle_graceful_shutdown():
     
     # Phase 2: Flush remaining buffered audio
     await _flush_audio_buffers()
-    
+
     STATE.diarization_client.send_shutdown_signal()
 
     # Phase 3: Stop summary workers gracefully (using default shutdown timeout)
