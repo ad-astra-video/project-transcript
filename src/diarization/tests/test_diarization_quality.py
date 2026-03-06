@@ -1711,7 +1711,7 @@ class TestDiarizationV2Improvements:
         memory = SpeakerMemory()
 
         assert memory.threshold == 0.65
-        assert memory.min_samples_for_match == 3
+        assert memory.min_samples_for_match == 2
         assert memory.ema_alpha == 0.05
         assert memory.active_window_seconds == 1200.0
     

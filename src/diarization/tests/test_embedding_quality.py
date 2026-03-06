@@ -588,10 +588,11 @@ class TestSpeakerMerging:
         memory.identify(embedding)
         memory.identify(embedding)
         
-        # Create second speaker with very similar embedding
-        embedding_similar = embedding + np.random.randn(512).astype(np.float32) * 0.01
-        embedding_similar = embedding_similar / np.linalg.norm(embedding_similar)
-        speaker_b, _, _ = memory.identify(embedding_similar)
+        # Create second speaker with a clearly distinct embedding (different voice)
+        rng = np.random.default_rng(42)
+        embedding_b = rng.standard_normal(512).astype(np.float32)
+        embedding_b = embedding_b / np.linalg.norm(embedding_b)
+        speaker_b, _, _ = memory.identify(embedding_b)
         
         # Extract speaker numbers
         num_a = int(speaker_a.split('_')[1])

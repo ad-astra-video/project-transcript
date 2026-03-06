@@ -123,7 +123,7 @@ class TestConfiguration:
     def test_default_min_samples(self):
         """Test that default min_samples_for_match is updated."""
         memory = SpeakerMemory()
-        assert memory.min_samples_for_match == 3, f"Default min_samples should be 3, got {memory.min_samples_for_match}"
+        assert memory.min_samples_for_match == 2, f"Default min_samples should be 2, got {memory.min_samples_for_match}"
     
     def test_default_recency_boost(self):
         """Test that default recency_boost is updated."""

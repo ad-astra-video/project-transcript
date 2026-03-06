@@ -148,7 +148,7 @@ class SpeakerMemory:
         threshold: float = 0.65,
         recency_boost: float = 0.02,
         history_size: int = 20,
-        min_samples_for_match: int = 3,
+        min_samples_for_match: int = 2,
         min_segment_duration: float = 0.15,
         min_segment_duration_for_creation: float = 0.40,
         ema_alpha: float = 0.05,
@@ -589,8 +589,17 @@ class SpeakerMemory:
         scores = {}
         alt_speakers = {}
 
-        # Dynamic threshold: use min of configured min_samples_for_match or total identifications
+        # Dynamic threshold: use min of configured min_samples_for_match or total identifications.
+        # Guard: if applying effective_min would skip ALL candidates, disable it to prevent a
+        # deadlock where new speakers can never accumulate observations.
         effective_min = min(self._stats["identifications"], self.min_samples_for_match)
+        qualifying_speakers = [sid for sid in self.centroids if self.counts.get(sid, 0) >= effective_min]
+        if not qualifying_speakers and self.centroids:
+            # All speakers are below the threshold — include them all so at least one can match
+            # and accumulate observations needed to eventually qualify normally.
+            effective_min = 1
+            qualifying_speakers = list(self.centroids.keys())
+            logger.debug(f"effective_min forced to 1: all {len(self.centroids)} speakers below threshold")
 
         total_samples = sum(self.counts.values())
         logger.debug(f"Matching: {len(self.centroids)} speakers, total_samples={total_samples}, "
@@ -1598,12 +1607,12 @@ def diarization_worker(hf_token: str, request_queue, result_queue):
 
     # Initialize speaker memory with defaults; a WorkerConfigMessage sent at
     # startup by DiarizationClient.start() can override these values.
-    # min_samples_for_match=3 requires at least 3 observations of a speaker
+    # min_samples_for_match=2 requires at least 2 observations of a speaker before matching
     # before their centroid can be a merge target, reducing ghost-speaker merges
     # from short contaminated segments.
     speakers = SpeakerMemory(
         threshold=0.72,
-        min_samples_for_match=3,
+        min_samples_for_match=2,
         min_segment_duration_for_creation=MIN_DURATION_FOR_CREATION,
         ema_alpha=0.05,
         active_window_seconds=28800.0,
