@@ -243,6 +243,15 @@ class ContextSummaryTask:
         self._next_insight_id += 1
         return self._next_insight_id
     
+    def reset(self):
+        """Reset state for a new stream.
+        
+        Clears the insight ID counter to ensure fresh ID sequence
+        for each new stream session.
+        """
+        self._next_insight_id = 0
+        logger.debug("ContextSummaryTask reset - insight ID counter cleared")
+    
     def _format_content_type_rules(self, content_type: str) -> str:
         """
         Format content type rules as prompt text for injection into system prompt.

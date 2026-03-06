@@ -117,6 +117,33 @@ class TestWindowManagerReset:
         
         # Counter increments correctly
         assert task._next_insight_id == 2
+    
+    def test_context_summary_task_resets_insight_counter(self):
+        """Test that ContextSummaryTask resets insight ID counter on reset()."""
+        from src.summary.context_summary.task import ContextSummaryTask
+        from unittest.mock import MagicMock
+        
+        task = ContextSummaryTask(
+            llm_client=MagicMock(),
+            window_manager=WindowManager()
+        )
+        
+        # Get some insight IDs
+        first_id = task._get_next_insight_id()
+        second_id = task._get_next_insight_id()
+        assert first_id == 1
+        assert second_id == 2
+        assert task._next_insight_id == 2
+        
+        # Reset the task
+        task.reset()
+        
+        # Verify counter is reset
+        assert task._next_insight_id == 0
+        
+        # Get insight ID after reset - should start from 1 again
+        new_id = task._get_next_insight_id()
+        assert new_id == 1
 
 
 if __name__ == "__main__":

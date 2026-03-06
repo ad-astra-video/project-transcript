@@ -280,6 +280,16 @@ class SummaryClient:
         self.in_flight_windows.clear()
         # Reset last processed timestamp for new stream
         self._last_processed_timestamp = 0.0
+        
+        # Reset all plugins that have a reset method
+        for plugin_name, plugin_instance in self._plugins.items():
+            if hasattr(plugin_instance, 'reset'):
+                try:
+                    plugin_instance.reset()
+                    logger.debug(f"Reset plugin: {plugin_name}")
+                except Exception as e:
+                    logger.warning(f"Failed to reset plugin {plugin_name}: {e}")
+        
         logger.info("SummaryClient reset complete - all state cleared for new stream")
     
     async def _send_monitoring_event(self, event_data: Dict[str, Any], event_type: str):

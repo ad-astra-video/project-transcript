@@ -124,6 +124,12 @@ class ContextSummaryPlugin:
         logger.info(f"ContextSummaryPlugin updated content type to: {content_type} "
                     f"(sentiment_enabled={self._sentiment_enabled}, participants_enabled={self._participants_enabled})")
     
+    def reset(self):
+        """Reset tracked state for new stream."""
+        # Reset the task's insight ID counter
+        self._task.reset()
+        logger.debug("ContextSummaryPlugin reset complete")
+    
     def _should_process(self, summary_window_id: int) -> bool:
         """Check if should process this summary window."""
         if not self._has_performed_summary:
