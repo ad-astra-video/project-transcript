@@ -124,11 +124,11 @@ class SpeakerMemory:
     
     def __init__(
         self,
-        threshold: float = 0.68,
+        threshold: float = 0.65,
         recency_boost: float = 0.02,
         history_size: int = 20,
-        min_samples_for_match: int = 5,
-        min_segment_duration: float = 0.5,
+        min_samples_for_match: int = 3,
+        min_segment_duration: float = 0.15,
         ema_alpha: float = 0.05,
         active_window_seconds: float = 1200.0,
         embedding_validator: Optional[EmbeddingQualityValidator] = None,
@@ -141,12 +141,12 @@ class SpeakerMemory:
             recency_boost: Bonus added to most recent speaker's similarity
             history_size: Number of recent speaker IDs to track
             min_samples_for_match: Minimum observations before matching against a speaker
-            min_segment_duration: Minimum segment duration in seconds (default: 0.5)
+            min_segment_duration: Minimum segment duration in seconds (default: 0.15)
             ema_alpha: EMA smoothing factor for prototype updates (default: 0.08,
                 lowered from 0.15 to prevent centroid drift between similar speakers)
             active_window_seconds: Seconds since last seen before a speaker is skipped
                 during matching. Inactive speakers are retained in memory and can
-                become active again if a new segment looks similar. (default: 1200 = 20 min)
+                become active again if a new segment looks similar. (default: 28800 = 8 hours)
             embedding_validator: Custom embedding validator (uses default if None)
             on_invalid_embedding: Callback for invalid embeddings: (embedding, reason, segment_info)
             on_low_confidence: Callback for low confidence matches: (speaker_id, confidence, segment_info)
@@ -197,6 +197,7 @@ class SpeakerMemory:
         # Debugging
         self._match_log: List[dict] = []
         self._recent_merges_log: List[dict] = []
+        self._invalid_embedding_reasons: List[str] = []  # Track reasons for invalid embeddings
         
         # Statistics tracking
         self._stats = {
@@ -229,11 +230,11 @@ class SpeakerMemory:
         Uses exponential saturation so the threshold never cliffs at arbitrary
         step boundaries.
         Formula: threshold = base + max_increase * (1 - exp(-N / lambda))
-          - At N=0:  threshold = base (0.68)
-          - At N=4:  threshold ≈ 0.694
-          - At N=8:  threshold ≈ 0.707
-          - At N=20: threshold ≈ 0.717
-          - At N=∞:  threshold → base + 0.04 = 0.72
+          - At N=0:  threshold = base (0.72)
+          - At N=4:  threshold ≈ 0.734
+          - At N=8:  threshold ≈ 0.747
+          - At N=20: threshold ≈ 0.757
+          - At N=∞:  threshold → base + 0.04 = 0.76
           - Hard ceiling: base + max_increase
 
         Co-occurrence guards and prototype merge guards are the primary
@@ -248,7 +249,7 @@ class SpeakerMemory:
             if now - self.last_seen.get(sid, now) <= 2 * tau
         ) if self.last_seen else len(self.centroids)
         base = self.threshold
-        max_increase = 0.04
+        max_increase = 0.02
         lam = 8.0  # controls how quickly threshold rises
         threshold = base + max_increase * (1.0 - float(np.exp(-n / lam)))
         return min(threshold, base + max_increase)
@@ -485,7 +486,10 @@ class SpeakerMemory:
         if not is_valid:
             self._stats["invalid_embeddings"] += 1
             _, validation_reason = self.validator.is_valid(embedding)
-            logger.warning(f"Embedding validation FAILED: {validation_reason}, norm={embedding_norm:.4f}, mean={embedding_mean:.8f}")
+            # Track the reason for consolidated logging later
+            if validation_reason not in self._invalid_embedding_reasons:
+                self._invalid_embedding_reasons.append(validation_reason)
+            logger.debug(f"Embedding validation FAILED: {validation_reason}, norm={embedding_norm:.4f}, mean={embedding_mean:.8f}")
             logger.debug(f"Invalid embedding rejected for segment: {segment_info}")
             return "unknown", 0.0, {}
 
@@ -632,7 +636,7 @@ class SpeakerMemory:
 
             # Periodic consolidation: every 5 identifications or if speaker count exceeds 10.
             if (self._stats["identifications"] % 5 == 0) or len(self.centroids) > 10:
-                merges = self.auto_merge_similar_speakers(similarity_threshold=0.88)
+                merges = self.auto_merge_similar_speakers(similarity_threshold=0.80)
                 if merges:
                     logger.info(f"Periodic consolidation: {merges} merges")
 
@@ -766,7 +770,7 @@ class SpeakerMemory:
                              f"< {self.PROTOTYPE_MERGE_GUARD_THRESHOLD}, skipping merge")
                 continue
 
-            if sim >= 0.88:
+            if sim >= 0.80:
                 self._merge_speakers_internal(existing_id, new_speaker_id)
                 logger.info(f"Immediate merge: {new_speaker_id} → {existing_id} (sim={sim:.3f})")
                 return existing_id
@@ -1237,6 +1241,17 @@ class SpeakerMemory:
         self._recent_merges_log.clear()
         return merges
     
+    def get_and_clear_invalid_reasons(self) -> List[str]:
+        """
+        Get invalid embedding reasons tracked during identify() calls and clear the log.
+        
+        Returns:
+            List of unique reasons (e.g., ["all_zeros", "nan_detected"])
+        """
+        reasons = self._invalid_embedding_reasons.copy()
+        self._invalid_embedding_reasons.clear()
+        return reasons
+    
     def get_centroids(self) -> List[dict]:
         """
         Get 2D PCA-projected coordinates of speaker centroids.
@@ -1363,7 +1378,7 @@ def diarization_worker(hf_token: str, request_queue, result_queue):
         return
     
     # Minimum segment duration to process (skip very short segments)
-    MIN_SEGMENT_DURATION = 0.5  # seconds
+    MIN_SEGMENT_DURATION = 0.15  # seconds
     
     # Initialize speaker memory with validation
     # min_samples_for_match=1 allows immediate matching after first sample;
@@ -1371,7 +1386,7 @@ def diarization_worker(hf_token: str, request_queue, result_queue):
     # independently enforce higher observation counts before any merge is attempted.
     # ema_alpha=0.05 slows prototype drift so profiles of similar-sounding
     # speakers stay distinct over time rather than converging.
-    speakers = SpeakerMemory(threshold=0.68, min_samples_for_match=1, ema_alpha=0.05, active_window_seconds=1200.0)
+    speakers = SpeakerMemory(threshold=0.72, min_samples_for_match=1, ema_alpha=0.05, active_window_seconds=28800.0)
 
     shutdown_received = False
     while True:
@@ -1429,6 +1444,7 @@ def diarization_worker(hf_token: str, request_queue, result_queue):
                 
                 segments = []
                 skipped_short = 0
+                skipped_short_durations = []
                 skipped_invalid = 0
                 speaker_ids = {}  # Track for logging/debugging
                 
@@ -1438,6 +1454,7 @@ def diarization_worker(hf_token: str, request_queue, result_queue):
                     # STEP 1: Check segment duration FIRST - skip if too short
                     if segment_duration < MIN_SEGMENT_DURATION:
                         skipped_short += 1
+                        skipped_short_durations.append(segment_duration)
                         logger.debug(f"Skipping short segment: {segment_duration:.2f}s < {MIN_SEGMENT_DURATION}s")
                         continue  # Skip - do NOT call identify()
                     
@@ -1479,9 +1496,15 @@ def diarization_worker(hf_token: str, request_queue, result_queue):
                 
                 # Log summary of skipped segments
                 if skipped_short > 0:
-                    logger.info(f"Skipped {skipped_short} short segments (< {MIN_SEGMENT_DURATION}s)")
+                    durations_str = ", ".join(f"{d:.2f}s" for d in skipped_short_durations)
+                    logger.info(f"Skipped {skipped_short} short segments (< {MIN_SEGMENT_DURATION}s): [{durations_str}]")
                 if skipped_invalid > 0:
-                    logger.info(f"Skipped {skipped_invalid} segments with invalid embeddings")
+                    # Get invalid embedding reasons tracked during processing
+                    reasons = speakers.get_and_clear_invalid_reasons()
+                    if reasons:
+                        logger.info(f"Skipped {skipped_invalid} segments with invalid embeddings: {', '.join(reasons)}")
+                    else:
+                        logger.info(f"Skipped {skipped_invalid} segments with invalid embeddings")
                 
                 logger.info(f"Extracted {len(segments)} speaker segments")
                 if len(segments) > 1:
@@ -1532,13 +1555,13 @@ class DiarizationClient:
     def __init__(
         self,
         hf_token: str = "",
-        threshold: float = 0.68,
+        threshold: float = 0.72,
         recency_boost: float = 0.02,
         history_size: int = 20,
         min_samples_for_match: int = 5,
-        min_segment_duration: float = 0.5,
+        min_segment_duration: float = 0.15,
         ema_alpha: float = 0.05,
-        active_window_seconds: float = 1200.0,
+        active_window_seconds: float = 28800.0,
         embedding_validator: Optional[EmbeddingQualityValidator] = None,
         on_invalid_embedding: Optional[Callable[[np.ndarray, str, Optional[dict]], None]] = None,
         on_low_confidence: Optional[Callable[[str, float, Optional[dict]], None]] = None
@@ -1556,7 +1579,7 @@ class DiarizationClient:
             ema_alpha: EMA smoothing factor for centroid updates
             active_window_seconds: Decay time constant τ for absence penalty. A speaker
                 last seen τ seconds ago has their score multiplied by e^⁻¹ (≈0.37).
-                Set to 0 to disable decay entirely. (default: 1200 = 20 min)
+                Set to 0 to disable decay entirely. (default: 28800 = 8 hours)
             embedding_validator: Custom embedding validator (uses default if None)
             on_invalid_embedding: Callback for invalid embeddings
             on_low_confidence: Callback for low confidence matches

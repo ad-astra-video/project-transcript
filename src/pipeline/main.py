@@ -204,7 +204,7 @@ def _append_audio(frame: AudioFrame):
         logger.info(f"Stream media time origin set to {start_ts:.3f}s")
     STATE.audio_buffer = np.concatenate([STATE.audio_buffer, mono])
     
-    # Also append to diarization buffer for 6-second chunks
+    # Also append to diarization buffer for 10-second chunks
     STATE.diarization_audio_buffer = np.concatenate([STATE.diarization_audio_buffer, mono])
     if STATE.diarization_buffer_start_ts is None:
         STATE.diarization_buffer_start_ts = start_ts
@@ -542,8 +542,10 @@ async def _process_transcription_async(window_samples: np.ndarray, window_start_
 def _pull_diarization_samples(allow_partial: bool = False) -> Optional[tuple]:
     """Pull samples from diarization audio buffer. Thread-safe synchronous operation.
     
+    Extracts 10 seconds of audio from the buffer and removes it (no overlap).
+    
     Args:
-        allow_partial: If True, process partial windows (< 6 seconds). Used during shutdown.
+        allow_partial: If True, process partial windows (< 10 seconds). Used during shutdown.
     
     Returns:
         Tuple of (window_samples, window_start_ts, window_end_ts) or None if buffer too short.
@@ -553,23 +555,25 @@ def _pull_diarization_samples(allow_partial: bool = False) -> Optional[tuple]:
         return None
     
     sr = STATE.buffer_rate
-    diarization_window_seconds = 6.0
-    win_len = int(diarization_window_seconds * sr)
+    extract_duration_seconds = 10.0  # Extract 10 seconds of audio
+    
+    extract_len = int(extract_duration_seconds * sr)
     total_len = len(STATE.diarization_audio_buffer)
     
-    if total_len < win_len:
+    if total_len < extract_len:
         if allow_partial and total_len > 0:
             logger.info(f"Processing partial diarization window: {total_len} samples ({total_len/sr:.2f}s)")
+            extract_len = total_len  # Use whatever we have
         else:
             return None
     
-    # Take the first 6 seconds from the buffer
-    window_samples = STATE.diarization_audio_buffer[:win_len]
+    # Extract the audio (first 10s or less if partial)
+    window_samples = STATE.diarization_audio_buffer[:extract_len]
     window_start_ts = STATE.diarization_buffer_start_ts
-    window_end_ts = window_start_ts + diarization_window_seconds
+    window_end_ts = window_start_ts + (extract_len / float(sr))
     
-    # Update buffer - remove processed audio BEFORE spawning async task
-    STATE.diarization_audio_buffer = STATE.diarization_audio_buffer[win_len:]
+    # Remove the extracted audio from buffer (no overlap)
+    STATE.diarization_audio_buffer = STATE.diarization_audio_buffer[extract_len:]
     STATE.diarization_buffer_start_ts = window_end_ts
     
     return (window_samples, window_start_ts, window_end_ts)
@@ -690,11 +694,11 @@ async def process_audio_async(frame: AudioFrame):
             # Process asynchronously in background
             asyncio.create_task(_process_transcription_async(window_samples, window_start_ts, window_end_ts))
     
-    # Run diarization on 6-second chunks (non-blocking)
+    # Run diarization on 10-second chunks (non-blocking)
     diarization_dur = _diarization_buffer_duration_seconds()
     logger.debug(f"process_audio_async: diarization_dur={diarization_dur:.3f}s")
     
-    if diarization_dur >= 6.0:
+    if diarization_dur >= 10.0:
         logger.debug(f"process_audio_async: pulling diarization samples")
         # Pull samples synchronously (awaited for thread-safe buffer access)
         pulled = _pull_diarization_samples()
@@ -1056,7 +1060,7 @@ if __name__ == "__main__":
 
     # Set faster_whisper logger to WARNING level (not configurable)
     logging.getLogger("faster_whisper").setLevel(logging.WARNING)
-    
+
     #loop = asyncio.get_event_loop()
     #loop.run_until_complete(load_model())
 

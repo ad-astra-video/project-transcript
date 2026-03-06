@@ -33,7 +33,7 @@ class TestCalibratedConfidence:
     def test_confidence_low_separation(self):
         """Test confidence when multiple speakers are similar."""
         memory = SpeakerMemory()
-        scores = {'speaker_0': 0.68, 'speaker_1': 0.65, 'speaker_2': 0.62}
+        scores = {'speaker_0': 0.72, 'speaker_1': 0.65, 'speaker_2': 0.62}
         confidence, probs = memory._compute_calibrated_confidence(scores, 'speaker_0')
         
         # With low separation, confidence should be lower
@@ -64,7 +64,7 @@ class TestCalibratedConfidence:
             'speaker_0': 0.44,
             'speaker_1': 0.37,
             'speaker_2': 0.38,
-            'speaker_3': 0.68,
+            'speaker_3': 0.72,
             'speaker_4': 0.91,
             'speaker_5': 0.67,
             'speaker_6': 0.33,
@@ -113,7 +113,7 @@ class TestConfiguration:
     def test_default_threshold(self):
         """Test that SpeakerMemory uses the correct default threshold."""
         memory = SpeakerMemory()
-        assert memory.threshold == 0.68, f"Default threshold should be 0.68, got {memory.threshold}"
+        assert memory.threshold == 0.72, f"Default threshold should be 0.72, got {memory.threshold}"
     
     def test_default_ema_alpha(self):
         """Test that default EMA alpha is updated."""

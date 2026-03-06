@@ -354,7 +354,7 @@ class TestPrecisionAndThresholds:
 
     def test_dynamic_threshold_ceiling_is_base_plus_004(self):
         """Dynamic threshold should not exceed base + 0.04 (ceiling = 0.72 for default base)."""
-        memory = SpeakerMemory(threshold=0.68)
+        memory = SpeakerMemory(threshold=0.72)
         # Add many speakers to push threshold up
         for i in range(50):
             sid = f"speaker_{i}"
@@ -363,8 +363,8 @@ class TestPrecisionAndThresholds:
             memory.last_seen[sid] = time.time()
 
         threshold = memory._get_dynamic_threshold()
-        assert threshold <= 0.72, f"Ceiling violated: threshold={threshold}"
-        assert threshold >= 0.68, f"Threshold below base: threshold={threshold}"
+        assert threshold <= 0.76, f"Ceiling violated: threshold={threshold}"
+        assert threshold >= 0.72, f"Threshold below base: threshold={threshold}"
 
 
 class TestResetClearsNewState:

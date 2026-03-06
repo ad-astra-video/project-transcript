@@ -168,7 +168,7 @@ class EmbeddingQualityValidator:
             if segment_info:
                 log_data["segment_info"] = segment_info
             
-            logger.warning(
+            logger.debug(
                 f"Invalid embedding rejected: {reason}",
                 extra={"diarization_embedding_quality": log_data}
             )

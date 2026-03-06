@@ -1710,7 +1710,7 @@ class TestDiarizationV2Improvements:
         """Test that SpeakerMemory defaults are applied correctly."""
         memory = SpeakerMemory()
 
-        assert memory.threshold == 0.68
+        assert memory.threshold == 0.72
         assert memory.min_samples_for_match == 5
         assert memory.ema_alpha == 0.05
         assert memory.active_window_seconds == 1200.0
