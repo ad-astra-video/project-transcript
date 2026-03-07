@@ -927,22 +927,25 @@ class SpeakerMemory:
                 continue
 
             # Variance-adjusted prototype merge guard.
-            # Speakers with wider vocal range (high intra-variance) naturally produce
-            # lower cross-prototype similarity → compensate so legitimate merges aren't
-            # blocked.  Floor is 0.50 regardless of variance.
-            cross_min = self._min_cross_prototype_best_match(existing_id, new_speaker_id)
-            avg_variance = (
-                self._intra_variance.get(existing_id, 0.0)
-                + self._intra_variance.get(new_speaker_id, 0.0)
-            ) / 2.0
-            effective_guard = max(self.PROTOTYPE_MERGE_GUARD_THRESHOLD - avg_variance, 0.50)
-            if cross_min < effective_guard:
-                logger.debug(
-                    f"Prototype guard: {new_speaker_id} <-> {existing_id} "
-                    f"cross_min={cross_min:.3f} < effective_guard={effective_guard:.3f} "
-                    f"(base={self.PROTOTYPE_MERGE_GUARD_THRESHOLD}, avg_var={avg_variance:.3f}), skipping merge"
-                )
-                continue
+            # Skip when the new speaker has fewer than 2 prototypes — with only
+            # one sample the cross-min check degenerates into a single similarity
+            # that duplicates the centroid check above, providing no additional
+            # discrimination while risking false blocks.
+            new_protos = self.prototypes.get(new_speaker_id, [])
+            if len(new_protos) >= 2:
+                cross_min = self._min_cross_prototype_best_match(existing_id, new_speaker_id)
+                avg_variance = (
+                    self._intra_variance.get(existing_id, 0.0)
+                    + self._intra_variance.get(new_speaker_id, 0.0)
+                ) / 2.0
+                effective_guard = max(self.PROTOTYPE_MERGE_GUARD_THRESHOLD - avg_variance, 0.50)
+                if cross_min < effective_guard:
+                    logger.debug(
+                        f"Prototype guard: {new_speaker_id} <-> {existing_id} "
+                        f"cross_min={cross_min:.3f} < effective_guard={effective_guard:.3f} "
+                        f"(base={self.PROTOTYPE_MERGE_GUARD_THRESHOLD}, avg_var={avg_variance:.3f}), skipping merge"
+                    )
+                    continue
 
             if sim >= 0.80:
                 self._merge_speakers_internal(existing_id, new_speaker_id)
@@ -1172,20 +1175,25 @@ class SpeakerMemory:
                 logger.info(f"Co-occurrence guard blocked merge: {speaker_a} <-> {speaker_b} "
                             f"(sim={similarity:.3f})")
                 return False
-            # Variance-adjusted prototype guard
-            cross_min = self._min_cross_prototype_best_match(speaker_a, speaker_b)
-            avg_variance = (
-                self._intra_variance.get(speaker_a, 0.0)
-                + self._intra_variance.get(speaker_b, 0.0)
-            ) / 2.0
-            effective_guard = max(guard_threshold - avg_variance, 0.50)
-            if cross_min < effective_guard:
-                logger.info(
-                    f"Prototype guard blocked merge: {speaker_a} <-> {speaker_b} "
-                    f"(sim={similarity:.3f}, cross_min={cross_min:.3f}, "
-                    f"effective_guard={effective_guard:.3f}, avg_var={avg_variance:.3f})"
-                )
-                return False
+            # Variance-adjusted prototype guard — skip when either speaker has
+            # fewer than 2 prototypes (single-sample cross-min duplicates the
+            # centroid similarity check and provides no extra discrimination).
+            protos_a = self.prototypes.get(speaker_a, [])
+            protos_b = self.prototypes.get(speaker_b, [])
+            if len(protos_a) >= 2 and len(protos_b) >= 2:
+                cross_min = self._min_cross_prototype_best_match(speaker_a, speaker_b)
+                avg_variance = (
+                    self._intra_variance.get(speaker_a, 0.0)
+                    + self._intra_variance.get(speaker_b, 0.0)
+                ) / 2.0
+                effective_guard = max(guard_threshold - avg_variance, 0.50)
+                if cross_min < effective_guard:
+                    logger.info(
+                        f"Prototype guard blocked merge: {speaker_a} <-> {speaker_b} "
+                        f"(sim={similarity:.3f}, cross_min={cross_min:.3f}, "
+                        f"effective_guard={effective_guard:.3f}, avg_var={avg_variance:.3f})"
+                    )
+                    return False
             return True
 
         # Phase 1: Immediate merges for near-certain same-speaker (>= 0.92)
@@ -1752,10 +1760,19 @@ def diarization_worker(hf_token: str, request_queue, result_queue):
                     logger.debug(f"Pyannote embedding[{s}] norm={emb_norm:.4f}, shape={speaker_embedding.shape}")
 
                     # Overlap: this turn's time range intersects a known overlap interval
-                    is_overlap = any(
-                        min(turn.end, ov_e) > max(turn.start, ov_s)
-                        for ov_s, ov_e in overlap_intervals
-                    )
+                    overlapping_segs = [
+                        (ov_s, ov_e) for ov_s, ov_e in overlap_intervals
+                        if min(turn.end, ov_e) > max(turn.start, ov_s)
+                    ]
+                    is_overlap = bool(overlapping_segs)
+                    if is_overlap:
+                        logger.info(
+                            "Overlap detected: speaker=%s turn=[%.3f, %.3f] overlaps with interval(s)=%s",
+                            speaker,
+                            turn.start,
+                            turn.end,
+                            [(f"{s:.3f}", f"{e:.3f}") for s, e in overlapping_segs],
+                        )
                     # Onset contamination: this turn starts within 500 ms of
                     # a different-speaker's segment end in this chunk.
                     other_ends_for_this_spk = other_speaker_ends.get(speaker, [])
