@@ -129,7 +129,7 @@ class RapidSummaryPlugin:
         try:
             # Use pre-created task instead of creating new one each time
             # Pass the window so it can store scribe notes in plugin results
-            logger.info(f"Starting rapid summary for window {summary_window_id}, text length: {len(window_text)}")
+            logger.info(f"Starting rapid summary for window {summary_window_id} [{window_start:.3f}s - {window_end:.3f}s], word_count={word_count}, text_length={len(window_text)}")
             result = await self._task.build_rapid_summary_payload(
                 segments=segments,
                 transcription_window_id=summary_window_id,
