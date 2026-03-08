@@ -145,6 +145,18 @@ class RapidSummaryPlugin:
             
             #logger.info(f"Rapid summary completed, result: {result}")
             await result_callback(result)
+
+            # Notify other plugins that a fast summary is available
+            if self._summary_client:
+                summary_items = [item.get("item", "") for item in result.get("summary", []) if item.get("item")]
+                await self._summary_client._notify_plugins(
+                    "fast_summary_available",
+                    summary_window_id=summary_window_id,
+                    fast_summary_items=summary_items,
+                    window_start_ms=int(window_start * 1000),
+                    window_end_ms=int(window_end * 1000),
+                )
+
             return result
         except Exception as e:
             success = False
