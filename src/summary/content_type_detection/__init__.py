@@ -36,7 +36,7 @@ class ContentTypeDetectionPlugin:
         
         # Create task once at init and reuse for all processing
         self._task = ContentTypeDetectionTask(
-            llm_client=self._llm.reasoning_llm_client,
+            llm_client=self._llm.rapid_llm_client,
             max_tokens=self._max_tokens,
             temperature=self._temperature
         )

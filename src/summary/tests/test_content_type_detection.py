@@ -35,7 +35,7 @@ class TestContentTypeDetectionPlugin:
         
         # Create mock LLM manager
         mock_llm = MagicMock()
-        mock_llm.reasoning_llm_client = MagicMock()
+        mock_llm.rapid_llm_client = MagicMock()
         
         plugin = ContentTypeDetectionPlugin(
             window_manager=mock_client._window_manager,

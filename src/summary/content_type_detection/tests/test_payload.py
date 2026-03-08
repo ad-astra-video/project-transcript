@@ -22,7 +22,7 @@ class TestContentTypeDetectionPayload:
     def mock_llm(self):
         """Create a mock LLM manager."""
         mock = MagicMock()
-        mock.reasoning_llm_client = MagicMock()
+        mock.rapid_llm_client = MagicMock()
         return mock
 
     @pytest.fixture
