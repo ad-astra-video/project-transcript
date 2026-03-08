@@ -763,8 +763,8 @@ class SpeakerMemory:
             if seg_end_time is not None:
                 self._last_segment_end = seg_end_time
 
-            # Periodic consolidation: every 5 identifications or if speaker count exceeds 10.
-            if (self._stats["identifications"] % 5 == 0) or len(self.centroids) > 10:
+            # Periodic consolidation: every 3 identifications.
+            if self._stats["identifications"] % 3 == 0:
                 merges = self.auto_merge_similar_speakers(similarity_threshold=0.615)
                 if merges:
                     logger.info(f"Periodic consolidation: {merges} merges")
