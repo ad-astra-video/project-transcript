@@ -6,7 +6,8 @@ buffered transcription windows with the latest fast summary bullets.
 """
 
 import logging
-from typing import Any, Dict, List, Optional
+import re
+from typing import Any, Dict, List, Optional, Tuple
 
 from pydantic import BaseModel
 
@@ -45,6 +46,117 @@ class TranscriptSummaryTask:
         self.max_tokens = max_tokens
         self.temperature = temperature
 
+    # CJK Unicode blocks: Unified Ideographs, Extensions, Compatibility, Radicals,
+    # Hiragana, Katakana, Hangul syllables, Bopomofo, and related symbols.
+    _CJK_RE = re.compile(
+        r"[\u2E80-\u2EFF"   # CJK Radicals Supplement
+        r"\u2F00-\u2FDF"    # Kangxi Radicals
+        r"\u3000-\u303F"    # CJK Symbols and Punctuation
+        r"\u3040-\u309F"    # Hiragana
+        r"\u30A0-\u30FF"    # Katakana
+        r"\u3100-\u312F"    # Bopomofo
+        r"\u3130-\u318F"    # Hangul Compatibility Jamo
+        r"\u3190-\u319F"    # Kanbun
+        r"\u31A0-\u31BF"    # Bopomofo Extended
+        r"\u31F0-\u31FF"    # Katakana Phonetic Extensions
+        r"\u3200-\u32FF"    # Enclosed CJK Letters and Months
+        r"\u3300-\u33FF"    # CJK Compatibility
+        r"\u3400-\u4DBF"    # CJK Extension A
+        r"\u4E00-\u9FFF"    # CJK Unified Ideographs
+        r"\uA000-\uA48F"    # Yi Syllables
+        r"\uA490-\uA4CF"    # Yi Radicals
+        r"\uAC00-\uD7AF"    # Hangul Syllables
+        r"\uF900-\uFAFF"    # CJK Compatibility Ideographs
+        r"\uFE30-\uFE4F"    # CJK Compatibility Forms
+        r"]+"
+    )
+
+    # Distinctive phrase fragments from the system prompt used to detect leakage.
+    # Keep these specific enough to not false-positive on ordinary meeting content.
+    _LEAKAGE_FINGERPRINTS: List[str] = [
+        "professional meeting scribe",
+        "expert editor maintaining",
+        "your task is to produce",
+        "core editing rule",
+        "return a json object",
+        "security constraints",
+        "these instructions",
+        "system prompt",
+        "as a language model",
+        "as an ai",
+        "i am an ai",
+        "summarisation process",
+        "fast-pass summariser",
+        "heading format",
+        "json response",
+        "output format",
+        "key points guidelines",
+        "topics guidelines",
+    ]
+
+    @classmethod
+    def _strip_cjk(cls, text: str) -> str:
+        """Remove CJK characters from a string, collapsing leftover whitespace."""
+        if not text:
+            return text
+        cleaned = cls._CJK_RE.sub(" ", text)
+        # Collapse multiple spaces introduced by removal
+        return re.sub(r" {2,}", " ", cleaned).strip()
+
+    @classmethod
+    def _validate_no_prompt_leakage(cls, summary: str, key_points: List[str], topics: List[str]
+                                    ) -> Tuple[str, List[str], List[str]]:
+        """Strip any output that contains leaked system-prompt fragments.
+
+        Checks each sentence of the summary and each item in key_points/topics
+        against a set of fingerprint phrases derived from the system prompt.
+        Matching sentences/items are removed and a warning is logged.
+
+        Returns:
+            Tuple of (cleaned_summary, cleaned_key_points, cleaned_topics)
+        """
+        fingerprints = [fp.lower() for fp in cls._LEAKAGE_FINGERPRINTS]
+
+        def _contains_leak(text: str) -> bool:
+            lower = text.lower()
+            return any(fp in lower for fp in fingerprints)
+
+        # Clean summary line-by-line (headings and sentences)
+        clean_lines: List[str] = []
+        leaked = False
+        for line in summary.splitlines():
+            if _contains_leak(line):
+                logger.warning(
+                    "Prompt leakage detected and stripped from summary line: %.120s", line
+                )
+                leaked = True
+            else:
+                clean_lines.append(line)
+        clean_summary = "\n".join(clean_lines)
+
+        # Clean key_points
+        clean_kp: List[str] = []
+        for kp in key_points:
+            if _contains_leak(kp):
+                logger.warning("Prompt leakage detected in key_point: %.120s", kp)
+                leaked = True
+            else:
+                clean_kp.append(kp)
+
+        # Clean topics
+        clean_topics: List[str] = []
+        for t in topics:
+            if _contains_leak(t):
+                logger.warning("Prompt leakage detected in topic: %.120s", t)
+                leaked = True
+            else:
+                clean_topics.append(t)
+
+        if leaked:
+            logger.warning("One or more leaked prompt fragments were removed from transcript_summary output")
+
+        return clean_summary, clean_kp, clean_topics
+
     @staticmethod
     def _format_timestamp(ms: int) -> str:
         """Format milliseconds as H:MM:SS for use in timing references."""
@@ -56,18 +168,19 @@ class TranscriptSummaryTask:
 
     def _build_user_content(
         self,
-        window_texts: str,
-        fast_summary_items: List[str],
+        segments: List[Dict[str, Any]],
         current_summary: Optional[Dict[str, Any]],
-        window_start_ms: int,
-        window_end_ms: int,
     ) -> str:
-        """Construct the prompt content for this update cycle."""
+        """Construct the prompt content for this update cycle.
 
-        segment_timing = (
-            f"[{self._format_timestamp(window_start_ms)} – {self._format_timestamp(window_end_ms)}]"
-        )
-
+        Args:
+            segments: List of segment dicts, each containing:
+                - fast_summary_items: List[str]
+                - window_start_ms: int
+                - window_end_ms: int
+                - window_text: str  (raw transcription, may be empty)
+            current_summary: The previous result dict, or None on the first call.
+        """
         # ── Section 1: current running overview ─────────────────────────────
         if current_summary and current_summary.get("summary"):
             running_md = current_summary["summary"]
@@ -82,15 +195,30 @@ class TranscriptSummaryTask:
         existing_topics = current_summary.get("topics", []) if current_summary else []
         topics_text = "\n".join(f"- {t}" for t in existing_topics) if existing_topics else "(None yet)"
 
-        # ── Section 4: fast summary bullets ─────────────────────────────────
-        bullets = (
-            "\n".join(f"- {item}" for item in fast_summary_items)
-            if fast_summary_items
-            else "(No fast summary notes for this segment.)"
-        )
+        # ── Section 4: new segments (one sub-section each) ───────────────────
+        segment_blocks: List[str] = []
+        for seg in segments:
+            seg_start = seg.get("window_start_ms", 0)
+            seg_end = seg.get("window_end_ms", 0)
+            timing = f"[{self._format_timestamp(seg_start)} – {self._format_timestamp(seg_end)}]"
 
-        # ── Section 5: raw transcription text ────────────────────────────────
-        raw_text = window_texts.strip() if window_texts else "(No new transcription text.)"
+            items = seg.get("fast_summary_items", [])
+            bullets = (
+                "\n".join(f"- {item}" for item in items)
+                if items
+                else "(No fast summary notes for this segment.)"
+            )
+
+            raw_text = (seg.get("window_text") or "").strip() or "(No transcription text.)"
+
+            block = (
+                f"### Segment {timing}\n\n"
+                f"**Key Notes:**\n{bullets}\n\n"
+                f"**Transcription:**\n{raw_text}"
+            )
+            segment_blocks.append(block)
+
+        new_segments_section = "\n\n".join(segment_blocks) if segment_blocks else "(No new segments.)"
 
         return (
             "## Current Overview Document\n\n"
@@ -99,29 +227,24 @@ class TranscriptSummaryTask:
             f"{kp_text}\n\n"
             "## Current Topics\n\n"
             f"{topics_text}\n\n"
-            f"## New Segment  {segment_timing}\n\n"
-            "### Fast Summary Notes\n\n"
-            f"{bullets}\n\n"
-            "### Raw Transcription\n\n"
-            f"{raw_text}"
+            "## New Segments\n\n"
+            f"{new_segments_section}"
         )
 
     async def process(
         self,
-        window_texts: str,
-        fast_summary_items: List[str],
+        segments: List[Dict[str, Any]],
         current_summary: Optional[Dict[str, Any]],
-        window_start_ms: int = 0,
-        window_end_ms: int = 0,
     ) -> Dict[str, Any]:
         """Update the running transcript overview.
 
         Args:
-            window_texts: Merged text from all buffered transcription windows.
-            fast_summary_items: Bullet-point items from the latest rapid summary.
+            segments: List of segment dicts, each with:
+                - fast_summary_items: List[str]
+                - window_start_ms: int
+                - window_end_ms: int
+                - window_text: str  (raw transcription)
             current_summary: The previous result dict, or None on the first call.
-            window_start_ms: Media start time of the new segment in milliseconds.
-            window_end_ms: Media end time of the new segment in milliseconds.
 
         Returns:
             Dict with keys: summary, key_points, topics, input_tokens, output_tokens.
@@ -129,13 +252,7 @@ class TranscriptSummaryTask:
         if not self._llm_client:
             raise RuntimeError("Transcript summary LLM client not initialized")
 
-        user_content = self._build_user_content(
-            window_texts,
-            fast_summary_items,
-            current_summary,
-            window_start_ms,
-            window_end_ms,
-        )
+        user_content = self._build_user_content(segments, current_summary)
 
         _, content, input_tokens, output_tokens, _ = await self._llm_client.create_completion(
             system_prompt=TRANSCRIPT_SUMMARY_SYSTEM_PROMPT,
@@ -163,18 +280,31 @@ class TranscriptSummaryTask:
                 exc,
                 content,
             )
+            # Strip CJK and leakage from the raw fallback content
+            clean_summary, clean_kp, clean_topics = self._validate_no_prompt_leakage(
+                self._strip_cjk(content), prior_key_points, prior_topics
+            )
             return {
-                "summary": content,
-                "key_points": prior_key_points,
-                "topics": prior_topics,
+                "summary": clean_summary,
+                "key_points": clean_kp,
+                "topics": clean_topics,
                 "input_tokens": input_tokens,
                 "output_tokens": output_tokens,
             }
 
+        # Strip CJK then validate for prompt leakage
+        summary_cjk = self._strip_cjk(parsed.summary)
+        kp_cjk = [self._strip_cjk(kp) for kp in parsed.key_points]
+        topics_cjk = [self._strip_cjk(t) for t in parsed.topics]
+
+        clean_summary, clean_kp, clean_topics = self._validate_no_prompt_leakage(
+            summary_cjk, kp_cjk, topics_cjk
+        )
+
         return {
-            "summary": parsed.summary,
-            "key_points": parsed.key_points,
-            "topics": parsed.topics,
+            "summary": clean_summary,
+            "key_points": clean_kp,
+            "topics": clean_topics,
             "input_tokens": input_tokens,
             "output_tokens": output_tokens,
         }
