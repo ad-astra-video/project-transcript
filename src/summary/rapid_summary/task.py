@@ -188,14 +188,19 @@ class RapidSummaryTask:
         # Get all text from segments
         text = self._get_text_from_segments(segments)
         
-        # Combine with context from previous windows
-        full_context = context_since_last_summary + "\n\n" + text if context_since_last_summary else text
-        
-        # Get prior insights context using the same pattern as context_summary
-        prior_context = self._get_prior_insights_context()
-        
-        # Call rapid summary LLM with prior context - returns a list of items
-        scribe_notes_list = await self.process_rapid_summary(full_context, prior_context)
+        # Skip LLM entirely when there is nothing to summarise (silence / empty window)
+        if not text or not text.strip():
+            logger.debug("Rapid summary skipped — no speech content in window")
+            scribe_notes_list = []
+        else:
+            # Combine with context from previous windows
+            full_context = context_since_last_summary + "\n\n" + text if context_since_last_summary else text
+            
+            # Get prior insights context using the same pattern as context_summary
+            prior_context = self._get_prior_insights_context()
+            
+            # Call rapid summary LLM with prior context - returns a list of items
+            scribe_notes_list = await self.process_rapid_summary(full_context, prior_context)
         
         # Ensure we have a list (handle empty case)
         if not scribe_notes_list:
