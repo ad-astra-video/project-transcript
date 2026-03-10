@@ -82,11 +82,13 @@ class TranscriptSummaryTask:
         max_tokens: int = 131072,
         temperature: float = 0.3,
         verification_llm_client: Optional[LLMClient] = None,
+        verification_max_tokens: int = 16384,
     ) -> None:
         self._llm_client = llm_client
         self.max_tokens = max_tokens
         self.temperature = temperature
         self._verification_llm_client = verification_llm_client
+        self.verification_max_tokens = verification_max_tokens
 
     # CJK Unicode blocks: Unified Ideographs, Extensions, Compatibility, Radicals,
     # Hiragana, Katakana, Hangul syllables, Bopomofo, and related symbols.
@@ -411,7 +413,7 @@ class TranscriptSummaryTask:
                         system_prompt=system_prompt,
                         user_content=user_content,
                         temperature=0.1,
-                        max_tokens=self.max_tokens,
+                        max_tokens=self.verification_max_tokens,
                         response_format=response_format,
                     )
                 )
@@ -445,6 +447,8 @@ class TranscriptSummaryTask:
             if parsed_sections:
                 sec = parsed_sections[0]
                 heading = self._strip_cjk(sec.heading).strip()
+                # Strip the [LATEST — may be compressed] tag that was added in the prompt
+                heading = heading.replace(" [LATEST — may be compressed]", "").strip()
                 content = self._strip_cjk(sec.content).strip()
                 clean_content, _, _ = self._validate_no_prompt_leakage(content, [], [])
                 v_sections_out.append({
@@ -720,6 +724,8 @@ class TranscriptSummaryTask:
         _PLACEHOLDER_HEADINGS = {"untitled topic", "untitled", ""}
         for section in parsed.sections:
             section_heading = self._strip_cjk(section.heading).strip()
+            # Strip the [LATEST — may be compressed] tag that was added in the prompt
+            section_heading = section_heading.replace(" [LATEST — may be compressed]", "").strip()
             section_content = self._strip_cjk(section.content).strip()
             clean_content, _, _ = self._validate_no_prompt_leakage(
                 section_content, [], []

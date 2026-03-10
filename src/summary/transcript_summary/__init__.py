@@ -82,6 +82,7 @@ class TranscriptSummaryPlugin:
         self._task = TranscriptSummaryTask(
             llm_client=self._llm.reasoning_llm_client,
             verification_llm_client=self._llm.rapid_llm_client,
+            verification_max_tokens=4096,
         )
 
     # ------------------------------------------------------------------
