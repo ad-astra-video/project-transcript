@@ -95,10 +95,18 @@ class InsightsDistillationPlugin:
             )
             return
 
-        result = await self._task.process(
-            context_summary_result=context_summary_result,
-            transcript_summary_result=transcript_summary_result,
-        )
+        try:
+            result = await self._task.process(
+                context_summary_result=context_summary_result,
+                transcript_summary_result=transcript_summary_result,
+            )
+        except Exception as e:
+            logger.error(
+                "insights_distillation: error processing window %s: %s",
+                summary_window_id,
+                e,
+            )
+            return
 
         self._latest_insights = result.get("insights", [])
 

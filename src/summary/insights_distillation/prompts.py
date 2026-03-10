@@ -16,8 +16,7 @@ Produce high-value insights that go beyond surface key points. Focus on:
 
 OUTPUT RULES
 - Return strict JSON matching the schema.
-- Produce 3-7 insights.
-- Keep each insight concise and specific.
+- Keep each insight specific and actionable.
 - Avoid duplicating key points verbatim.
 - "category" should be one of:
   process_improvement, real_world_learning, pattern, best_practice, risk, strategy

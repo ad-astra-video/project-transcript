@@ -4,7 +4,7 @@ import json
 import logging
 from typing import Any, Dict, List
 
-from pydantic import BaseModel, field_validator
+from pydantic import BaseModel, ValidationError, field_validator
 
 from ..llm_manager import LLMClient
 from .prompts import INSIGHTS_DISTILLATION_SYSTEM_PROMPT
@@ -71,7 +71,6 @@ class InsightsDistillationTask:
 
         user_payload = {
             "context_summary": {
-                "reasoning_content": context_summary_result.get("reasoning_content", ""),
                 "insights": context_insights,
             },
             "transcript_summary": {
@@ -97,7 +96,27 @@ class InsightsDistillationTask:
         )
 
         json_content = content.replace("```json", "").replace("```", "").strip()
-        parsed = InsightsDistillationSchema.model_validate_json(json_content)
+        
+        # Handle empty LLM response - graceful degradation
+        if not json_content:
+            logger.warning("insights_distillation: LLM returned empty response")
+            return {
+                "insights": [],
+                "detailed_insights": [],
+                "input_tokens": input_tokens,
+                "output_tokens": output_tokens,
+            }
+        
+        try:
+            parsed = InsightsDistillationSchema.model_validate_json(json_content)
+        except (ValidationError, json.JSONDecodeError) as e:
+            logger.warning("insights_distillation: failed to parse LLM response: %s", e)
+            return {
+                "insights": [],
+                "detailed_insights": [],
+                "input_tokens": input_tokens,
+                "output_tokens": output_tokens,
+            }
 
         insights = [item.insight for item in parsed.insights]
         detailed_insights = [item.model_dump() for item in parsed.insights]
