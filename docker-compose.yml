@@ -21,6 +21,26 @@ services:
         condition: service_healthy
       vllm-fast-summary:
         condition: service_healthy
+      tei-embeddings:
+        condition: service_healthy
+  tei-embeddings:
+    image: ghcr.io/huggingface/text-embeddings-inference:cpu-1.6
+    container_name: byoc-transcription-tei-embeddings
+    environment:
+      - HUGGING_FACE_HUB_TOKEN=${HF_TOKEN}
+    volumes:
+      - ./models:/data
+    ports:
+      - ${LOCAL_EMBEDDING_MODEL_PORT:-6060}:80
+    command: >
+      --model-id ${LOCAL_EMBEDDING_MODEL:-BAAI/bge-small-en-v1.5}
+      --port 80
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:80/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
   vllm-insights:
     image: vllm/vllm-openai:v0.15.1
     container_name: byoc-transcription-vllm-insights
