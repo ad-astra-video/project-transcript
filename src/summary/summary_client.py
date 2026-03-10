@@ -15,7 +15,8 @@ from pydantic import BaseModel
 
 from .context_summary.prompts import SYSTEM_PROMPT, SYSTEM_PROMPT_OUTPUT_CONSTRAINTS
 from .context_summary.task import WindowInsight
-from .llm_manager import LLMManager, MessageFormatMode
+from .llm_manager import MessageFormatMode
+from .agent_manager import AgentManager
 from .window_manager import WindowManager
 
 logger = logging.getLogger(__name__)
@@ -69,8 +70,8 @@ class SummaryClient:
         # Track last processed timestamp (global, not per-window)
         self._last_processed_timestamp: float = 0.0
                 
-        # LLM Manager for plugins - handles all LLM client creation
-        self.llm = LLMManager(
+        # Agent Manager: wraps LLMManager and adds autonomous agent + knowledge store
+        self.llm = AgentManager(
             fast_base_url=rapid_base_url,
             fast_api_key=rapid_api_key,
             reasoning_base_url=reasoning_base_url,
@@ -280,6 +281,9 @@ class SummaryClient:
         self.in_flight_windows.clear()
         # Reset last processed timestamp for new stream
         self._last_processed_timestamp = 0.0
+
+        # Clear the in-memory transcript knowledge store
+        self.llm.reset_knowledge_store()
         
         # Reset all plugins that have a reset method
         for plugin_name, plugin_instance in self._plugins.items():
@@ -311,6 +315,22 @@ class SummaryClient:
     def get_pending_count(self) -> int:
         """Get count of pending summary requests."""
         return len(self.in_flight_windows)
+
+    async def ask_agent(self, query: str) -> str:
+        """
+        Submit a natural-language query to the autonomous agent.
+
+        The agent will autonomously use the transcript knowledge store
+        (semantic search over indexed video content) and web search
+        (Tavily > Exa > DuckDuckGo) to compose a grounded answer.
+
+        Args:
+            query: The user's question.
+
+        Returns:
+            The agent's synthesised text response.
+        """
+        return await self.llm.ask_agent(query)
         
     # =========================================================================
     # Summary Worker and Sender Methods (moved from pipeline/main.py)
@@ -491,7 +511,24 @@ class SummaryClient:
                 "summary_window_available",
                 summary_window_id=summary_window_id
             )
-        
+
+        # Index the deduplicated text into the knowledge store for semantic search
+        deduplicated_text = self._window_manager.get_deduplicated_text(
+            transcription_window_id
+        ) if hasattr(self._window_manager, 'get_deduplicated_text') else ""
+        if not deduplicated_text:
+            # Fallback: join segments text directly
+            deduplicated_text = " ".join(
+                seg.get("text", "") for seg in segments if seg.get("text")
+            )
+        asyncio.create_task(
+            self.llm.index_transcript_segment(
+                text=deduplicated_text,
+                timestamp=window_start_ts,
+                window_id=transcription_window_id,
+            )
+        )
+
         return {
             "transcription_window_id": transcription_window_id,
             "summary_window_id": summary_window_id
