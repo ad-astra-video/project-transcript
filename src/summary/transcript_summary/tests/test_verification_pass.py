@@ -1,4 +1,4 @@
-s"""
+"""
 Tests for the verification pass introduced in TranscriptSummaryTask.
 
 Covers:
@@ -136,11 +136,9 @@ class TestBuildVerificationUserContent:
         self.task = TranscriptSummaryTask(llm_client=MagicMock())
 
     def test_includes_changed_section_heading(self):
-        sections = [
-            {"heading": "Q3 Planning", "start_ms": 0, "end_ms": 60_000, "content": "Alice reviewed goals."}
-        ]
+        section = {"heading": "Q3 Planning", "start_ms": 0, "end_ms": 60_000, "content": "Alice reviewed goals."}
         content = self.task._build_verification_user_content(
-            changed_sections=sections,
+            section=section,
             segments=_SEGMENTS,
             key_points=["Alice owns goals"],
             topics=["Q3 planning"],
@@ -149,11 +147,9 @@ class TestBuildVerificationUserContent:
         assert "Alice reviewed goals." in content
 
     def test_includes_overlapping_transcript_text(self):
-        sections = [
-            {"heading": "Kickoff", "start_ms": 0, "end_ms": 120_000, "content": "x"}
-        ]
+        section = {"heading": "Kickoff", "start_ms": 0, "end_ms": 120_000, "content": "x"}
         content = self.task._build_verification_user_content(
-            changed_sections=sections,
+            section=section,
             segments=_SEGMENTS,
             key_points=[],
             topics=[],
@@ -161,11 +157,9 @@ class TestBuildVerificationUserContent:
         assert "Bob presented the roadmap" in content
 
     def test_excludes_non_overlapping_segment_text(self):
-        sections = [
-            {"heading": "Late topic", "start_ms": 600_000, "end_ms": 660_000, "content": "x"}
-        ]
+        section = {"heading": "Late topic", "start_ms": 600_000, "end_ms": 660_000, "content": "x"}
         content = self.task._build_verification_user_content(
-            changed_sections=sections,
+            section=section,
             segments=_SEGMENTS,   # segments are at 0–120 s, no overlap
             key_points=[],
             topics=[],
@@ -174,7 +168,7 @@ class TestBuildVerificationUserContent:
 
     def test_includes_key_points_and_topics(self):
         content = self.task._build_verification_user_content(
-            changed_sections=[{"heading": "X", "start_ms": 0, "end_ms": 10_000, "content": "y"}],
+            section={"heading": "X", "start_ms": 0, "end_ms": 10_000, "content": "y"},
             segments=[],
             key_points=["decision reached", "budget $1M"],
             topics=["finance", "strategy"],
@@ -265,7 +259,13 @@ class TestRunVerificationPass:
             key_points=[],
             topics=[],
         )
-        assert result is None  # non-fatal — primary result still emitted
+        assert result is not None  # non-fatal — unchanged section should be returned
+        v_sections, v_kp, v_topics, v_in, v_out = result
+        assert v_sections[0]["content"] == "y"
+        assert v_kp == []
+        assert v_topics == []
+        assert v_in == 0
+        assert v_out == 0
 
     @pytest.mark.asyncio
     async def test_returns_none_on_invalid_json(self):
@@ -283,7 +283,13 @@ class TestRunVerificationPass:
             key_points=[],
             topics=[],
         )
-        assert result is None
+        assert result is not None
+        v_sections, v_kp, v_topics, v_in, v_out = result
+        assert v_sections[0]["content"] == "y"
+        assert v_kp == []
+        assert v_topics == []
+        assert v_in == 1
+        assert v_out == 1
 
 
 # ---------------------------------------------------------------------------
