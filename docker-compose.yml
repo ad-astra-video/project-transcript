@@ -63,7 +63,7 @@ services:
       --kv-cache-dtype fp8
       --max-num-batched-tokens 512
       --max-num-seqs 10
-      --max-model-len 32768
+      --max-model-len 131072
       ${LOCAL_REASONING_MODEL_VLLM_SETTINGS}
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:${LOCAL_REASONING_MODEL_PORT:-5000}/v1/models"]
