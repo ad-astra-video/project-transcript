@@ -53,6 +53,8 @@ class TranscriberState:
         self.audio_sample_rate: int = 16000
         self.window_seconds: float = 2.5
         self.overlap_seconds: float = 0.5
+        self.low_audio_filter_enabled: bool = True
+        self.low_audio_min_dbfs: float = -45.0
         self.audio_buffer: np.ndarray = np.zeros((0,), dtype=np.float32)  # mono float32 [-1,1]
         self.buffer_start_ts: Optional[float] = None  # seconds
         self.buffer_rate: Optional[int] = None
@@ -101,6 +103,25 @@ def _has_any_meaningful_segments(segments: list[TranscriptionSegment]) -> bool:
     return any(bool(seg.text.strip()) for seg in segments)
 
 
+def _compute_rms_dbfs(samples: np.ndarray) -> tuple[float, float]:
+    """Compute RMS and dBFS for normalized float audio samples in [-1, 1]."""
+    if samples.size == 0:
+        return 0.0, float("-inf")
+
+    rms = float(np.sqrt(np.mean(np.square(samples, dtype=np.float64))))
+    dbfs = 20.0 * np.log10(max(rms, 1e-12))
+    return rms, float(dbfs)
+
+
+def _is_low_audio_window(samples: np.ndarray) -> tuple[bool, float, float]:
+    """Return (is_low_audio, rms, dbfs) for a window based on current runtime threshold."""
+    assert STATE is not None
+    rms, dbfs = _compute_rms_dbfs(samples)
+    if not STATE.low_audio_filter_enabled:
+        return False, rms, dbfs
+    return dbfs < STATE.low_audio_min_dbfs, rms, dbfs
+
+
 async def load_model(**kwargs):
     """Initialize Whisper, SRT generator, fonts, and buffers from params."""
     global STATE
@@ -118,6 +139,8 @@ async def load_model(**kwargs):
     STATE.audio_sample_rate = int(params.get("audio_sample_rate", STATE.audio_sample_rate))
     STATE.window_seconds = float(params.get("chunk_window", STATE.window_seconds))
     STATE.overlap_seconds = float(params.get("chunk_overlap", STATE.overlap_seconds))
+    STATE.low_audio_filter_enabled = bool(params.get("low_audio_filter_enabled", STATE.low_audio_filter_enabled))
+    STATE.low_audio_min_dbfs = float(params.get("low_audio_min_dbfs", STATE.low_audio_min_dbfs))
 
     # Summary params
     summary_base_url = params.get("summary_base_url", "http://byoc-transcription-vllm-insights:5000/v1")
@@ -476,6 +499,14 @@ async def _process_transcription_async(window_samples: np.ndarray, window_start_
     
     sr = STATE.buffer_rate
     win_len = int(STATE.window_seconds * sr)
+
+    is_low_audio, rms, dbfs = _is_low_audio_window(window_samples)
+    if is_low_audio:
+        logger.info(
+            f"Skipping low-audio transcription window [{window_start_ts:.3f}s - {window_end_ts:.3f}s] "
+            f"(rms={rms:.6f}, dbfs={dbfs:.2f}, threshold={STATE.low_audio_min_dbfs:.2f})"
+        )
+        return
     
     temp_path = _write_wav(window_samples, sr)
     
@@ -612,6 +643,14 @@ def _pull_diarization_samples(allow_partial: bool = False) -> Optional[tuple]:
 async def _process_diarization_async(window_samples: np.ndarray, window_start_ts: float, window_end_ts: float, allow_partial: bool = False):
     """Process diarization asynchronously. Receives samples already pulled from buffer."""
     assert STATE is not None and STATE.diarization_client is not None
+
+    is_low_audio, rms, dbfs = _is_low_audio_window(window_samples)
+    if is_low_audio:
+        logger.info(
+            f"Skipping low-audio diarization window [{window_start_ts:.3f}s - {window_end_ts:.3f}s] "
+            f"(rms={rms:.6f}, dbfs={dbfs:.2f}, threshold={STATE.low_audio_min_dbfs:.2f})"
+        )
+        return
     
     sr = STATE.buffer_rate
     
@@ -865,6 +904,17 @@ async def update_params(params: dict):
         STATE.window_seconds = float(params["chunk_window"])
     if "chunk_overlap" in params:
         STATE.overlap_seconds = float(params["chunk_overlap"])
+    if "low_audio_filter_enabled" in params:
+        STATE.low_audio_filter_enabled = bool(params["low_audio_filter_enabled"])
+        logger.info(f"Updated low_audio_filter_enabled to {STATE.low_audio_filter_enabled}")
+    if "low_audio_min_dbfs" in params:
+        raw_threshold = float(params["low_audio_min_dbfs"])
+        STATE.low_audio_min_dbfs = max(-120.0, min(0.0, raw_threshold))
+        if STATE.low_audio_min_dbfs != raw_threshold:
+            logger.warning(
+                f"Clamped low_audio_min_dbfs from {raw_threshold} to {STATE.low_audio_min_dbfs}"
+            )
+        logger.info(f"Updated low_audio_min_dbfs to {STATE.low_audio_min_dbfs}")
     
     # Summary parameters
     if "summary_base_url" in params or "summary_api_key" in params or "summary_model" in params:
