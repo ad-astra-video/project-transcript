@@ -66,6 +66,9 @@ class TranscriptSummaryPlugin:
         self._latest_window_start_ms: int = 0
         self._latest_window_end_ms: int = 0
 
+        # Track latest insights_distillation completion window id
+        self._latest_insights_window_id: Optional[int] = None
+
         # Track processing state for queue mechanism
         self._is_processing: bool = False
 
@@ -107,6 +110,10 @@ class TranscriptSummaryPlugin:
         in the new throttled pattern (we use summary_window text instead).
         """
         pass  # No longer needed - we use summary_window text now
+
+    async def handle_insights_distillation_complete(self, summary_window_id: int, **kwargs):
+        """Track latest window id that produced insights_distillation output."""
+        self._latest_insights_window_id = summary_window_id
 
     async def process(
         self,
@@ -237,6 +244,21 @@ class TranscriptSummaryPlugin:
 
                 summary_markdown = self._render_summary_markdown(self._accumulated_sections)
 
+                transcript_window_result = {
+                    "sections": list(self._accumulated_sections),
+                    "key_points": result.get("key_points", []),
+                    "topics": result.get("topics", []),
+                    "summary": summary_markdown,
+                }
+                self._window_manager.store_plugin_result(
+                    window_id=summary_window_id,
+                    plugin_name="transcript_summary",
+                    result=transcript_window_result,
+                    include_in_context=False,
+                )
+
+                latest_insights = self._get_latest_insights(self._latest_insights_window_id)
+
                 payload = {
                     "type": "transcript_summary",
                     "timestamp_utc": datetime.now(timezone.utc).isoformat(),
@@ -255,9 +277,16 @@ class TranscriptSummaryPlugin:
                     "summary": summary_markdown,
                     "key_points": result.get("key_points", []),
                     "topics": result.get("topics", []),
+                    "insights": latest_insights,
                 }
 
                 await self._result_callback(payload)
+
+                if self._summary_client:
+                    await self._summary_client._notify_plugins(
+                        "on_transcript_summary_complete",
+                        summary_window_id=summary_window_id,
+                    )
 
             except Exception as exc:
                 logger.error("transcript_summary error: %s", exc, exc_info=True)
@@ -308,6 +337,33 @@ class TranscriptSummaryPlugin:
     # ------------------------------------------------------------------
     # Helpers
     # ------------------------------------------------------------------
+
+    def _get_latest_insights(self, summary_window_id: Optional[int] = None) -> List[str]:
+        """Return latest distilled insights from window_manager plugin results."""
+        try:
+            if summary_window_id is None:
+                summary_window_id = self._latest_insights_window_id
+
+            if summary_window_id is not None:
+                current_window = self._window_manager.get_window(summary_window_id)
+                if current_window:
+                    current_result = current_window.get_result("insights_distillation")
+                    if isinstance(current_result, dict):
+                        current_insights = current_result.get("insights")
+                        if isinstance(current_insights, list):
+                            return current_insights
+
+            windows = getattr(self._window_manager, "_summary_windows", [])
+            for window in reversed(windows):
+                result = window.get_result("insights_distillation")
+                if isinstance(result, dict):
+                    insights = result.get("insights")
+                    if isinstance(insights, list):
+                        return insights
+        except Exception as exc:
+            logger.warning("transcript_summary: failed to fetch latest insights from window_manager: %s", exc)
+
+        return []
 
     @staticmethod
     def _is_non_retryable(exc: Exception) -> bool:
@@ -552,6 +608,7 @@ class TranscriptSummaryPlugin:
         self._latest_summary_window_id = None
         self._latest_window_start_ms = 0
         self._latest_window_end_ms = 0
+        self._latest_insights_window_id = None
         self._is_processing = False
         self._current_summary = None
         self._accumulated_sections.clear()
@@ -584,6 +641,7 @@ def init_plugin(
                 "summary_window_available": plugin_instance.handle_summary_window,
                 "transcription_window_available": plugin_instance.handle_transcription_window,
                 "fast_summary_available": plugin_instance.process,
+                "on_insights_distillation_complete": plugin_instance.handle_insights_distillation_complete,
                 "on_update_params": plugin_instance.on_update_params,
             },
         )

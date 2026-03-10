@@ -1,4 +1,4 @@
-"""
+s"""
 Tests for the verification pass introduced in TranscriptSummaryTask.
 
 Covers:

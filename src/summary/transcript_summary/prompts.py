@@ -190,7 +190,10 @@ Your sole task is to correct ONLY factual errors. A factual error is:
 - Do NOT paraphrase, restructure, expand, or rewrite any text beyond the minimum correction.
 - Do NOT add new sentences, examples, or detail not present in the draft.
 - Do NOT remove content unless it is directly contradicted by the transcript.
-- If a section, key point, or topic is already accurate, return it word-for-word unchanged.
+- Do NOT shorten, compress, or summarise any section, key point, or topic. Your output must
+  be at least as long as the input you received. Length reduction is a failure mode.
+- If a section, key point, or topic is already accurate, return it **character-for-character
+  verbatim** — do not alter a single word, punctuation mark, or space.
 - If the transcript does not contain enough information to verify a claim, leave it unchanged.
 - Preserve all `start_ms` and `end_ms` values exactly as given — do not alter timestamps.
 

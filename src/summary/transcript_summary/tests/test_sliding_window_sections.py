@@ -311,6 +311,51 @@ class TestTranscriptSummaryPluginSections:
         assert plugin._context_window_ms == 300_000
         assert plugin._max_segment_text_chars == 2500
 
+    def test_get_latest_insights_reads_from_current_window_result(self, plugin):
+        current_window = MagicMock()
+        current_window.get_result = MagicMock(
+            side_effect=lambda name: {"insights": ["Current window insight"]}
+            if name == "insights_distillation"
+            else None
+        )
+        plugin._window_manager.get_window = MagicMock(return_value=current_window)
+
+        insights = plugin._get_latest_insights(summary_window_id=4)
+
+        assert insights == ["Current window insight"]
+
+    def test_get_latest_insights_falls_back_to_latest_available_window(self, plugin):
+        plugin._window_manager.get_window = MagicMock(return_value=None)
+
+        old_window = MagicMock()
+        old_window.get_result = MagicMock(return_value={"insights": ["Old insight"]})
+        latest_window = MagicMock()
+        latest_window.get_result = MagicMock(return_value={"insights": ["Latest insight"]})
+        plugin._window_manager._summary_windows = [old_window, latest_window]
+
+        insights = plugin._get_latest_insights(summary_window_id=999)
+
+        assert insights == ["Latest insight"]
+
+    @pytest.mark.asyncio
+    async def test_handle_insights_distillation_complete_tracks_latest_window_id(self, plugin):
+        await plugin.handle_insights_distillation_complete(summary_window_id=12)
+        assert plugin._latest_insights_window_id == 12
+
+    def test_get_latest_insights_uses_tracked_window_id_when_no_arg(self, plugin):
+        plugin._latest_insights_window_id = 7
+        tracked_window = MagicMock()
+        tracked_window.get_result = MagicMock(
+            side_effect=lambda name: {"insights": ["Tracked insight"]}
+            if name == "insights_distillation"
+            else None
+        )
+        plugin._window_manager.get_window = MagicMock(return_value=tracked_window)
+
+        insights = plugin._get_latest_insights()
+
+        assert insights == ["Tracked insight"]
+
     @pytest.mark.asyncio
     async def test_process_uses_section_accumulation_and_markdown_output(self, plugin):
         plugin._task.process = AsyncMock(
