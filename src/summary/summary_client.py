@@ -15,7 +15,7 @@ from pydantic import BaseModel
 
 from .context_summary.prompts import SYSTEM_PROMPT, SYSTEM_PROMPT_OUTPUT_CONSTRAINTS
 from .context_summary.task import WindowInsight
-from .llm_manager import MessageFormatMode
+from .llm_manager import LLMManager, MessageFormatMode
 from .agent_manager import AgentManager
 from .window_manager import WindowManager
 
@@ -26,7 +26,18 @@ MonitoringCallback = Callable[[Dict[str, Any], str], Awaitable[None]]
 
 
 class SummaryClient:
-    """Client for LLM-based transcription cleaning and summarization."""
+    """Client for LLM-based transcription cleaning and summarization.
+    
+    Components:
+    - LLMManager (self.llm): Provides fast and reasoning LLM clients for plugins.
+    - AgentManager (self.agent): Provides autonomous agent + knowledge store.
+    
+    Usage:
+        client = SummaryClient(reasoning_base_url=..., rapid_base_url=...)
+        await client.initialize()  # Initializes both llm and agent
+        # Plugins use client.llm for LLM calls
+        # Agent uses client.llm.reasoning_client for autonomous queries
+    """
     
     def __init__(
         self,
@@ -69,9 +80,9 @@ class SummaryClient:
 
         # Track last processed timestamp (global, not per-window)
         self._last_processed_timestamp: float = 0.0
-                
-        # Agent Manager: wraps LLMManager and adds autonomous agent + knowledge store
-        self.llm = AgentManager(
+        
+        # LLM Manager: provides fast and reasoning LLM clients for plugins
+        self.llm = LLMManager(
             fast_base_url=rapid_base_url,
             fast_api_key=rapid_api_key,
             reasoning_base_url=reasoning_base_url,
@@ -81,6 +92,9 @@ class SummaryClient:
             health_result_callback=self._queue_payload,
             health_monitoring_callback=self._send_monitoring_event,
         )
+        
+        # Agent Manager: provides autonomous agent + knowledge store
+        self.agent = AgentManager()
         
         # Initial summary delay configuration
         self.initial_summary_delay_seconds: float = initial_summary_delay_seconds
@@ -183,6 +197,9 @@ class SummaryClient:
         # Delegate model detection to LLMManager
         detected = await self.llm.initialize()
         
+        # Initialize the agent (builds PydanticAI agent with reasoning client)
+        await self.agent.initialize(self.llm)
+        
         # Note: warm_up() is now called inside llm.initialize() - failures will propagate
         
         # Load plugins after LLMManager is initialized (LLMClient instances are ready)
@@ -209,7 +226,8 @@ class SummaryClient:
         transcription_windows_per_summary_window: Optional[int] = None,
         raw_text_context_limit: Optional[int] = None,
         initial_summary_delay_seconds: Optional[float] = None,
-        content_type_context_limit: Optional[int] = None
+        content_type_context_limit: Optional[int] = None,
+        agent_chat_query: Optional[str] = None,
     ):
         """
         Update client parameters dynamically.
@@ -231,6 +249,7 @@ class SummaryClient:
             raw_text_context_limit: New max characters for raw text in LLM context
             initial_summary_delay_seconds: New delay before first summary (default: 10.0)
             content_type_context_limit: New character limit for content type detection
+            agent_chat_query: Custom system prompt for the agent chat query
         
         Note:
             message_format_mode is managed by LLMManager and cannot be updated here.
@@ -273,6 +292,15 @@ class SummaryClient:
                 except Exception as e:
                     logger.warning(f"Failed to update params for plugin {plugin_name}: {e}")
         
+        # Notify AgentManager (sync call) - call on_update_params if it exists
+        if hasattr(self.agent, 'on_update_params'):
+            try:
+                self.agent.on_update_params(
+                    agent_chat_query=agent_chat_query,
+                )
+            except Exception as e:
+                logger.warning(f"Failed to update params for agent: {e}")
+        
         logger.info(f"SummaryClient params updated")
     
     def reset(self):
@@ -283,7 +311,7 @@ class SummaryClient:
         self._last_processed_timestamp = 0.0
 
         # Clear the in-memory transcript knowledge store
-        self.llm.reset_knowledge_store()
+        self.agent.reset_knowledge_store()
         
         # Reset all plugins that have a reset method
         for plugin_name, plugin_instance in self._plugins.items():
@@ -330,8 +358,23 @@ class SummaryClient:
         Returns:
             The agent's synthesised text response.
         """
-        return await self.llm.ask_agent(query)
-        
+        return await self.agent.ask_agent(query)
+
+    async def handle_speakers_merged(self, merged_speakers: List[Dict[str, str]]) -> None:
+        """Update knowledge store when speakers are merged.
+
+        This should be called when the diarization system emits a speakers_merged
+        event to keep the indexed transcript chunks in sync with the merged speakers.
+
+        Args:
+            merged_speakers: List of {"source": "speaker_1", "target": "speaker_0"} dicts.
+        """
+        if not merged_speakers:
+            return
+        if hasattr(self.agent, 'remap_speakers'):
+            count = self.agent.remap_speakers(merged_speakers)
+            logger.info(f"Updated {count} chunks after speaker merge: {merged_speakers}")
+
     # =========================================================================
     # Summary Worker and Sender Methods (moved from pipeline/main.py)
     # =========================================================================
@@ -522,7 +565,7 @@ class SummaryClient:
                 seg.get("text", "") for seg in segments if seg.get("text")
             )
         asyncio.create_task(
-            self.llm.index_transcript_segment(
+            self.agent.index_transcript_segment(
                 text=deduplicated_text,
                 timestamp=window_start_ts,
                 window_id=transcription_window_id,

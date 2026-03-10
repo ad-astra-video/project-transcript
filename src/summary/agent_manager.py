@@ -1,22 +1,26 @@
 """
-AgentManager - Extends LLMManager with an autonomous PydanticAI agent.
+AgentManager - Provides autonomous PydanticAI agent with transcript knowledge store.
 
-Adds:
+Components:
 - TranscriptKnowledgeStore: in-memory Faiss index backed by a local TEI
   embedding model (default port 6060, mirrors the vLLM container pattern).
-- AgentManager: wraps LLMManager and exposes:
-    * index_transcript_segment()  – embed and store a transcript chunk
-    * ask_agent()                 – run the autonomous agent loop
+- PydanticAI agent with search_transcript and web_search tools.
+
+Usage:
+  agent = AgentManager()
+  await agent.initialize(llm_manager)  # Inject LLMManager at initialize time
+  await agent.index_transcript_segment(text, timestamp, speaker)
+  response = await agent.ask_agent(query)
 
 Web search tool priority (first key found wins):
   TAVILY_API_KEY  → Tavily Search API
   EXA_API_KEY     → Exa Search API
   (fallback)      → DuckDuckGo (no key required)
 
-Embedding client configuration (mirrors fast/reasoning pattern):
-  EMBEDDING_BASE_URL   – defaults to http://tei-embeddings:80/v1
-  EMBEDDING_API_KEY    – defaults to "dummy"
-  EMBEDDING_MODEL      – defaults to BAAI/bge-small-en-v1.5
+Embedding client configuration:
+  LOCAL_EMBEDDING_BASE_URL   – defaults to http://byoc-transcription-tei-embeddings:6060/v1
+  LOCAL_EMBEDDING_API_KEY    – defaults to "dummy"
+  LOCAL_EMBEDDING_MODEL      – defaults to BAAI/bge-small-en-v1.5
 """
 
 import asyncio
@@ -39,7 +43,7 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 # Defaults
 # ---------------------------------------------------------------------------
-_DEFAULT_EMBEDDING_BASE_URL = "http://tei-embeddings:6060/v1"
+_DEFAULT_EMBEDDING_BASE_URL = "http://byoc-transcription-tei-embeddings:6060/v1"
 _DEFAULT_EMBEDDING_MODEL = "BAAI/bge-small-en-v1.5"
 _TOP_K = 5  # Number of transcript chunks returned per search
 
@@ -90,6 +94,8 @@ class TranscriptKnowledgeStore:
         self._dim: Optional[int] = None
         self._chunks: List[TranscriptChunk] = []
         self._lock = asyncio.Lock()
+        # Speaker remap: source_speaker_id -> target_speaker_id
+        self._speaker_remap: Dict[str, str] = {}
 
     # ------------------------------------------------------------------
     # Public API
@@ -97,6 +103,9 @@ class TranscriptKnowledgeStore:
 
     async def add(self, chunk: TranscriptChunk) -> None:
         """Embed *chunk* and add it to the Faiss index."""
+        # Apply any existing speaker remaps to new chunks
+        if chunk.speaker in self._speaker_remap:
+            chunk.speaker = self._speaker_remap[chunk.speaker]
         vector = await self._embed(chunk.text)
         async with self._lock:
             self._ensure_index(len(vector))
@@ -115,11 +124,48 @@ class TranscriptKnowledgeStore:
             )
             return [self._chunks[i] for i in indices[0] if i >= 0]
 
+    def remap_speaker(self, old_speaker: str, new_speaker: str) -> int:
+        """Remap all chunks with old_speaker to new_speaker.
+
+        Args:
+            old_speaker: The speaker ID to replace.
+            new_speaker: The new speaker ID to use.
+
+        Returns:
+            Number of chunks updated.
+        """
+        count = 0
+        for chunk in self._chunks:
+            if chunk.speaker == old_speaker:
+                chunk.speaker = new_speaker
+                count += 1
+        self._speaker_remap[old_speaker] = new_speaker
+        logger.info(f"Remapped speaker '{old_speaker}' -> '{new_speaker}': {count} chunks updated")
+        return count
+
+    def remap_speakers(self, merges: List[Dict[str, str]]) -> int:
+        """Apply multiple speaker merges.
+
+        Args:
+            merges: List of {"source": "speaker_1", "target": "speaker_0"} dicts.
+
+        Returns:
+            Total number of chunks updated.
+        """
+        total = 0
+        for merge in merges:
+            source = merge.get("source")
+            target = merge.get("target")
+            if source and target:
+                total += self.remap_speaker(source, target)
+        return total
+
     def reset(self) -> None:
         """Clear all stored vectors and chunks (call on stream end)."""
         self._index = None
         self._dim = None
         self._chunks = []
+        self._speaker_remap = {}
         logger.info("TranscriptKnowledgeStore reset")
 
     @property
@@ -238,50 +284,33 @@ async def _search_duckduckgo(query: str, max_results: int) -> str:
 
 class AgentManager:
     """
-    Wraps LLMManager and adds:
-    - A TranscriptKnowledgeStore for semantic search over indexed transcript chunks.
-    - A PydanticAI autonomous agent with `search_transcript` and `web_search` tools.
+    Provides autonomous PydanticAI agent with transcript knowledge store.
 
-    The existing LLMManager / LLMClient / HealthMetrics interface is unchanged –
-    all existing plugins continue to work via `self.llm`.
+    Components:
+    - TranscriptKnowledgeStore: semantic search over indexed transcript chunks.
+    - PydanticAI agent with `search_transcript` and `web_search` tools.
 
-    Configuration (mirrors the vLLM env-var pattern):
-        EMBEDDING_BASE_URL   Base URL for the TEI service  (default: http://tei-embeddings:80/v1)
+    Usage:
+        agent = AgentManager()
+        await agent.initialize(llm_manager)  # Inject LLMManager
+        await agent.index_transcript_segment(text, timestamp, speaker)
+        response = await agent.ask_agent(query)
+
+    Configuration (env vars):
+        EMBEDDING_BASE_URL   Base URL for the TEI service  (default: http://byoc-transcription-tei-embeddings:6060/v1)
         EMBEDDING_API_KEY    API key for TEI               (default: "dummy")
         EMBEDDING_MODEL      Model name served by TEI      (default: BAAI/bge-small-en-v1.5)
     """
 
     def __init__(
         self,
-        # ---- LLMManager constructor args (pass-through) ----
-        fast_base_url: str,
-        fast_api_key: str,
-        reasoning_base_url: str,
-        reasoning_api_key: str,
-        rapid_model: Optional[str] = None,
-        reasoning_model: Optional[str] = None,
-        message_format_mode: Optional[MessageFormatMode] = None,
-        request_timeout_seconds: float = 240.0,
-        health_result_callback: Optional[Callable[[dict], Awaitable[None]]] = None,
-        health_monitoring_callback: Optional[Callable[[dict, str], Awaitable[None]]] = None,
         # ---- Embedding / knowledge store args ----
         embedding_base_url: Optional[str] = None,
         embedding_api_key: Optional[str] = None,
         embedding_model: Optional[str] = None,
     ):
-        # ---- Core LLM manager (unchanged interface for existing plugins) ----
-        self.llm = LLMManager(
-            fast_base_url=fast_base_url,
-            fast_api_key=fast_api_key,
-            reasoning_base_url=reasoning_base_url,
-            reasoning_api_key=reasoning_api_key,
-            rapid_model=rapid_model,
-            reasoning_model=reasoning_model,
-            message_format_mode=message_format_mode,
-            request_timeout_seconds=request_timeout_seconds,
-            health_result_callback=health_result_callback,
-            health_monitoring_callback=health_monitoring_callback,
-        )
+        # ---- LLM manager (injected at initialize time) ----
+        self.llm: Optional[LLMManager] = None
 
         # ---- Embedding client configuration ----
         _emb_url = (
@@ -303,64 +332,17 @@ class AgentManager:
         # ---- PydanticAI agent (built lazily after initialize()) ----
         self._agent: Optional[Agent] = None
         self._agent_model_name: Optional[str] = None
+        self._agent_chat_query: Optional[str] = None  # Custom system prompt for agent queries
 
-    # ------------------------------------------------------------------
-    # Delegated LLMManager properties / methods
-    # ------------------------------------------------------------------
-
-    @property
-    def fast_client(self):
-        return self.llm.fast_client
-
-    @property
-    def reasoning_client(self):
-        return self.llm.reasoning_client
-
-    @property
-    def rapid_llm_client(self):
-        return self.llm.rapid_llm_client
-
-    @property
-    def reasoning_llm_client(self):
-        return self.llm.reasoning_llm_client
-
-    @property
-    def rapid_model(self):
-        return self.llm.rapid_model
-
-    @property
-    def reasoning_model(self):
-        return self.llm.reasoning_model
-
-    def set_stream_id(self, stream_id: Optional[str]):
-        self.llm.set_stream_id(stream_id)
-
-    def start_scheduler(self):
-        return self.llm.start_scheduler()
-
-    def stop_scheduler(self):
-        return self.llm.stop_scheduler()
-
-    def update_params(self, **kwargs):
-        return self.llm.update_params(**kwargs)
-
-    def __getattr__(self, name: str):
-        # Proxy any attribute not defined on AgentManager through to the inner
-        # LLMManager so that existing code (including tests) that accesses
-        # private attributes like _rapid_llm_client or _reasoning_base_url
-        # continues to work transparently.
-        try:
-            return getattr(self.llm, name)
-        except AttributeError:
-            raise AttributeError(
-                f"'{type(self).__name__}' object has no attribute '{name}'"
-            )
-
-    async def initialize(self) -> Optional[str]:
-        """Initialize LLM clients, auto-detect models, and build the PydanticAI agent."""
-        detected = await self.llm.initialize()
-        self._build_agent()
-        return detected
+    async def initialize(self, llm_manager: LLMManager) -> Optional[str]:
+        """Initialize with LLM manager, auto-detect models, and build the PydanticAI agent."""
+        self.llm = llm_manager
+        # Build the PydanticAI agent using the reasoning client
+        self._build_agent(
+            reasoning_client=self.llm.reasoning_client,
+            reasoning_model=self.llm.reasoning_model
+        )
+        return None
 
     # ------------------------------------------------------------------
     # Knowledge store helpers (called by the summary pipeline)
@@ -391,17 +373,45 @@ class AgentManager:
         try:
             await self.knowledge_store.add(chunk)
         except Exception as e:
-            logger.warning(f"Failed to index transcript segment: {e}")
+            logger.exception(f"Failed to index transcript segment: {e}")
 
     def reset_knowledge_store(self) -> None:
         """Clear all stored vectors. Call when a stream ends."""
         self.knowledge_store.reset()
 
+    def remap_speakers(self, merges: List[Dict[str, str]]) -> int:
+        """Apply speaker merge updates to the knowledge store.
+
+        Args:
+            merges: List of {"source": "speaker_1", "target": "speaker_0"} dicts.
+
+        Returns:
+            Total number of chunks updated.
+        """
+        return self.knowledge_store.remap_speakers(merges)
+
+    def on_update_params(
+        self,
+        agent_chat_query: Optional[str] = None,
+    ) -> None:
+        """Handle on_update_params event from SummaryClient.
+
+        Args:
+            agent_chat_query: Custom system prompt for the agent chat query.
+        """
+        if agent_chat_query is not None:
+            self._agent_chat_query = agent_chat_query
+            logger.info(f"Updated agent_chat_query to: {agent_chat_query[:50]}..." if len(agent_chat_query) > 50 else f"Updated agent_chat_query to: {agent_chat_query}")
+
     # ------------------------------------------------------------------
     # Autonomous agent
     # ------------------------------------------------------------------
 
-    def _build_agent(self) -> None:
+    def _build_agent(
+        self,
+        reasoning_client: AsyncOpenAI,
+        reasoning_model: str
+    ) -> None:
         """
         Construct the PydanticAI Agent backed by the reasoning LLM.
 
@@ -409,19 +419,12 @@ class AgentManager:
           - search_transcript: semantic search over the indexed video transcript
           - web_search: live web search (Tavily > Exa > DuckDuckGo)
         """
-        model_name = self.llm.reasoning_model
-        if not model_name:
+        if not reasoning_model:
             logger.warning("AgentManager: reasoning model not set, skipping agent build")
             return
 
-        reasoning_base_url = self.llm._reasoning_base_url
-        reasoning_api_key = self.llm._reasoning_api_key
-
-        provider = OpenAIProvider(
-            base_url=reasoning_base_url,
-            api_key=reasoning_api_key or "dummy",
-        )
-        model = OpenAIModel(model_name, provider=provider)
+        # Use the reasoning client directly instead of creating a new provider
+        model = OpenAIModel(reasoning_model, provider=OpenAIProvider(openai_client=reasoning_client))
 
         agent: Agent[None, str] = Agent(
             model,
@@ -462,8 +465,8 @@ class AgentManager:
             return await _web_search(query)
 
         self._agent = agent
-        self._agent_model_name = model_name
-        logger.info(f"AgentManager: autonomous agent built on model '{model_name}'")
+        self._agent_model_name = reasoning_model
+        logger.info(f"AgentManager: autonomous agent built on model '{reasoning_model}'")
 
     async def ask_agent(self, query: str) -> str:
         """
@@ -485,5 +488,7 @@ class AgentManager:
             raise RuntimeError(
                 "AgentManager not initialised. Call initialize() before ask_agent()."
             )
-        result = await self._agent.run(query)
+        # Use custom system prompt if set via update_params, otherwise use default
+        system_prompt = self._agent_chat_query if self._agent_chat_query else None
+        result = await self._agent.run(query, system_prompt=system_prompt)
         return result.output

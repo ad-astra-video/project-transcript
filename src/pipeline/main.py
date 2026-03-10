@@ -888,6 +888,13 @@ async def update_params(params: dict):
             STATE.summary_client.initial_summary_delay_seconds = delay
             logger.info(f"Updated initial_summary_delay_seconds to {delay}s")
     
+    # Agent chat query parameter (custom system prompt for agent)
+    if "agent_chat_query" in params:
+        agent_query = params["agent_chat_query"]
+        if STATE.summary_client is not None:
+            STATE.summary_client.update_params(agent_chat_query=agent_query)
+            logger.info(f"Updated agent_chat_query")
+    
     # Content type override parameter (user control)
     if "content_type_override" in params:
         override = params["content_type_override"]
