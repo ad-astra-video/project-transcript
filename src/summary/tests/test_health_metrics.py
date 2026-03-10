@@ -74,6 +74,7 @@ class TestHealthMetrics:
         )
         
         metrics = health_metrics.get_metrics()
+        window = metrics["window"]
         
         assert window["total_requests"] == 1
         assert window["successful_requests"] == 0
@@ -93,6 +94,7 @@ class TestHealthMetrics:
         )
         
         metrics = health_metrics.get_metrics()
+        window = metrics["window"]
         
         assert window["total_requests"] == 1
         assert window["successful_requests"] == 0
@@ -113,6 +115,7 @@ class TestHealthMetrics:
         health_metrics.record(plugin_name="rapid_summary", success=False, failure_type="timeout_failure")
         
         metrics = health_metrics.get_metrics()
+        window = metrics["window"]
         
         assert window["total_requests"] == 4
         assert window["successful_requests"] == 2
@@ -131,16 +134,17 @@ class TestHealthMetrics:
         health_metrics.record(plugin_name="context_summary", success=False, failure_type="timeout_failure")
         
         metrics = health_metrics.get_metrics()
+        window = metrics["window"]
         
         # Check fast model breakdown
-        assert "fast" in metrics["model_type_breakdown"]
+        assert "fast" in window["model_type_breakdown"]
         assert window["model_type_breakdown"]["fast"]["total"] == 3
         assert window["model_type_breakdown"]["fast"]["successful"] == 2
         assert window["model_type_breakdown"]["fast"]["failed"]["parse_failure"] == 1
         assert window["model_type_breakdown"]["fast"]["success_rate_percentage"] == 66.67
         
         # Check reasoning model breakdown
-        assert "reasoning" in metrics["model_type_breakdown"]
+        assert "reasoning" in window["model_type_breakdown"]
         assert window["model_type_breakdown"]["reasoning"]["total"] == 2
         assert window["model_type_breakdown"]["reasoning"]["successful"] == 1
         assert window["model_type_breakdown"]["reasoning"]["failed"]["timeout_failure"] == 1
@@ -153,6 +157,7 @@ class TestHealthMetrics:
         health_metrics.record(plugin_name="custom_plugin", success=True, model_type="fast")
         
         metrics = health_metrics.get_metrics()
+        window = metrics["window"]
         
         assert window["model_type_breakdown"]["reasoning"]["total"] == 1
         assert window["model_type_breakdown"]["fast"]["total"] == 1
@@ -160,6 +165,7 @@ class TestHealthMetrics:
     def test_zero_requests_success_rate(self, health_metrics):
         """Test success rate calculation with zero requests."""
         metrics = health_metrics.get_metrics()
+        window = metrics["window"]
         
         assert window["success_rate_percentage"] == 0.0
     
@@ -192,8 +198,8 @@ class TestHealthMetrics:
         result_callback.assert_called_once()
         call_args = result_callback.call_args[0][0]
         assert call_args["type"] == "summary_processing_health"
-        assert call_args["total_requests"] == 3
-        assert call_args["successful_requests"] == 2
+        assert call_args["window"]["total_requests"] == 3
+        assert call_args["window"]["successful_requests"] == 2
         assert "stream_id" not in call_args  # stream_id should NOT be in result_callback
         
         # Verify monitoring_callback was called (WITH stream_id)
@@ -203,7 +209,7 @@ class TestHealthMetrics:
         
         # Verify counters were reset after publish
         metrics = health_metrics.get_metrics()
-        assert window["total_requests"] == 0
+        assert metrics["window"]["total_requests"] == 0
     
     @pytest.mark.asyncio
     async def test_publish_with_stream_id(self, health_metrics_with_callbacks):
@@ -233,7 +239,7 @@ class TestHealthMetrics:
         # Should not raise even without callbacks
         result = await health_metrics.publish()
         
-        assert result["total_requests"] == 1
+        assert result["window"]["total_requests"] == 1
     
     @pytest.mark.asyncio
     async def test_scheduler_publishes_periodically(self):
@@ -306,11 +312,12 @@ class TestHealthMetrics:
         
         # Verify total count
         metrics = health_metrics.get_metrics()
+        window = metrics["window"]
         assert window["total_requests"] == 500  # 5 threads * 100 requests
         # Due to thread timing, exact counts may vary slightly
-        assert 160 <= metrics["successful_requests"] <= 170  # approximately 1/3
-        assert 160 <= metrics["failed_requests"]["parse_failure"] <= 170  # approximately 1/3
-        assert 160 <= metrics["failed_requests"]["timeout_failure"] <= 170  # approximately 1/3
+        assert 160 <= window["successful_requests"] <= 170  # approximately 1/3
+        assert 160 <= window["failed_requests"]["parse_failure"] <= 170  # approximately 1/3
+        assert 160 <= window["failed_requests"]["timeout_failure"] <= 170  # approximately 1/3
 
 
 class TestLLMClientHealthMetrics:
@@ -359,6 +366,7 @@ class TestLLMClientHealthMetrics:
         
         # Verify health metrics were recorded
         metrics = health_metrics.get_metrics()
+        window = metrics["window"]
         assert window["total_requests"] == 1
         assert window["successful_requests"] == 1
         assert window["plugin_breakdown"]["rapid_summary"]["success"] == 1
@@ -404,6 +412,7 @@ class TestLLMClientHealthMetrics:
         
         # Verify timeout was recorded
         metrics = health_metrics.get_metrics()
+        window = metrics["window"]
         assert window["total_requests"] == 1
         assert window["failed_requests"]["timeout_failure"] == 1
     
