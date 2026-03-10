@@ -13,7 +13,7 @@ from typing import Any, Dict, List, Optional, Tuple
 from pydantic import BaseModel, field_validator, model_validator
 
 from ..llm_manager import LLMClient
-from .prompts import TRANSCRIPT_SUMMARY_SYSTEM_PROMPT, build_system_prompt
+from .prompts import TRANSCRIPT_SUMMARY_SYSTEM_PROMPT, build_system_prompt, build_verification_system_prompt
 
 logger = logging.getLogger(__name__)
 
@@ -50,6 +50,14 @@ class TranscriptSummarySchema(BaseModel):
     topics: List[str]
 
 
+class VerificationSchema(BaseModel):
+    """Schema for the verification pass LLM response."""
+
+    sections: List[TranscriptSummarySection]
+    key_points: List[str]
+    topics: List[str]
+
+
 class TranscriptSummaryTask:
     """
     Task that maintains a growing markdown summary of the full transcript.
@@ -57,19 +65,28 @@ class TranscriptSummaryTask:
     Called whenever a fast summary becomes available. It combines the buffered
     transcription window text with the new fast summary bullets and the existing
     running summary to produce an updated cumulative document.
+
+    An optional *verification_llm_client* may be provided.  When present, a
+    second (cheaper) LLM call is made after each primary summary call; it
+    checks only the sections that changed in the current cycle against the raw
+    transcript text for named-entity accuracy and logical-relationship accuracy,
+    then silently overwrites the result before emitting — no extra event is fired.
     """
 
     _json_schema: Dict[str, Any] = TranscriptSummarySchema.model_json_schema()
+    _verification_json_schema: Dict[str, Any] = VerificationSchema.model_json_schema()
 
     def __init__(
         self,
         llm_client: LLMClient,
         max_tokens: int = 131072,
         temperature: float = 0.3,
+        verification_llm_client: Optional[LLMClient] = None,
     ) -> None:
         self._llm_client = llm_client
         self.max_tokens = max_tokens
         self.temperature = temperature
+        self._verification_llm_client = verification_llm_client
 
     # CJK Unicode blocks: Unified Ideographs, Extensions, Compatibility, Radicals,
     # Hiragana, Katakana, Hangul syllables, Bopomofo, and related symbols.
@@ -208,6 +225,221 @@ class TranscriptSummaryTask:
             else:
                 filtered.append(item)
         return filtered
+
+    @staticmethod
+    def _ranges_overlap_ratio(a_start: int, a_end: int, b_start: int, b_end: int) -> float:
+        """Compute overlap ratio over the shorter interval length."""
+        overlap_start = max(a_start, b_start)
+        overlap_end = min(a_end, b_end)
+        if overlap_end <= overlap_start:
+            return 0.0
+        overlap = overlap_end - overlap_start
+        a_len = max(1, a_end - a_start)
+        b_len = max(1, b_end - b_start)
+        return overlap / min(a_len, b_len)
+
+    @staticmethod
+    def _get_changed_sections(
+        prior_sections: List[Dict[str, Any]],
+        new_sections: List[Dict[str, Any]],
+    ) -> List[Dict[str, Any]]:
+        """Return only sections that are new or whose content changed this cycle.
+
+        A section is considered *unchanged* when a prior section with ≥ 0.5
+        time-range overlap exists AND the content strings are identical after
+        stripping leading/trailing whitespace.
+
+        Args:
+            prior_sections: Sections from the previous summary state.
+            new_sections: Sections returned by the primary LLM call this cycle.
+
+        Returns:
+            Subset of *new_sections* that are new or differ from the prior state.
+        """
+        changed: List[Dict[str, Any]] = []
+        for new_sec in new_sections:
+            n_start = int(new_sec.get("start_ms", 0))
+            n_end = int(new_sec.get("end_ms", n_start))
+            n_content = (new_sec.get("content") or "").strip()
+
+            matched_unchanged = False
+            for prior_sec in prior_sections:
+                p_start = int(prior_sec.get("start_ms", 0))
+                p_end = int(prior_sec.get("end_ms", p_start))
+                p_content = (prior_sec.get("content") or "").strip()
+
+                if TranscriptSummaryTask._ranges_overlap_ratio(n_start, n_end, p_start, p_end) >= 0.5:
+                    if n_content == p_content:
+                        matched_unchanged = True
+                    break
+
+            if not matched_unchanged:
+                changed.append(new_sec)
+
+        return changed
+
+    def _build_verification_user_content(
+        self,
+        changed_sections: List[Dict[str, Any]],
+        segments: List[Dict[str, Any]],
+        key_points: List[str],
+        topics: List[str],
+    ) -> str:
+        """Build the user message for the verification LLM call.
+
+        Args:
+            changed_sections: Only the sections that changed in this cycle.
+            segments: Full segments list (used to pull relevant raw transcript text).
+            key_points: Current key points list to cross-check.
+            topics: Current topics list to cross-check.
+
+        Returns:
+            Formatted user content string.
+        """
+        # ── Sections to Verify ───────────────────────────────────────────────
+        section_blocks: List[str] = []
+        for sec in changed_sections:
+            s_start = int(sec.get("start_ms", 0))
+            s_end = int(sec.get("end_ms", s_start))
+            heading = (sec.get("heading") or "Untitled Topic").strip()
+            content = (sec.get("content") or "").strip() or "(empty)"
+            section_blocks.append(
+                f"### {heading} "
+                f"[{self._format_timestamp(s_start)} – {self._format_timestamp(s_end)}] "
+                f"(start_ms: {s_start}, end_ms: {s_end})\n\n"
+                f"{content}"
+            )
+        sections_text = "\n\n".join(section_blocks) if section_blocks else "(none)"
+
+        # ── Raw Transcript snippets that overlap the changed sections ────────
+        # Collect window_text from any segment whose time range overlaps at least
+        # one of the changed sections.  This keeps the verification prompt small
+        # while ensuring the model has the relevant source text.
+        relevant_texts: List[str] = []
+        for seg in segments:
+            seg_start = seg.get("window_start_ms", 0)
+            seg_end = seg.get("window_end_ms", 0)
+            seg_text = (seg.get("window_text") or "").strip()
+            if not seg_text:
+                continue
+            for sec in changed_sections:
+                s_start = int(sec.get("start_ms", 0))
+                s_end = int(sec.get("end_ms", s_start))
+                if self._ranges_overlap_ratio(seg_start, seg_end, s_start, s_end) > 0.0:
+                    timing = (
+                        f"[{self._format_timestamp(seg_start)} – "
+                        f"{self._format_timestamp(seg_end)}]"
+                    )
+                    relevant_texts.append(f"{timing}\n{seg_text}")
+                    break
+        transcript_text = "\n\n".join(relevant_texts) if relevant_texts else "(No transcript text available.)"
+
+        # ── Key points & topics ──────────────────────────────────────────────
+        kp_text = "\n".join(f"- {kp}" for kp in key_points) if key_points else "(none)"
+        topics_text = "\n".join(f"- {t}" for t in topics) if topics else "(none)"
+
+        return (
+            "## Sections to Verify\n\n"
+            f"{sections_text}\n\n"
+            "## Raw Transcript\n\n"
+            f"{transcript_text}\n\n"
+            "## Key Points\n\n"
+            f"{kp_text}\n\n"
+            "## Topics\n\n"
+            f"{topics_text}"
+        )
+
+    async def _run_verification_pass(
+        self,
+        changed_sections: List[Dict[str, Any]],
+        segments: List[Dict[str, Any]],
+        key_points: List[str],
+        topics: List[str],
+    ) -> Optional[Tuple[List[Dict[str, Any]], List[str], List[str], int, int]]:
+        """Run the verification LLM call and return corrected content.
+
+        Returns *None* when verification is disabled (no client) or when there
+        are no changed sections to verify.  On parse failure, logs a warning
+        and returns *None* (the primary result is emitted unchanged).
+
+        Args:
+            changed_sections: Sections that changed in this cycle.
+            segments: Full segments list for transcript text lookup.
+            key_points: Current key points (may also be corrected).
+            topics: Current topics (may also be corrected).
+
+        Returns:
+            ``(corrected_sections, corrected_key_points, corrected_topics,
+            v_input_tokens, v_output_tokens)`` or *None*.
+        """
+        if self._verification_llm_client is None or not changed_sections:
+            return None
+
+        user_content = self._build_verification_user_content(
+            changed_sections=changed_sections,
+            segments=segments,
+            key_points=key_points,
+            topics=topics,
+        )
+
+        try:
+            _, v_content, v_in_tokens, v_out_tokens, _ = (
+                await self._verification_llm_client.create_completion(
+                    system_prompt=build_verification_system_prompt(),
+                    user_content=user_content,
+                    temperature=0.1,
+                    response_format={
+                        "type": "json_schema",
+                        "json_schema": {
+                            "name": "transcript_summary_verification",
+                            "schema": self._verification_json_schema,
+                        },
+                    },
+                )
+            )
+        except Exception as exc:
+            logger.warning(
+                "transcript_summary verification pass failed (non-fatal): %s", exc
+            )
+            return None
+
+        try:
+            json_v = v_content.replace("```json", "").replace("```", "").strip()
+            v_parsed = VerificationSchema.model_validate_json(json_v)
+        except Exception as exc:
+            logger.warning(
+                "transcript_summary verification pass: failed to parse response: %s — "
+                "raw content: %.200s",
+                exc,
+                v_content,
+            )
+            return None
+
+        # Apply same guards as the primary pipeline
+        v_sections_out: List[Dict[str, Any]] = []
+        for sec in v_parsed.sections:
+            heading = self._strip_cjk(sec.heading).strip()
+            content = self._strip_cjk(sec.content).strip()
+            clean_content, _, _ = self._validate_no_prompt_leakage(content, [], [])
+            v_sections_out.append({
+                "heading": heading or "Overview",
+                "start_ms": int(sec.start_ms),
+                "end_ms": int(sec.end_ms),
+                "content": clean_content.strip(),
+            })
+
+        v_kp = [self._strip_cjk(kp).lstrip("- ").strip() for kp in v_parsed.key_points]
+        v_topics = [self._strip_cjk(t).lstrip("- ").strip() for t in v_parsed.topics]
+        _, v_kp, v_topics = self._validate_no_prompt_leakage("", v_kp, v_topics)
+        v_kp = self._discard_zero_timed_items(v_kp)
+        v_topics = self._discard_zero_timed_items(v_topics)
+
+        logger.debug(
+            "transcript_summary: verification pass corrected %d section(s)",
+            len(v_sections_out),
+        )
+
+        return v_sections_out, v_kp, v_topics, v_in_tokens, v_out_tokens
 
     @staticmethod
     def _compute_caps(latest_end_ms: int) -> Tuple[int, int]:
@@ -495,16 +727,55 @@ class TranscriptSummaryTask:
         clean_kp     = self._discard_zero_timed_items(clean_kp)
         clean_topics = self._discard_zero_timed_items(clean_topics)
 
+        # ── Verification pass ────────────────────────────────────────────────
+        # Determine which sections actually changed so the verifier only sees
+        # the delta — this keeps the secondary call cheap and proportional.
+        v_input_tokens: int = 0
+        v_output_tokens: int = 0
+
+        changed = self._get_changed_sections(prior_sections, cleaned_sections)
+        verification = await self._run_verification_pass(
+            changed_sections=changed,
+            segments=segments,
+            key_points=clean_kp,
+            topics=clean_topics,
+        )
+
+        if verification is not None:
+            v_sections, v_kp, v_topics, v_input_tokens, v_output_tokens = verification
+
+            # Splice corrected sections back into cleaned_sections by time-range match
+            for v_sec in v_sections:
+                v_start = int(v_sec.get("start_ms", 0))
+                v_end = int(v_sec.get("end_ms", v_start))
+                for idx, cs in enumerate(cleaned_sections):
+                    cs_start = int(cs.get("start_ms", 0))
+                    cs_end = int(cs.get("end_ms", cs_start))
+                    if self._ranges_overlap_ratio(v_start, v_end, cs_start, cs_end) >= 0.5:
+                        cleaned_sections[idx] = v_sec
+                        break
+
+            clean_kp = v_kp
+            clean_topics = v_topics
+
         return {
             "sections": cleaned_sections,
             "key_points": clean_kp,
             "topics": clean_topics,
             "input_tokens": input_tokens,
             "output_tokens": output_tokens,
+            "verification_input_tokens": v_input_tokens,
+            "verification_output_tokens": v_output_tokens,
         }
 
 
 TranscriptSummarySchema.model_rebuild()
+VerificationSchema.model_rebuild()
 
 
-__all__ = ["TranscriptSummaryTask", "TranscriptSummarySchema", "TranscriptSummarySection"]
+__all__ = [
+    "TranscriptSummaryTask",
+    "TranscriptSummarySchema",
+    "TranscriptSummarySection",
+    "VerificationSchema",
+]

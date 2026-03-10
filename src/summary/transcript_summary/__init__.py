@@ -78,6 +78,7 @@ class TranscriptSummaryPlugin:
 
         self._task = TranscriptSummaryTask(
             llm_client=self._llm.reasoning_llm_client,
+            verification_llm_client=self._llm.rapid_llm_client,
         )
 
     # ------------------------------------------------------------------
@@ -248,6 +249,8 @@ class TranscriptSummaryPlugin:
                     "llm_usage": {
                         "input_tokens": result.get("input_tokens", 0),
                         "output_tokens": result.get("output_tokens", 0),
+                        "verification_input_tokens": result.get("verification_input_tokens", 0),
+                        "verification_output_tokens": result.get("verification_output_tokens", 0),
                     },
                     "summary": summary_markdown,
                     "key_points": result.get("key_points", []),
