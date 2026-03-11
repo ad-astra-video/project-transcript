@@ -205,7 +205,14 @@ class SummaryClient:
         
         # Load plugins after LLMManager is initialized (LLMClient instances are ready)
         self._discover_plugins()
-        
+
+        # Register agent as an event subscriber so it indexes fast summaries automatically
+        self.register_plugin_event_sub(
+            plugin_name="agent_manager",
+            plugin_instance=self.agent,
+            events={"fast_summary_available": self.agent.handle_fast_summary_available},
+        )
+
         logger.info("SummaryClient initialized")
         
         return detected

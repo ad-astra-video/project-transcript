@@ -28,6 +28,14 @@ from .prompts import (
 logger = logging.getLogger(__name__)
 
 
+def _format_hms(seconds: float) -> str:
+    """Format *seconds* as HH:MM:SS."""
+    s = int(seconds)
+    h, remainder = divmod(s, 3600)
+    m, sec = divmod(remainder, 60)
+    return f"{h:02d}:{m:02d}:{sec:02d}"
+
+
 # ==================== WindowInsight (moved from window_manager.py) ====================
 
 @dataclass
@@ -562,7 +570,7 @@ class ContextSummaryTask:
             # Format with ID and timing hints
             # ID is included so LLM can reference it in continuation_of/correction_of
             id_hint = f"[#{insight.insight_id}]"
-            timing_hint = f"[{insight.timestamp_start:.1f}s - {insight.timestamp_end:.1f}s]"
+            timing_hint = f"[{_format_hms(insight.timestamp_start)} - {_format_hms(insight.timestamp_end)}]"
             
             # Add continuation/correction markers if present
             markers = []

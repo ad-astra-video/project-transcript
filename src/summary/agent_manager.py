@@ -116,6 +116,11 @@ class TranscriptKnowledgeStore:
         # Speaker remap: source_speaker_id -> target_speaker_id
         self._speaker_remap: Dict[str, str] = {}
 
+        # Fast-summary sub-index (separate from the raw transcript index)
+        self._summary_index = None
+        self._summary_dim: Optional[int] = None
+        self._summary_chunks: List[TranscriptChunk] = []
+
     # ------------------------------------------------------------------
     # Public API
     # ------------------------------------------------------------------
@@ -146,6 +151,30 @@ class TranscriptKnowledgeStore:
                 None, self._index.search, vec_array, k
             )
             return [self._chunks[i] for i in indices[0] if i >= 0]
+
+    async def add_summary(self, chunk: TranscriptChunk) -> None:
+        """Embed *chunk* and add it to the fast-summary sub-index."""
+        vector = await self._embed(chunk.text)
+        async with self._lock:
+            self._ensure_summary_index(len(vector))
+            vec_array = np.array([vector], dtype="float32")
+            loop = asyncio.get_event_loop()
+            await loop.run_in_executor(None, self._summary_index.add, vec_array)
+            self._summary_chunks.append(chunk)
+
+    async def search_summaries(self, query: str, top_k: int = _TOP_K) -> List[TranscriptChunk]:
+        """Return the *top_k* most relevant fast-summary chunks for *query*."""
+        if not self._summary_chunks:
+            return []
+        vector = await self._embed(query)
+        async with self._lock:
+            k = min(top_k, len(self._summary_chunks))
+            vec_array = np.array([vector], dtype="float32")
+            loop = asyncio.get_event_loop()
+            distances, indices = await loop.run_in_executor(
+                None, self._summary_index.search, vec_array, k
+            )
+            return [self._summary_chunks[i] for i in indices[0] if i >= 0]
 
     def remap_speaker(self, old_speaker: str, new_speaker: str) -> int:
         """Remap all chunks with old_speaker to new_speaker.
@@ -189,11 +218,18 @@ class TranscriptKnowledgeStore:
         self._dim = None
         self._chunks = []
         self._speaker_remap = {}
+        self._summary_index = None
+        self._summary_dim = None
+        self._summary_chunks = []
         logger.info("TranscriptKnowledgeStore reset")
 
     @property
     def size(self) -> int:
         return len(self._chunks)
+
+    @property
+    def summary_size(self) -> int:
+        return len(self._summary_chunks)
 
     # ------------------------------------------------------------------
     # Internal helpers
@@ -213,6 +249,14 @@ class TranscriptKnowledgeStore:
             self._dim = dim
             self._index = faiss.IndexFlatL2(dim)
             logger.info(f"Faiss IndexFlatL2 created with dim={dim}")
+
+    def _ensure_summary_index(self, dim: int) -> None:
+        """Create the fast-summary Faiss index on first insert."""
+        if self._summary_index is None:
+            import faiss
+            self._summary_dim = dim
+            self._summary_index = faiss.IndexFlatL2(dim)
+            logger.info(f"Faiss summary IndexFlatL2 created with dim={dim}")
 
 
 # ---------------------------------------------------------------------------
@@ -254,10 +298,10 @@ async def _search_tavily(query: str, api_key: str, max_results: int) -> str:
             f"**{r.get('title', 'No title')}**\n{r.get('url', '')}\n{r.get('content', '')}"
             for r in results
         )
-        return formatted or "No results found."
+        return formatted or "[NO_RESULTS] No results found."
     except Exception as e:
         logger.warning(f"Tavily search failed: {e}")
-        return f"Tavily search error: {e}"
+        return f"[NO_RESULTS] Tavily search error: {e}"
 
 
 async def _search_exa(query: str, api_key: str, max_results: int) -> str:
@@ -277,10 +321,10 @@ async def _search_exa(query: str, api_key: str, max_results: int) -> str:
             f"**{r.title}**\n{r.url}\n{r.text[:500] if r.text else ''}"
             for r in response.results
         )
-        return formatted or "No results found."
+        return formatted or "[NO_RESULTS] No results found."
     except Exception as e:
         logger.warning(f"Exa search failed: {e}")
-        return f"Exa search error: {e}"
+        return f"[NO_RESULTS] Exa search error: {e}"
 
 
 async def _search_duckduckgo(query: str, max_results: int) -> str:
@@ -295,10 +339,10 @@ async def _search_duckduckgo(query: str, max_results: int) -> str:
             f"**{r.get('title', 'No title')}**\n{r.get('href', '')}\n{r.get('body', '')}"
             for r in results
         )
-        return formatted or "No results found."
+        return formatted or "[NO_RESULTS] No results found."
     except Exception as e:
         logger.warning(f"DuckDuckGo search failed: {e}")
-        return f"DuckDuckGo search error: {e}"
+        return f"[NO_RESULTS] DuckDuckGo search error: {e}"
 
 
 # ---------------------------------------------------------------------------
@@ -364,8 +408,9 @@ class AgentManager:
 
         # ---- Stream position tracking (updated on each indexed segment) ----
         self._current_stream_ts: float = 0.0       # latest end-of-chunk timestamp seen
-        self._total_chunks: int = 0                # total chunks indexed
+        self._total_chunks: int = 0                # total transcript chunks indexed
         self._total_indexed_duration: float = 0.0  # sum of all chunk durations
+        self._total_summary_chunks: int = 0        # total fast-summary chunks indexed
 
         # ---- WindowManager reference (injected from SummaryClient) ----
         self._window_manager: Optional[WindowManager] = None
@@ -431,6 +476,7 @@ class AgentManager:
         self._current_stream_ts = 0.0
         self._total_chunks = 0
         self._total_indexed_duration = 0.0
+        self._total_summary_chunks = 0
 
     def remap_speakers(self, merges: List[Dict[str, str]]) -> int:
         """Apply speaker merge updates to the knowledge store.
@@ -442,6 +488,66 @@ class AgentManager:
             Total number of chunks updated.
         """
         return self.knowledge_store.remap_speakers(merges)
+
+    async def index_summary_segment(
+        self,
+        text: str,
+        timestamp: Optional[float] = None,
+        duration: Optional[float] = None,
+        window_id: Optional[int] = None,
+    ) -> None:
+        """
+        Embed *text* and add it to the fast-summary Faiss sub-index.
+
+        Called via the fast_summary_available event handler whenever a
+        RapidSummaryPlugin window completes, so the agent can search
+        LLM-distilled scribe notes independently of raw transcript chunks.
+        """
+        if not text.strip():
+            return
+        chunk = TranscriptChunk(
+            text=text,
+            timestamp=timestamp,
+            duration=duration,
+            window_id=window_id,
+        )
+        try:
+            await self.knowledge_store.add_summary(chunk)
+            self._total_summary_chunks += 1
+            logger.debug(f"Indexed fast-summary chunk (window_id={window_id}, ts={timestamp})")
+        except Exception as e:
+            logger.exception(f"Failed to index fast-summary segment: {e}")
+
+    async def handle_fast_summary_available(
+        self,
+        summary_window_id: int,
+        fast_summary_items: List[str],
+        window_start_ms: int,
+        window_end_ms: int,
+        **kwargs,
+    ) -> None:
+        """
+        Event handler subscribed to the 'fast_summary_available' event.
+
+        Joins the scribe-note bullets from RapidSummaryPlugin into a single
+        text block and indexes it into the fast-summary sub-index so it can
+        be retrieved via the search_fast_summaries agent tool.
+        """
+        if not fast_summary_items:
+            return
+        notes_text = "\n".join(item for item in fast_summary_items if item)
+        if not notes_text.strip():
+            return
+        timestamp = window_start_ms / 1000.0
+        duration = (window_end_ms - window_start_ms) / 1000.0
+        asyncio.create_task(
+            self.index_summary_segment(
+                text=notes_text,
+                timestamp=timestamp,
+                duration=duration,
+                window_id=summary_window_id,
+            )
+        )
 
     def on_update_params(
         self,
@@ -469,8 +575,10 @@ class AgentManager:
         """
         Construct the PydanticAI Agent backed by the reasoning LLM.
 
-        The agent is given two tools:
+        The agent is given four tools:
+          - search_fast_summaries: semantic search over LLM-distilled fast summary notes (call first)
           - search_transcript: semantic search over the indexed video transcript
+          - get_transcript_time_range: verbatim transcript retrieval for a time window
           - web_search: live web search (Tavily > Exa > DuckDuckGo)
         """
         if not reasoning_model:
@@ -486,6 +594,18 @@ class AgentManager:
                 "You are an intelligent assistant anchored to a live video transcript. "
                 "Every user question is about the current video stream and its transcript "
                 "unless explicitly stated otherwise — never ask for clarification about this.\n\n"
+
+                "ORIENTATION STEP (do this first for every non-trivial question):\n"
+                "Call search_fast_summaries before any other transcript tool. Fast summaries "
+                "are LLM-distilled scribe notes produced every ~15 seconds — they capture "
+                "decisions, key facts, topics, and action items in compact form. Use the "
+                "returned notes to:\n"
+                "  a) identify which time windows are relevant to the question,\n"
+                "  b) extract topic labels and keywords to sharpen subsequent search_transcript queries,\n"
+                "  c) resolve whether get_transcript_time_range is needed and what bounds to use.\n"
+                "Only after reviewing the fast-summary results should you call search_transcript "
+                "or get_transcript_time_range. If search_fast_summaries returns no results, "
+                "proceed directly to search_transcript.\n\n"
 
                 "SEARCH STRATEGY — follow all four steps before answering:\n\n"
 
@@ -529,6 +649,8 @@ class AgentManager:
                 "   - If no content exists in range: report it clearly.\n\n"
 
                 "TOOL SELECTION GUIDE:\n"
+                "- search_fast_summaries: ALWAYS call first. Returns distilled scribe notes to orient\n"
+                "  your strategy. Use results to steer queries in the tools below.\n"
                 "- get_transcript_time_range: user asks about a time period → complete verbatim\n"
                 "  text, ideal for summarisation. Use for 'what happened in the last 5 minutes',\n"
                 "  'summarise from 2:00 to 5:00', etc.\n"
@@ -538,8 +660,9 @@ class AgentManager:
                 "  minutes') to obtain the current stream position and chunk duration metrics.\n"
                 "- web_search: supplement with external context when transcript is thin or\n"
                 "  user explicitly requests it.\n"
-                "- Tools can be combined: e.g. search_transcript to find when something\n"
-                "  occurred, then get_transcript_time_range for surrounding context.\n\n"
+                "- Tools can be combined: e.g. search_fast_summaries to find the relevant window,\n"
+                "  search_transcript to retrieve verbatim mentions, then get_transcript_time_range\n"
+                "  for surrounding context.\n\n"
 
                 "KNOWLEDGE BASE RULES — CRITICAL:\n"
                 "The search_transcript tool provides access to the COMPLETE transcript "
@@ -555,13 +678,15 @@ class AgentManager:
                 "is indexed as the complete picture.\n\n"
 
                 "TOOL USAGE RULES:\n"
-                "5. Always call search_transcript or get_transcript_time_range at least once "
-                "before composing any answer.\n"
+                "5. For every non-trivial question, call search_fast_summaries first to orient "
+                "your strategy, then call search_transcript or get_transcript_time_range at least "
+                "once before composing any answer.\n"
                 "6. Use web_search proactively in two situations:\n"
                 "   a) When the user explicitly asks to look something up online.\n"
                 "   b) When the transcript results are thin or don't fully address the question "
                 "— use web_search to supplement with relevant external information, context, "
-                "documentation, definitions, or background knowledge related to the topic.\n"
+                "documentation, definitions, or background knowledge related to the topic. "
+                "If web_search returns no useful results, gracefully continue without it.\n"
                 "7. Never use web_search as a substitute for search_transcript — always search "
                 "the transcript first.\n\n"
 
@@ -573,11 +698,13 @@ class AgentManager:
                 "suggest the answer might exist but was not retrieved.\n"
                 "- When web_search is used, clearly distinguish web-sourced information from "
                 "transcript-sourced information.\n"
-                "- FURTHER READING SECTION: Whenever you call web_search (whether proactively "
-                "or upon explicit request), always end your response with a '## Further Reading' "
-                "section containing a markdown list of the most relevant URLs returned by "
-                "web_search. Include the page title as the link text and the URL as the href. "
-                "Only include URLs that are genuinely relevant to the question."
+                "- FURTHER READING SECTION: Whenever you call web_search and it returns actual "
+                "URLs in its results, end your response with a '## Further Reading' section "
+                "containing a markdown list of those URLs. Include the page title as the link "
+                "text and the URL as the href. Only include URLs that were explicitly returned "
+                "by the web_search tool — NEVER fabricate, guess, or generate URLs yourself. "
+                "If web_search returned an error, '[NO_RESULTS]', or no URLs, do NOT include a "
+                "Further Reading section at all."
             ),
         )
 
@@ -591,7 +718,7 @@ class AgentManager:
             """Dynamically inject the current stream position into the system prompt."""
             ts = agent_self._current_stream_ts
             if ts > 0:
-                return f"\nCURRENT STREAM POSITION: {ts:.1f}s ({_format_hms(ts)})"
+                return f"\nCURRENT STREAM POSITION: {_format_hms(ts)}"
             return "\nCURRENT STREAM POSITION: stream not yet started or no content indexed."
 
         @agent.tool_plain
@@ -606,13 +733,15 @@ class AgentManager:
             total_chunks = agent_self._total_chunks
             total_dur = agent_self._total_indexed_duration
             avg_dur = (total_dur / total_chunks) if total_chunks > 0 else 0.0
+            summary_chunks = agent_self._total_summary_chunks
             if ts <= 0:
                 return "Stream has not started or no transcript content has been indexed yet."
             lines = [
-                f"Current stream position : {ts:.1f}s ({_format_hms(ts)})",
+                f"Current stream position : {_format_hms(ts)}",
                 f"Total indexed chunks    : {total_chunks}",
-                f"Total indexed duration  : {total_dur:.1f}s ({_format_hms(total_dur)})",
-                f"Average chunk duration  : {avg_dur:.2f}s",
+                f"Total indexed duration  : {_format_hms(total_dur)}",
+                f"Average chunk duration  : {_format_hms(avg_dur)}",
+                f"Fast summary chunks     : {summary_chunks}",
             ]
             return "\n".join(lines)
 
@@ -655,13 +784,13 @@ class AgentManager:
             if not windows:
                 msg = (
                     f"No transcript content exists between "
-                    f"{_format_hms(start_time)} ({start_time:.0f}s) and "
-                    f"{_format_hms(end_time)} ({end_time:.0f}s)."
+                    f"{_format_hms(start_time)} and "
+                    f"{_format_hms(end_time)}."
                 )
                 if end_time > current_ts > 0:
                     msg += (
-                        f" Note: the stream is currently at {_format_hms(current_ts)} "
-                        f"({current_ts:.0f}s) — content beyond that point has not occurred yet."
+                        f" Note: the stream is currently at {_format_hms(current_ts)}"
+                        f" — content beyond that point has not occurred yet."
                     )
                 return msg
 
@@ -692,6 +821,8 @@ class AgentManager:
             """Search the video transcript for content relevant to *query*.
 
             Returns the most semantically similar transcript segments.
+            Call search_fast_summaries first to identify relevant time windows and
+            topics, then use this tool with targeted queries derived from those results.
             """
             if result_callback is not None:
                 try:
@@ -708,10 +839,46 @@ class AgentManager:
                 return "No transcript content has been spoken yet. The stream may have just started or nothing has been said."
             lines = []
             for chunk in chunks:
-                ts = f"[{chunk.timestamp:.1f}s] " if chunk.timestamp is not None else ""
+                ts = f"[{_format_hms(chunk.timestamp)}] " if chunk.timestamp is not None else ""
                 sp = f"({chunk.speaker}) " if chunk.speaker else ""
                 lines.append(f"{ts}{sp}{chunk.text}")
             header = f"[{len(chunks)} transcript segment(s) — this is the complete relevant content from the transcript]\n"
+            return header + "\n---\n".join(lines)
+
+        @agent.tool_plain
+        async def search_fast_summaries(query: str) -> str:  # type: ignore[misc]
+            """Search LLM-distilled fast summary notes for topics, decisions, and key facts.
+
+            Call this FIRST before search_transcript or get_transcript_time_range to
+            orient your search strategy. Results are compact scribe-note bullets produced
+            every ~15 seconds — NOT verbatim speech. Use the returned timestamps and topics
+            to steer targeted search_transcript queries or get_transcript_time_range bounds.
+            """
+            if result_callback is not None:
+                try:
+                    await result_callback({
+                        "type": "agent_status",
+                        "tool": "search_fast_summaries",
+                        "display_text": "searching fast summaries",
+                        "timestamp_utc": datetime.now(timezone.utc).isoformat(),
+                    })
+                except Exception:
+                    pass
+            chunks = await knowledge_store.search_summaries(query)
+            if not chunks:
+                return (
+                    "No fast summary notes available yet. "
+                    "The stream may have just started or no summaries have been produced. "
+                    "Proceed directly with search_transcript."
+                )
+            lines = []
+            for chunk in chunks:
+                ts = f"[{_format_hms(chunk.timestamp)}] " if chunk.timestamp is not None else ""
+                lines.append(f"{ts}{chunk.text}")
+            header = (
+                f"[{len(chunks)} fast summary window(s) — distilled scribe notes, not verbatim speech.\n"
+                "Use timestamps and topics below to guide search_transcript or get_transcript_time_range.]\n"
+            )
             return header + "\n---\n".join(lines)
 
         @agent.tool_plain
@@ -788,7 +955,7 @@ class AgentManager:
                     "intercepting it — retrying with tool-use hint."
                 )
                 result = await self._agent.run(
-                    query + "\n\n(Use the search_transcript and web_search tools available to you.)"
+                    query + "\n\n(Use the search_fast_summaries, search_transcript, and web_search tools available to you.)"
                 )
                 output_data = getattr(result, 'data', None) or getattr(result, 'output', str(result))
 
