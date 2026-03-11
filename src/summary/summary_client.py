@@ -94,7 +94,8 @@ class SummaryClient:
         )
         
         # Agent Manager: provides autonomous agent + knowledge store
-        self.agent = AgentManager()
+        self.agent = AgentManager(result_callback=self._queue_payload)
+        self.agent.set_window_manager(self._window_manager)
         
         # Initial summary delay configuration
         self.initial_summary_delay_seconds: float = initial_summary_delay_seconds
@@ -292,14 +293,13 @@ class SummaryClient:
                 except Exception as e:
                     logger.warning(f"Failed to update params for plugin {plugin_name}: {e}")
         
-        # Notify AgentManager (sync call) - call on_update_params if it exists
-        if hasattr(self.agent, 'on_update_params'):
+        # If a query was supplied, fire it against the agent and return the
+        # response over the data connection as an "agent_response" payload.
+        if agent_chat_query is not None:
             try:
-                self.agent.on_update_params(
-                    agent_chat_query=agent_chat_query,
-                )
+                asyncio.create_task(self._run_ask_agent(agent_chat_query))
             except Exception as e:
-                logger.warning(f"Failed to update params for agent: {e}")
+                logger.warning(f"Failed to schedule ask_agent task: {e}")
         
         logger.info(f"SummaryClient params updated")
     
@@ -344,7 +344,7 @@ class SummaryClient:
         """Get count of pending summary requests."""
         return len(self.in_flight_windows)
 
-    async def ask_agent(self, query: str) -> str:
+    async def ask_agent(self, query: str) -> Dict[str, Any]:
         """
         Submit a natural-language query to the autonomous agent.
 
@@ -356,9 +356,38 @@ class SummaryClient:
             query: The user's question.
 
         Returns:
-            The agent's synthesised text response.
+            Dict with ``response`` (str) and ``error`` (str | None) fields.
         """
         return await self.agent.ask_agent(query)
+
+    async def _run_ask_agent(self, query: str) -> None:
+        """Run ask_agent and push the response as an agent_response payload.
+
+        Intended to be fired as a background task from update_params so the
+        caller is not blocked while the agent runs.
+
+        Args:
+            query: The user's question forwarded from update_params.
+        """
+        try:
+            result = await self.ask_agent(query)
+            await self._queue_payload({
+                "type": "agent_response",
+                "query": query,
+                "response": result.get("response"),
+                "error": result.get("error"),
+                "timestamp_utc": datetime.now(timezone.utc).isoformat(),
+            })
+            logger.info(f"agent_response queued for query: {query[:60]}")
+        except Exception as e:
+            logger.error(f"ask_agent failed for query '{query[:60]}': {e}")
+            await self._queue_payload({
+                "type": "agent_response",
+                "query": query,
+                "response": None,
+                "error": str(e),
+                "timestamp_utc": datetime.now(timezone.utc).isoformat(),
+            })
 
     async def handle_speakers_merged(self, merged_speakers: List[Dict[str, str]]) -> None:
         """Update knowledge store when speakers are merged.
@@ -568,6 +597,7 @@ class SummaryClient:
             self.agent.index_transcript_segment(
                 text=deduplicated_text,
                 timestamp=window_start_ts,
+                duration=window_end_ts - window_start_ts,
                 window_id=transcription_window_id,
             )
         )

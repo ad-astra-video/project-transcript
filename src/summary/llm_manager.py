@@ -614,6 +614,9 @@ class LLMManager:
         """Stop the health metrics publishing scheduler."""
         return self._health_metrics.stop_scheduler()
     
+    # Appended to every system prompt to prevent non-English LLM output.
+    _ENGLISH_ONLY_SUFFIX = "\n\nIMPORTANT: Always respond in English only. Do not use any other language."
+
     def _create_build_messages_callback(self, mode: MessageFormatMode) -> BuildMessagesCallback:
         """Create a build_messages callback based on the format mode.
         
@@ -623,14 +626,15 @@ class LLMManager:
         Returns:
             A callback function that builds messages in the appropriate format
         """
+        english_suffix = self._ENGLISH_ONLY_SUFFIX
         if mode == MessageFormatMode.SYSTEM_PROMPT:
             return lambda system, user: [
-                {"role": "system", "content": system},
+                {"role": "system", "content": system + english_suffix if system else english_suffix.strip()},
                 {"role": "user", "content": user}
             ]
         else:  # USER_PREFIX
             return lambda system, user: [
-                {"role": "user", "content": f"[SYSTEM PROMPT]\n{system}\n\n[USER CONTENT]\n{user}"}
+                {"role": "user", "content": f"[SYSTEM PROMPT]\n{system}{english_suffix}\n\n[USER CONTENT]\n{user}"}
             ]
     
     def _create_llm_clients(self) -> None:
