@@ -191,6 +191,7 @@ class RapidSummaryPlugin:
         self,
         fast_max_tokens: Optional[int] = None,
         fast_temperature: Optional[float] = None,
+        **kwargs,
     ):
         """Handle on_update_params event from SummaryClient.
         

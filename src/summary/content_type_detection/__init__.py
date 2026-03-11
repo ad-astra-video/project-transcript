@@ -188,6 +188,7 @@ class ContentTypeDetectionPlugin:
         reasoning_max_tokens: Optional[int] = None,
         reasoning_temperature: Optional[float] = None,
         content_type_context_limit: Optional[int] = None,
+        **kwargs,
     ):
         """Handle on_update_params event from SummaryClient.
         

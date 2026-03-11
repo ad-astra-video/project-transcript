@@ -246,6 +246,7 @@ class ContextSummaryPlugin:
         reasoning_temperature: Optional[float] = None,
         reasoning_system_prompt: Optional[str] = None,
         initial_summary_delay_seconds: Optional[float] = None,
+        **kwargs,
     ):
         """Handle on_update_params event from SummaryClient.
         
