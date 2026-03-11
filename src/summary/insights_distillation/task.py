@@ -43,7 +43,7 @@ class InsightsDistillationTask:
     def __init__(
         self,
         llm_client: LLMClient,
-        max_tokens: int = 4096,
+        max_tokens: int = 16384,
         temperature: float = 0.3,
     ) -> None:
         self._llm_client = llm_client
