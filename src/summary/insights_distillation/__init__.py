@@ -33,6 +33,7 @@ class InsightsDistillationPlugin:
         self._send_monitoring_event_callback = send_monitoring_event_callback
 
         self._latest_insights: List[str] = []
+        self._accumulated_detailed_insights: List[Dict[str, Any]] = []
         self._pending_by_window: Dict[int, Set[str]] = {}
         self._processing_windows: Set[int] = set()
         self._lock = asyncio.Lock()
@@ -99,6 +100,7 @@ class InsightsDistillationPlugin:
             result = await self._task.process(
                 context_summary_result=context_summary_result,
                 transcript_summary_result=transcript_summary_result,
+                prior_insights=list(self._accumulated_detailed_insights),
             )
         except Exception as e:
             logger.error(
@@ -109,6 +111,7 @@ class InsightsDistillationPlugin:
             return
 
         self._latest_insights = result.get("insights", [])
+        self._accumulated_detailed_insights = result.get("detailed_insights", [])
 
         self._window_manager.store_plugin_result(
             window_id=summary_window_id,
@@ -128,6 +131,7 @@ class InsightsDistillationPlugin:
                 "output_tokens": result.get("output_tokens", 0),
             },
             "insights": result.get("insights", []),
+            "detailed_insights": result.get("detailed_insights", []),
         }
         await self._result_callback(payload)
 
@@ -155,6 +159,7 @@ class InsightsDistillationPlugin:
     def reset(self):
         """Reset tracked state for new stream."""
         self._latest_insights = []
+        self._accumulated_detailed_insights = []
         self._pending_by_window.clear()
         self._processing_windows.clear()
 

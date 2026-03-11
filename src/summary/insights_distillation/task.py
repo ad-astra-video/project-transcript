@@ -2,7 +2,7 @@
 
 import json
 import logging
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 from pydantic import BaseModel, ValidationError, field_validator
 
@@ -12,10 +12,20 @@ from .prompts import INSIGHTS_DISTILLATION_SYSTEM_PROMPT
 logger = logging.getLogger(__name__)
 
 
+class SupportingPoint(BaseModel):
+    """A single piece of evidence supporting a distilled insight."""
+
+    text: str
+    time_reference: Optional[str] = None
+
+
 class DistilledInsight(BaseModel):
     """Schema for one distilled insight item."""
 
+    title: str
+    tldr: str
     insight: str
+    supporting_points: List[SupportingPoint] = []
     category: str
     confidence: float
 
@@ -66,10 +76,12 @@ class InsightsDistillationTask:
         self,
         context_summary_result: Dict[str, Any],
         transcript_summary_result: Dict[str, Any],
+        prior_insights: Optional[List[Dict[str, Any]]] = None,
     ) -> Dict[str, Any]:
         context_insights = self._extract_context_insights(context_summary_result)
 
         user_payload = {
+            "prior_insights": prior_insights or [],
             "context_summary": {
                 "insights": context_insights,
             },
@@ -118,10 +130,10 @@ class InsightsDistillationTask:
                 "output_tokens": output_tokens,
             }
 
-        insights = [item.insight for item in parsed.insights]
         detailed_insights = [item.model_dump() for item in parsed.insights]
+        insights = [self._format_insight_markdown(item) for item in parsed.insights]
 
-        logger.info("insights_distillation: produced %d insights", len(insights))
+        logger.info("insights_distillation: produced %d insights", len(parsed.insights))
 
         return {
             "insights": insights,
@@ -129,3 +141,20 @@ class InsightsDistillationTask:
             "input_tokens": input_tokens,
             "output_tokens": output_tokens,
         }
+
+    @staticmethod
+    def _format_insight_markdown(item: DistilledInsight) -> str:
+        """Render a DistilledInsight as formatted markdown."""
+        lines: List[str] = []
+        lines.append(f"### {item.title}")
+        lines.append(f"**TL;DR:** {item.tldr}")
+        lines.append("")
+        lines.append(item.insight)
+        if item.supporting_points:
+            lines.append("")
+            lines.append("**Supporting evidence:**")
+            for point in item.supporting_points:
+                ref = f" *({point.time_reference})*" if point.time_reference else ""
+                lines.append(f"- {point.text}{ref}")
+        lines.append(f"\n*Category: {item.category} | Confidence: {item.confidence:.0%}*")
+        return "\n".join(lines)
