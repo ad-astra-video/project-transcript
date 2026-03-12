@@ -26,9 +26,8 @@ from transcription.whisper_client import WhisperClient, TranscriptionSegment, Wo
 from summary.summary_client import SummaryClient
 from pytrickle import StreamProcessor
 from pytrickle import AudioFrame
+import av
 import numpy as np
-import tempfile
-import wave
 import uuid
 
 logger = logging.getLogger(__name__)
@@ -70,14 +69,10 @@ class TranscriberState:
         # Diarization process
         self.diarization_poll_task: Optional[asyncio.Task] = None
         self.diarization_counter: int = 0  # Track transcribe calls for diarization scheduling
-        self.diarization_temp_files: list[dict] = []  # Track temp files with timestamps for combining
         self.diarization_window_timestamps: Dict[str, tuple[float, float]] = {}  # request_id -> (start_ts, end_ts)
         self.diarization_audio_buffer: np.ndarray = np.zeros((0,), dtype=np.float32)  # Separate buffer for diarization audio
         self.diarization_buffer_start_ts: Optional[float] = None  # Start timestamp for diarization buffer
         
-        # Temp file tracking for cleanup (when both transcribe and diarize are done)
-        self.pending_temp_files: Dict[str, Dict] = {}
-
         # Stop request flag for graceful shutdown (used by diarization polling)
         self.stop_requested: bool = False  # Flag to signal workers to stop
 
@@ -201,32 +196,48 @@ async def load_model(**kwargs):
     # Note: Polling task is started in on_stream_start(), not here
 
 
+_AUDIO_TARGET_RATE = 16000
+
+
+def _resample_audio_frame(frame: AudioFrame) -> np.ndarray:
+    """Resample an AudioFrame to 16 kHz mono float32 using PyAV's AudioResampler.
+
+    Returns a 1-D float32 ndarray normalised to [-1, 1].
+    """
+    av_frame = frame.to_av_frame()
+    resampler = av.audio.resampler.AudioResampler(
+        format="fltp",
+        layout="mono",
+        rate=_AUDIO_TARGET_RATE,
+    )
+    output_frames = resampler.resample(av_frame)
+    # Flush any samples held in the resampler
+    output_frames += resampler.resample(None)
+    if not output_frames:
+        return np.zeros((0,), dtype=np.float32)
+    # fltp layout: to_ndarray() returns shape (1, num_samples); flatten to 1-D
+    return np.concatenate([f.to_ndarray().flatten() for f in output_frames]).astype(np.float32)
+
+
 def _append_audio(frame: AudioFrame):
-    """Append audio samples from frame into state's rolling mono buffer."""
+    """Append audio samples from frame into state's rolling mono buffer.
+
+    Audio is resampled to 16 kHz mono float32 via PyAV so that the buffer
+    always has a known, fixed sample rate regardless of the source stream.
+    """
     assert STATE is not None
-    samples = frame.samples
-    if samples.ndim == 2:
-        # [channels, samples] or [samples, channels]
-        mono = samples.mean(axis=0) if samples.shape[0] < samples.shape[1] else samples.mean(axis=1)
-    else:
-        mono = samples
-    if mono.dtype == np.int16:
-        mono = mono.astype(np.float32) / 32768.0
-    elif mono.dtype == np.int32:
-        mono = mono.astype(np.float32) / 2147483648.0
-    else:
-        mono = mono.astype(np.float32)
+    mono = _resample_audio_frame(frame)
 
     start_ts = _frame_time_seconds(frame.timestamp, frame.time_base)
     if STATE.buffer_start_ts is None:
         STATE.buffer_start_ts = start_ts
-        STATE.buffer_rate = frame.rate
+        STATE.buffer_rate = _AUDIO_TARGET_RATE
     # Set stream media time origin on first frame (for stream-relative timestamps)
     if STATE.stream_start_media_ts is None:
         STATE.stream_start_media_ts = start_ts
         logger.info(f"Stream media time origin set to {start_ts:.3f}s")
     STATE.audio_buffer = np.concatenate([STATE.audio_buffer, mono])
-    
+
     # Also append to diarization buffer for 10-second chunks
     STATE.diarization_audio_buffer = np.concatenate([STATE.diarization_audio_buffer, mono])
     if STATE.diarization_buffer_start_ts is None:
@@ -248,53 +259,7 @@ def _diarization_buffer_duration_seconds() -> float:
     return len(STATE.diarization_audio_buffer) / float(STATE.buffer_rate)
 
 
-def _write_wav(samples: np.ndarray, sample_rate: int) -> str:
-    """Write audio samples to a temporary WAV file."""
-    path = tempfile.mktemp(suffix=".wav")
-    pcm16 = np.clip(samples, -1.0, 1.0)
-    pcm16 = (pcm16 * 32767.0).astype(np.int16)
-    with wave.open(path, "wb") as wf:
-        wf.setnchannels(1)
-        wf.setsampwidth(2)
-        wf.setframerate(sample_rate)
-        wf.writeframes(pcm16.tobytes())
-    return path
 
-
-def _mark_transcribed(audio_path: str):
-    """Mark temp file as transcribed, check if can be deleted."""
-    if STATE is None or audio_path not in STATE.pending_temp_files:
-        return
-    STATE.pending_temp_files[audio_path]['transcribed'] = True
-    _check_cleanup(audio_path)
-
-
-def _mark_diarized(audio_path: str):
-    """Mark temp file as diarized, check if can be deleted."""
-    if STATE is None or audio_path not in STATE.pending_temp_files:
-        return
-    STATE.pending_temp_files[audio_path]['diarized'] = True
-    _check_cleanup(audio_path)
-    
-    # Also clean up individual temp files that were combined
-    if STATE is not None and hasattr(STATE, 'diarization_temp_files'):
-        for temp_path in STATE.diarization_temp_files:
-            if temp_path in STATE.pending_temp_files:
-                STATE.pending_temp_files[temp_path]['diarized'] = True
-                _check_cleanup(temp_path)
-
-
-def _check_cleanup(audio_path: str):
-    """Delete temp file when both transcribing and diarization are complete."""
-    if STATE is None or audio_path not in STATE.pending_temp_files:
-        return
-    state = STATE.pending_temp_files[audio_path]
-    if state['transcribed'] and state['diarized']:
-        try:
-            os.unlink(audio_path)
-        except OSError:
-            pass
-        del STATE.pending_temp_files[audio_path]
 
 
 
@@ -365,9 +330,6 @@ async def _handle_consolidation_result(result: ConsolidationResult):
 async def _handle_diarization_result(result: DiarizationResult):
     """Handle diarization result and send to client."""
     logger.debug(f"Handling diarization result: {result.request_id}")
-    
-    # Mark temp file as diarized
-    _mark_diarized(result.audio_path)
     
     # Remove from in-flight tracking in diarization client
     if not STATE is None:
@@ -508,18 +470,10 @@ async def _process_transcription_async(window_samples: np.ndarray, window_start_
         )
         return
     
-    temp_path = _write_wav(window_samples, sr)
-    
     try:
-        # Track temp file for cleanup
-        STATE.pending_temp_files[temp_path] = {
-            'transcribed': False,
-            'diarized': False
-        }
-        
-        # Transcribe audio window - get transcription_window_id from whisper's internal counter
+        # Transcribe audio window - pass numpy array directly (faster-whisper natively supports np.ndarray)
         start = time.perf_counter()
-        transcription_window_id, segments = await STATE.whisper_client.transcribe_audio(temp_path)
+        transcription_window_id, segments = await STATE.whisper_client.transcribe_audio(window_samples)
         logger.info(f"Transcription of window [{window_start_ts:.3f}s - {window_end_ts:.3f}s] took {time.perf_counter() - start:.2f}s, got {len(segments)} segments (transcription_window_id={transcription_window_id})")
         
         # Emit transcription_window_received monitoring event
@@ -539,14 +493,8 @@ async def _process_transcription_async(window_samples: np.ndarray, window_start_
                 "transcription_window_received"
             )
         
-        # Mark as transcribed
-        _mark_transcribed(temp_path)
-        
     except Exception as e:
         logger.error(f"Transcription error: {e}")
-        # Cleanup on error
-        _mark_transcribed(temp_path)
-        _mark_diarized(temp_path)
         return
 
     STATE.current_segments = segments
@@ -654,10 +602,9 @@ async def _process_diarization_async(window_samples: np.ndarray, window_start_ts
     
     sr = STATE.buffer_rate
     
-    temp_path = _write_wav(window_samples, sr)
     diarization_request_id = str(uuid.uuid4())
     
-    logger.debug(f"Diarization: preparing window [{window_start_ts:.3f}s - {window_end_ts:.3f}s], temp_path={temp_path}")
+    logger.debug(f"Diarization: preparing window [{window_start_ts:.3f}s - {window_end_ts:.3f}s], samples={len(window_samples)}")
     
     try:
         # Auto-restart diarization process if it's not running
@@ -671,27 +618,20 @@ async def _process_diarization_async(window_samples: np.ndarray, window_start_ts
                 STATE.diarization_poll_task = asyncio.create_task(_poll_diarization_results())
                 logger.info("Diarization polling task restarted")
         
-        # Track temp file for cleanup
-        STATE.pending_temp_files[temp_path] = {
-            'transcribed': False,
-            'diarized': False
-        }
-        
         # Store timestamps for this request
         STATE.diarization_window_timestamps[diarization_request_id] = (window_start_ts, window_end_ts)
         
         # Add request to in-flight tracking in diarization client
         STATE.diarization_client.add_in_flight_request(diarization_request_id)
         
-        # Send to diarization process
+        # Send to diarization process (numpy array passed directly — no temp file)
         logger.debug(f"Diarization: calling process_audio with request_id={diarization_request_id}")
-        await STATE.diarization_client.process_audio(temp_path, diarization_request_id)
+        await STATE.diarization_client.process_audio(window_samples, diarization_request_id)
         logger.debug(f"Diarization: successfully sent window [{window_start_ts:.3f}s - {window_end_ts:.3f}s] for processing")
         
     except Exception as e:
         logger.error(f"Diarization error in _process_diarization_async: {type(e).__name__}: {e}")
-        logger.error(f"Diarization error details - temp_path={temp_path}, request_id={diarization_request_id}")
-        _mark_diarized(temp_path)
+        logger.error(f"Diarization error details - request_id={diarization_request_id}")
 
 
 def _build_segments_payload(segments: list[TranscriptionSegment], window_start_ts: float) -> list[dict]:
@@ -996,9 +936,7 @@ async def on_stream_start(params: dict):
             STATE.buffer_rate = None
             STATE.current_segments = []
             STATE.current_srt = ""
-            STATE.pending_temp_files = {}
             STATE.diarization_counter = 0  # Reset diarization counter for new stream
-            STATE.diarization_temp_files = []  # Reset temp files list for new stream
             STATE.diarization_window_timestamps = {}  # Reset timestamps dict for new stream
             STATE.diarization_audio_buffer = np.zeros((0,), dtype=np.float32)  # Reset diarization buffer
             STATE.diarization_buffer_start_ts = None
@@ -1110,7 +1048,6 @@ async def on_stream_stop():
     STATE.buffer_start_ts = None
     STATE.buffer_rate = None
     STATE.stream_start_media_ts = None
-    STATE.pending_temp_files = {}
     
     
     # Reset summary client state (clear windows, insights, timestamps)

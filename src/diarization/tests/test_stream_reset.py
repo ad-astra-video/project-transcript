@@ -98,7 +98,6 @@ async def test_on_stream_start_resets_diarization():
     # Create mock state
     state = TranscriberState()
     state.diarization_counter = 5
-    state.diarization_temp_files = ["file1.wav", "file2.wav"]
     state.diarization_window_timestamps = {"req-1": (0.0, 6.0)}
     state.diarization_audio_buffer = np.random.randn(16000 * 6).astype(np.float32)
     state.diarization_buffer_start_ts = 0.0
@@ -128,7 +127,6 @@ async def test_on_stream_start_resets_diarization():
         
         # Verify other state was reset
         assert state.diarization_counter == 0, "diarization_counter should be reset"
-        assert len(state.diarization_temp_files) == 0, "diarization_temp_files should be cleared"
         assert len(state.diarization_window_timestamps) == 0, "diarization_window_timestamps should be cleared"
         assert len(state.diarization_audio_buffer) == 0, "diarization_audio_buffer should be cleared"
         assert state.diarization_buffer_start_ts is None, "diarization_buffer_start_ts should be None"

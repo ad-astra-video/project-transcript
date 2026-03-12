@@ -5,6 +5,8 @@ Faster-whisper client for audio transcription.
 import asyncio
 import logging
 import os
+import io
+import wave
 from typing import Optional, List, Dict, Any
 from dataclasses import dataclass
 from pathlib import Path
@@ -83,12 +85,12 @@ class WhisperClient:
                 )
                 logger.info("Whisper model loaded successfully")
     
-    async def transcribe_audio(self, audio_file_path: str, segment_idx: int = 0) -> tuple[int, List[TranscriptionSegment]]:
+    async def transcribe_audio(self, audio: np.ndarray, segment_idx: int = 0) -> tuple[int, List[TranscriptionSegment]]:
         """
-        Transcribe audio file to text with timing information.
+        Transcribe audio samples to text with timing information.
         
         Args:
-            audio_file_path: Path to the audio file
+            audio: Mono float32 audio samples in [-1, 1], shape (N,)
             segment_idx: Optional segment index. If 0, uses internal counter.
             
         Returns:
@@ -107,12 +109,25 @@ class WhisperClient:
             
             logger.debug(f"Transcribing audio for transcription_window_id {transcription_window_id}")
             
+            # Encode numpy array to an in-memory WAV (BytesIO) using the same
+            # path that decode_audio() produces: mono, float32 → int16 PCM, 16kHz.
+            # This is identical to the old _write_wav() but avoids disk I/O.
+            pcm16 = np.clip(audio, -1.0, 1.0)
+            pcm16 = (pcm16 * 32767.0).astype(np.int16)
+            wav_buf = io.BytesIO()
+            with wave.open(wav_buf, "wb") as wf:
+                wf.setnchannels(1)
+                wf.setsampwidth(2)
+                wf.setframerate(16000)
+                wf.writeframes(pcm16.tobytes())
+            wav_buf.seek(0)
+            
             # Run transcription in thread pool
             loop = asyncio.get_event_loop()
             segments, info = await loop.run_in_executor(
                 None,
                 lambda: self.model.transcribe( # type: ignore
-                    audio_file_path,
+                    wav_buf,
                     language=self.language,
                     word_timestamps=True,
                     vad_filter=False,

@@ -1349,7 +1349,6 @@ class TestDiarizationClientWithQualityImprovements:
         state.buffer_start_ts = 0.0
         state.diarization_buffer_start_ts = 0.0
         state.diarization_audio_buffer = np.zeros((0,), dtype=np.float32)
-        state.pending_temp_files = {}
         state.diarization_window_timestamps = {}
         state.diarization_client = Mock()
         state.diarization_client.remove_in_flight_request = Mock()
@@ -1453,7 +1452,6 @@ class TestDiarizationClientWithQualityImprovements:
         # Simulate receiving a result so speaker data is populated
         fake_result = DiarizationResult(
             request_id="r1",
-            audio_path="x",
             segments=[],
             speaker_centroids=[{"speaker_id": "speaker_0", "x": 0.0, "y": 0.0, "sample_count": 3}],
             pairwise_similarity=[]

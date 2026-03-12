@@ -145,7 +145,6 @@ def test_handle_diarization_result_with_empty_segments():
         # Test with empty segments
         result = DiarizationResult(
             request_id="test-empty",
-            audio_path="test.wav",
             segments=[],  # Empty segments!
             error=None
         )

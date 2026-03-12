@@ -14,14 +14,13 @@ Features:
 import asyncio
 import logging
 import multiprocessing
+import torch
 import threading
 import os
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import List, Optional, Tuple, Dict, Callable, Union
 from collections import deque
-import tempfile
-import wave
 import numpy as np
 from datetime import datetime
 
@@ -54,7 +53,8 @@ class SpeakerSegment:
 @dataclass
 class DiarizationRequest:
     """Request for diarization processing."""
-    audio_path: str
+    audio_data: np.ndarray  # mono float32 samples at 16 kHz in [-1, 1]
+    sample_rate: int
     request_id: str
 
 @dataclass
@@ -88,7 +88,6 @@ class WorkerConfigMessage:
 class DiarizationResult:
     """Result from diarization processing."""
     request_id: str
-    audio_path: str
     segments: List[SpeakerSegment]
     error: Optional[str] = None
     merged_speakers: Optional[List[Dict[str, str]]] = None  # [{"source": "speaker_1", "target": "speaker_0"}]
@@ -1570,7 +1569,6 @@ def diarization_worker(hf_token: str, request_queue, result_queue):
     
     try:
         # Initialize pipeline
-        import torch
         use_cuda = False #torch.cuda.is_available(), not working on cuda for some reason
         if use_cuda:
             pipeline = Pipeline.from_pretrained(
@@ -1695,10 +1693,11 @@ def diarization_worker(hf_token: str, request_queue, result_queue):
                 logger.debug(f"After RESET_SIGNAL: shutdown_received={shutdown_received}, queue.empty()={request_queue.empty()}")
                 continue  # Skip the rest of the loop - request is a string, not a DiarizationRequest
             
-            logger.info(f"WORKER: Received diarization request: {request.request_id}, audio: {request.audio_path}")
+            logger.info(f"WORKER: Received diarization request: {request.request_id}")
             try:
-                # Run diarization
-                diarization_result = pipeline(request.audio_path)
+                # Run diarization on numpy array via pyannote's waveform dict interface
+                waveform = torch.from_numpy(request.audio_data).unsqueeze(0)  # (1, samples)
+                diarization_result = pipeline({"waveform": waveform, "sample_rate": request.sample_rate})
 
                 # --- Build overlap and onset-contamination maps for this chunk ---
                 # Collect all raw pyannote (start, end, speaker) turns from this chunk.
@@ -1841,7 +1840,6 @@ def diarization_worker(hf_token: str, request_queue, result_queue):
                 # Send result
                 result = DiarizationResult(
                     request_id=request.request_id,
-                    audio_path=request.audio_path,
                     segments=segments,
                     merged_speakers=merged_speakers if merged_speakers else None,
                     speaker_centroids=speaker_centroids,
@@ -1855,7 +1853,6 @@ def diarization_worker(hf_token: str, request_queue, result_queue):
                 logger.error(f"Diarization processing error: {e}")
                 result_queue.put(DiarizationResult(
                     request_id=request.request_id,
-                    audio_path=request.audio_path,
                     segments=[],
                     error=str(e)
                 ))
@@ -2174,21 +2171,25 @@ class DiarizationClient:
         else:
             logger.warning("consolidate() called but worker not running; ignoring")
     
-    async def process_audio(self, audio_path: str, request_id: str):
+    async def process_audio(self, audio_samples: np.ndarray, request_id: str):
         """
         Send audio for diarization processing.
         
         Args:
-            audio_path: Path to the audio file
+            audio_samples: Mono float32 audio samples in [-1, 1], shape (N,)
             request_id: Unique request identifier
         """
-        logger.debug(f"DiarizationClient.process_audio() called: {audio_path}, {request_id}")
+        logger.debug(f"DiarizationClient.process_audio() called: request_id={request_id}, samples={len(audio_samples)}")
         if not self._running:
             raise RuntimeError("Diarization process not started")
         
+        # Pass numpy array directly — pyannote accepts
+        # {"waveform": tensor, "sample_rate": sr} natively.
+        audio_f32 = np.clip(audio_samples, -1.0, 1.0).astype(np.float32)
         request = DiarizationRequest(
-            audio_path=audio_path,
-            request_id=request_id
+            audio_data=audio_f32,
+            sample_rate=16000,
+            request_id=request_id,
         )
         logger.debug(f"Putting request in queue: {request_id}")
         self._request_queue.put(request)

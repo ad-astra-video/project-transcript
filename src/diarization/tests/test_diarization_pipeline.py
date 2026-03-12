@@ -70,7 +70,6 @@ class TestDiarizationPipeline:
         state.buffer_start_ts = 0.0
         state.diarization_buffer_start_ts = 0.0
         state.diarization_audio_buffer = np.zeros((0,), dtype=np.float32)
-        state.pending_temp_files = {}
         state.diarization_window_timestamps = {}
         state.diarization_client = Mock()
         state.diarization_client.remove_in_flight_request = Mock()
@@ -95,7 +94,6 @@ class TestDiarizationPipeline:
         
         result = DiarizationResult(
             request_id="test-request-123",
-            audio_path="test_audio.wav",
             segments=segments,
             error=None
         )
@@ -110,14 +108,17 @@ class TestDiarizationPipeline:
             # Verify
             assert mock_processor.send_data.called, "send_data should have been called"
             
-            # Check the sent payload
-            sent_payload = mock_processor.send_data.call_args[0][0]
-            assert isinstance(sent_payload, str), "Payload should be a JSON string"
-            
+            # _handle_diarization_result sends both "speakers" and "speaker_embedding_data"
+            # Find the "speakers" payload among all calls
             import json
-            payload = json.loads(sent_payload)
-            
-            assert payload["type"] == "speakers", f"Expected type 'speakers', got {payload['type']}"
+            speakers_payload = None
+            for call in mock_processor.send_data.call_args_list:
+                p = json.loads(call[0][0])
+                if p.get("type") == "speakers":
+                    speakers_payload = p
+                    break
+            assert speakers_payload is not None, "Expected a 'speakers' payload to be sent"
+            payload = speakers_payload
             assert len(payload["segments"]) == 2, f"Expected 2 segments, got {len(payload['segments'])}"
             
             # Verify segment structure
@@ -154,7 +155,6 @@ class TestDiarizationPipeline:
             # Create result with empty segments
             result = DiarizationResult(
                 request_id="test-empty",
-                audio_path="test.wav",
                 segments=[],  # Empty!
                 error=None
             )
@@ -187,7 +187,6 @@ class TestDiarizationPipeline:
             # Create result with error
             result = DiarizationResult(
                 request_id="test-error",
-                audio_path="test.wav",
                 segments=[],
                 error="Diarization pipeline failed: model not loaded"
             )
@@ -320,7 +319,6 @@ class TestDiarizationPipeline:
             state.buffer_start_ts = 0.0
             state.diarization_buffer_start_ts = 0.0
             state.diarization_audio_buffer = np.zeros((0,), dtype=np.float32)
-            state.pending_temp_files = {}
             state.diarization_window_timestamps = {}
             state.diarization_client = Mock()
             state.diarization_client.remove_in_flight_request = Mock()
@@ -337,7 +335,6 @@ class TestDiarizationPipeline:
             
             result = DiarizationResult(
                 request_id="integration-test-001",
-                audio_path="integration_test.wav",
                 segments=segments,
                 error=None
             )
@@ -349,9 +346,15 @@ class TestDiarizationPipeline:
                 # Step 2: Verify send_data was called
                 assert mock_processor.send_data.called, "Full pipeline should send data"
                 
-                # Step 3: Parse and validate the payload
+                # Step 3: Find the "speakers" payload among all send_data calls
                 import json
-                payload = json.loads(mock_processor.send_data.call_args[0][0])
+                payload = None
+                for call in mock_processor.send_data.call_args_list:
+                    p = json.loads(call[0][0])
+                    if p.get("type") == "speakers":
+                        payload = p
+                        break
+                assert payload is not None, "Expected a 'speakers' payload to be sent"
                 
                 # Validate complete structure
                 assert payload["type"] == "speakers"
