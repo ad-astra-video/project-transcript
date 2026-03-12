@@ -176,6 +176,26 @@ class TranscriptKnowledgeStore:
             )
             return [self._summary_chunks[i] for i in indices[0] if i >= 0]
 
+    async def get_best_summary_distance(self, query: str) -> Optional[float]:
+        """Return the smallest L2 distance between *query* and any fast-summary vector.
+
+        Returns None if the summary index is empty (stream not yet started).
+
+        For unit-normalised embeddings (e.g. BAAI/bge-small-en-v1.5) the relationship
+        between L2 distance and cosine similarity is:
+            cos_sim = 1 - (dist ** 2) / 2
+        """
+        if not self._summary_chunks:
+            return None
+        vector = await self._embed(query)
+        async with self._lock:
+            vec_array = np.array([vector], dtype="float32")
+            loop = asyncio.get_event_loop()
+            distances, _ = await loop.run_in_executor(
+                None, self._summary_index.search, vec_array, 1
+            )
+            return float(distances[0][0])
+
     def remap_speaker(self, old_speaker: str, new_speaker: str) -> int:
         """Remap all chunks with old_speaker to new_speaker.
 
@@ -415,6 +435,12 @@ class AgentManager:
         # ---- WindowManager reference (injected from SummaryClient) ----
         self._window_manager: Optional[WindowManager] = None
 
+        # ---- Web search relevance gate ----
+        # Minimum cosine similarity (0.0–1.0) between a web-search query and the
+        # nearest fast-summary vector required before the search is allowed.
+        # Set to 0.0 to disable the gate entirely.
+        self.web_search_relevance_threshold: float = 0.35
+
     def set_window_manager(self, window_manager: WindowManager) -> None:
         """Inject the WindowManager so temporal-range tools can access transcription windows."""
         self._window_manager = window_manager
@@ -552,16 +578,58 @@ class AgentManager:
     def on_update_params(
         self,
         agent_chat_query: Optional[str] = None,
+        web_search_relevance_threshold: Optional[float] = None,
+        **kwargs,
     ) -> None:
         """Handle on_update_params event from SummaryClient.
 
         Args:
             agent_chat_query: Custom system prompt for the agent chat query.
+            web_search_relevance_threshold: Override the cosine-similarity threshold
+                used to gate web searches (0.0 = allow all, 1.0 = block all).
+            **kwargs: Additional parameters passed by SummaryClient to all plugins
+                (e.g. reasoning_max_tokens, fast_max_tokens) that are not used by
+                AgentManager and are silently ignored.
         """
         if agent_chat_query is not None:
             # We no longer store this as system prompt since update_params is passing
             # the user's actual question in this parameter.
             logger.info(f"Received proxy question via on_update_params (ignoring for state)")
+        if web_search_relevance_threshold is not None:
+            self.web_search_relevance_threshold = web_search_relevance_threshold
+            logger.info(f"Web search relevance threshold updated to {web_search_relevance_threshold}")
+
+    # ------------------------------------------------------------------
+    # Web search relevance gate
+    # ------------------------------------------------------------------
+
+    async def _is_grounded_in_summaries(self, query: str) -> bool:
+        """Return True if *query* is semantically grounded in the indexed fast summaries.
+
+        Embeds *query* and finds the nearest fast-summary vector via FAISS. The
+        raw L2 distance is converted to cosine similarity (valid for unit-normalised
+        vectors such as BAAI/bge-small-en-v1.5):
+
+            cos_sim = 1 - (L2_dist ** 2) / 2
+
+        The query is considered grounded when cos_sim >= web_search_relevance_threshold.
+
+        Grace period: if no fast summaries have been indexed yet (stream just started),
+        the method returns True so early queries are not blocked.
+        """
+        best_dist = await self.knowledge_store.get_best_summary_distance(query)
+        if best_dist is None:
+            # No summaries indexed yet — allow through
+            logger.debug("Web search relevance check: no summaries indexed, allowing through")
+            return True
+        cos_sim = 1.0 - (best_dist ** 2) / 2.0
+        grounded = cos_sim >= self.web_search_relevance_threshold
+        logger.debug(
+            f"Web search relevance: query={query!r:.80}, "
+            f"best_L2={best_dist:.4f}, cos_sim={cos_sim:.4f}, "
+            f"threshold={self.web_search_relevance_threshold}, grounded={grounded}"
+        )
+        return grounded
 
     # ------------------------------------------------------------------
     # Autonomous agent
@@ -658,8 +726,9 @@ class AgentManager:
                 "  search, ideal for finding relevant mentions regardless of time.\n"
                 "- get_stream_info: call when resolving relative time references ('last X\n"
                 "  minutes') to obtain the current stream position and chunk duration metrics.\n"
-                "- web_search: supplement with external context when transcript is thin or\n"
-                "  user explicitly requests it.\n"
+                "- web_search: supplement with external context only for topics covered in or\n"
+                "  adjacent to the video content. If the tool returns a 'skipped' message,\n"
+                "  pivot immediately to search_transcript with the same query.\n"
                 "- Tools can be combined: e.g. search_fast_summaries to find the relevant window,\n"
                 "  search_transcript to retrieve verbatim mentions, then get_transcript_time_range\n"
                 "  for surrounding context.\n\n"
@@ -681,12 +750,13 @@ class AgentManager:
                 "5. For every non-trivial question, call search_fast_summaries first to orient "
                 "your strategy, then call search_transcript or get_transcript_time_range at least "
                 "once before composing any answer.\n"
-                "6. Use web_search proactively in two situations:\n"
+                "6. Use web_search only for queries grounded in the video's content:\n"
                 "   a) When the user explicitly asks to look something up online.\n"
-                "   b) When the transcript results are thin or don't fully address the question "
-                "— use web_search to supplement with relevant external information, context, "
-                "documentation, definitions, or background knowledge related to the topic. "
-                "If web_search returns no useful results, gracefully continue without it.\n"
+                "   b) When transcript results are thin and the topic is directly related to\n"
+                "   content covered in the video — use web_search to supplement with background\n"
+                "   knowledge, definitions, or documentation related to what was discussed.\n"
+                "   If web_search returns a 'skipped' message, do NOT retry it — call\n"
+                "   search_transcript with the same query instead.\n"
                 "7. Never use web_search as a substitute for search_transcript — always search "
                 "the transcript first.\n\n"
 
@@ -888,6 +958,13 @@ class AgentManager:
             Uses Tavily if TAVILY_API_KEY is set, Exa if EXA_API_KEY is set,
             otherwise falls back to DuckDuckGo.
             """
+            # --- Relevance gate: only search if the query relates to video content ---
+            if not await agent_self._is_grounded_in_summaries(query):
+                return (
+                    "Web search skipped: the query does not appear to relate to topics "
+                    "covered in the video. Call search_transcript with the same query to "
+                    "look for relevant information in the raw transcript instead."
+                )
             if result_callback is not None:
                 try:
                     await result_callback({
