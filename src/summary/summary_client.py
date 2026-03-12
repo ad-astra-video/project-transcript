@@ -119,6 +119,10 @@ class SummaryClient:
         # Shutdown flags
         self._stop_requested: bool = False
         self._shutdown_requested: bool = False
+
+        # Last language detected by Whisper
+        self.detected_language: Optional[str] = None
+        self.language_confidence: float = 0.0
         
         # Plugin system - dynamically discover and initialize plugins
         self._plugins: Dict[str, Any] = {}  # plugin_name -> plugin instance
@@ -217,6 +221,32 @@ class SummaryClient:
         
         return detected
     
+    def on_language_detected(self, language: str, confidence: float) -> None:
+        """Called per-transcription-window when Whisper detects a (new) language.
+
+        Stores the latest language/confidence and propagates the information to
+        the LLM layer (so the system-prompt language suffix and logit-bias are
+        updated) as well as to any plugin that implements ``on_language_detected``.
+
+        Args:
+            language: ISO-639-1 code returned by faster-whisper (e.g. ``"en"``, ``"zh"``)
+            confidence: Whisper's ``language_probability`` in [0, 1]
+        """
+        self.detected_language = language
+        self.language_confidence = confidence
+        logger.info(f"Language detected: {language} (confidence={confidence:.3f})")
+
+        # Update LLM suffix + logit-bias for both fast and reasoning clients
+        self.llm.update_language(language)
+
+        # Fan out to plugins that want to know about language changes
+        for plugin_name, plugin_instance in self._plugins.items():
+            if hasattr(plugin_instance, 'on_language_detected'):
+                try:
+                    plugin_instance.on_language_detected(language, confidence)
+                except Exception as e:
+                    logger.warning(f"Plugin {plugin_name} on_language_detected error: {e}")
+
     def update_params(
         self,
         reasoning_base_url: Optional[str] = None,

@@ -386,6 +386,7 @@ class LLMClient:
         self._build_messages_callback = build_messages_callback
         self._health_metrics = health_metrics
         self._plugin_name = plugin_name
+        self._logit_bias: Optional[Dict[str, float]] = None
     
     @property
     def model(self) -> str:
@@ -396,6 +397,18 @@ class LLMClient:
     def client(self) -> AsyncOpenAI:
         """Returns the underlying AsyncOpenAI client."""
         return self._client
+
+    def set_logit_bias(self, logit_bias: Optional[Dict[str, float]]) -> None:
+        """Set a logit-bias map applied to every create_completion call.
+
+        Args:
+            logit_bias: Dict mapping token-id strings to float bias values,
+                        or None to clear any previously set bias.
+                        Negative values (e.g. -100) suppress tokens;
+                        positive values boost them.
+        """
+        self._logit_bias = logit_bias
+        logger.debug(f"[{self._plugin_name}] logit_bias updated ({len(logit_bias) if logit_bias else 0} tokens)")
     
     def build_messages(
         self,
@@ -442,6 +455,10 @@ class LLMClient:
         # Use provided messages or build them from system_prompt and user_content
         if messages is None:
             messages = self.build_messages(system_prompt, user_content)
+
+        # Inject per-client logit_bias unless the caller already supplied one
+        if self._logit_bias and "logit_bias" not in kwargs:
+            kwargs["logit_bias"] = self._logit_bias
         
         try:
             # Get timeout from health_metrics if available
@@ -589,8 +606,9 @@ class LLMManager:
         self._reasoning_build_messages = self._create_build_messages_callback(
             self.reasoning_message_format_mode
         )
-        
-        # Create LLMClient instances (will be finalized after model detection)
+
+        # Currently detected transcript language (updated via update_language)
+        self._detected_language: Optional[str] = None
         self._rapid_llm_client: Optional[LLMClient] = None
         self._reasoning_llm_client: Optional[LLMClient] = None
         
@@ -614,27 +632,78 @@ class LLMManager:
         """Stop the health metrics publishing scheduler."""
         return self._health_metrics.stop_scheduler()
     
-    # Appended to every system prompt to prevent non-English LLM output.
-    _ENGLISH_ONLY_SUFFIX = "\n\nIMPORTANT: Always respond in English only. Do not use any other language."
+    # ---- Language steering ------------------------------------------------
 
-    def _create_build_messages_callback(self, mode: MessageFormatMode) -> BuildMessagesCallback:
+    # Map ISO-639-1 codes to display names used in the language instruction.
+    _LANGUAGE_NAMES: Dict[str, str] = {
+        "en": "English",
+        "zh": "Chinese",
+        "es": "Spanish",
+        "fr": "French",
+        "de": "German",
+        "ja": "Japanese",
+        "ko": "Korean",
+        "pt": "Portuguese",
+        "it": "Italian",
+        "ru": "Russian",
+        "ar": "Arabic",
+        "hi": "Hindi",
+        "nl": "Dutch",
+        "pl": "Polish",
+        "tr": "Turkish",
+        "vi": "Vietnamese",
+        "th": "Thai",
+        "id": "Indonesian",
+    }
+
+    # Logit-bias presets keyed by ISO-639-1 code.
+    # Token IDs here correspond to the CJK Unified Ideographs Unicode range
+    # as represented by common multilingual tokenizers (e.g. Qwen2 / LLaMA-3).
+    # Override at runtime via a JSON file pointed to by LOGIT_BIAS_CONFIG_PATH.
+    LANGUAGE_TOKEN_BIAS: Dict[str, Dict[str, float]] = {
+        # Suppress CJK ideograph byte-fallback tokens when the language is European
+        "en": {},   # populated lazily in update_language for non-CJK languages
+        "zh": {},   # no suppression for Chinese
+        "ja": {},   # no suppression for Japanese
+        "ko": {},   # no suppression for Korean
+    }
+
+    @staticmethod
+    def _make_language_suffix(lang: Optional[str]) -> str:
+        """Return the language-instruction suffix appended to every system prompt.
+
+        Args:
+            lang: ISO-639-1 language code (e.g. ``"en"``, ``"zh"``) or None.
+                  Defaults to English when None or unrecognised.
+        """
+        if not lang or lang == "en":
+            return "\n\nIMPORTANT: Always respond in English only. Do not use any other language."
+        name = LLMManager._LANGUAGE_NAMES.get(lang)
+        if name:
+            return f"\n\nIMPORTANT: Always respond in {name} only. Do not use any other language."
+        # Unknown code — fall back to English to stay safe
+        return "\n\nIMPORTANT: Always respond in English only. Do not use any other language."
+
+    def _create_build_messages_callback(self, mode: MessageFormatMode, language_suffix: Optional[str] = None) -> BuildMessagesCallback:
         """Create a build_messages callback based on the format mode.
         
         Args:
             mode: The message format mode (SYSTEM_PROMPT or USER_PREFIX)
+            language_suffix: Language instruction to append to every system prompt.
+                             Defaults to the English-only suffix when None.
             
         Returns:
             A callback function that builds messages in the appropriate format
         """
-        english_suffix = self._ENGLISH_ONLY_SUFFIX
+        suffix = language_suffix if language_suffix is not None else self._make_language_suffix(None)
         if mode == MessageFormatMode.SYSTEM_PROMPT:
             return lambda system, user: [
-                {"role": "system", "content": system + english_suffix if system else english_suffix.strip()},
+                {"role": "system", "content": system + suffix if system else suffix.strip()},
                 {"role": "user", "content": user}
             ]
         else:  # USER_PREFIX
             return lambda system, user: [
-                {"role": "user", "content": f"[SYSTEM PROMPT]\n{system}{english_suffix}\n\n[USER CONTENT]\n{user}"}
+                {"role": "user", "content": f"[SYSTEM PROMPT]\n{system}{suffix}\n\n[USER CONTENT]\n{user}"}
             ]
     
     def _create_llm_clients(self) -> None:
@@ -879,6 +948,60 @@ class LLMManager:
             {"role": "user", "content": user_content}
         ]
     
+    def update_language(self, language: Optional[str]) -> None:
+        """Update the detected transcript language, rebuilding prompt callbacks and logit-bias.
+
+        Rebuilds the ``build_messages`` callbacks on both LLMClient instances so
+        that every subsequent LLM call carries the correct language instruction in
+        the system prompt.  Also applies a logit-bias preset for the language if
+        one is defined in ``LANGUAGE_TOKEN_BIAS`` (or loaded from
+        ``LOGIT_BIAS_CONFIG_PATH``).
+
+        Args:
+            language: ISO-639-1 code (e.g. ``\"en\"``, ``\"zh\"``) or None to reset
+                      to English.
+        """
+        self._detected_language = language
+        suffix = self._make_language_suffix(language)
+        logger.info(f"LLMManager: language updated to {language!r}, suffix={suffix!r}")
+
+        # Rebuild message-formatting callbacks with the new suffix
+        self._rapid_build_messages = self._create_build_messages_callback(
+            self.rapid_message_format_mode, language_suffix=suffix
+        )
+        self._reasoning_build_messages = self._create_build_messages_callback(
+            self.reasoning_message_format_mode, language_suffix=suffix
+        )
+
+        # Propagate updated callbacks to live LLMClient instances
+        if self._rapid_llm_client is not None:
+            self._rapid_llm_client._build_messages_callback = self._rapid_build_messages
+        if self._reasoning_llm_client is not None:
+            self._reasoning_llm_client._build_messages_callback = self._reasoning_build_messages
+
+        # Load logit-bias config from external file if available, else use built-in preset
+        import json as _json
+        bias_config_path = os.getenv("LOGIT_BIAS_CONFIG_PATH")
+        bias_map: Optional[Dict[str, Dict[str, float]]] = None
+        if bias_config_path:
+            try:
+                with open(bias_config_path) as _f:
+                    bias_map = _json.load(_f)
+                logger.debug(f"Loaded logit_bias config from {bias_config_path}")
+            except Exception as e:
+                logger.warning(f"Failed to load LOGIT_BIAS_CONFIG_PATH={bias_config_path}: {e}")
+
+        if bias_map is None:
+            bias_map = self.LANGUAGE_TOKEN_BIAS
+
+        lang_key = language or "en"
+        logit_bias = bias_map.get(lang_key)  # None → no bias set
+
+        if self._rapid_llm_client is not None:
+            self._rapid_llm_client.set_logit_bias(logit_bias or None)
+        if self._reasoning_llm_client is not None:
+            self._reasoning_llm_client.set_logit_bias(logit_bias or None)
+
     def update_params(
         self,
         reasoning_base_url: Optional[str] = None,

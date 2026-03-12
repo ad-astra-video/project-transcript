@@ -85,7 +85,7 @@ class WhisperClient:
                 )
                 logger.info("Whisper model loaded successfully")
     
-    async def transcribe_audio(self, audio: np.ndarray, segment_idx: int = 0) -> tuple[int, List[TranscriptionSegment]]:
+    async def transcribe_audio(self, audio: np.ndarray, segment_idx: int = 0) -> tuple[int, List[TranscriptionSegment], Optional[str], float]:
         """
         Transcribe audio samples to text with timing information.
         
@@ -94,7 +94,11 @@ class WhisperClient:
             segment_idx: Optional segment index. If 0, uses internal counter.
             
         Returns:
-            Tuple of (transcription_window_id, List of transcription segments with timing)
+            Tuple of:
+              - transcription_window_id: int
+              - segments: List[TranscriptionSegment]
+              - detected_language: ISO-639-1 language code detected by Whisper, or None
+              - language_confidence: float probability in [0, 1] for the detected language
         """
         # Use provided segment_idx if non-zero, otherwise use internal counter
         if segment_idx != 0:
@@ -135,9 +139,10 @@ class WhisperClient:
                 )
             )
             
-            # Check language confidence
-            language_confidence = getattr(info, 'language_probability', 1.0)
-            logger.debug(f"Language detection confidence: {language_confidence:.3f}")
+            # Capture detected language and confidence from Whisper info
+            detected_language: Optional[str] = getattr(info, 'language', None)
+            language_confidence: float = float(getattr(info, 'language_probability', 1.0))
+            logger.debug(f"Detected language: {detected_language} (confidence: {language_confidence:.3f})")
             
             # Convert to our format
             transcription_segments = []
@@ -178,14 +183,14 @@ class WhisperClient:
                         words=words
                     ))
             
-            logger.debug(f"Transcribed {len(transcription_segments)} segments for transcription_window_id {transcription_window_id} (confidence: {language_confidence:.3f})")
+            logger.debug(f"Transcribed {len(transcription_segments)} segments for transcription_window_id {transcription_window_id} (language={detected_language}, confidence: {language_confidence:.3f})")
             
-            # Return transcription_window_id along with segments
-            return transcription_window_id, transcription_segments
+            # Return transcription_window_id, segments, detected language and confidence
+            return transcription_window_id, transcription_segments, detected_language, language_confidence
             
         except Exception as e:
             logger.error(f"Error transcribing for transcription_window_id {transcription_window_id}: {e}")
-            return transcription_window_id, []
+            return transcription_window_id, [], None, 0.0
     
     def get_model_info(self) -> Dict[str, Any]:
         """Get information about the loaded model."""

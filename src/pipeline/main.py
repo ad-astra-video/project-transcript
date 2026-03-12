@@ -73,6 +73,9 @@ class TranscriberState:
         self.diarization_audio_buffer: np.ndarray = np.zeros((0,), dtype=np.float32)  # Separate buffer for diarization audio
         self.diarization_buffer_start_ts: Optional[float] = None  # Start timestamp for diarization buffer
         
+        # Last language detected by Whisper (for change detection)
+        self.last_detected_language: Optional[str] = None
+
         # Stop request flag for graceful shutdown (used by diarization polling)
         self.stop_requested: bool = False  # Flag to signal workers to stop
 
@@ -473,8 +476,20 @@ async def _process_transcription_async(window_samples: np.ndarray, window_start_
     try:
         # Transcribe audio window - pass numpy array directly (faster-whisper natively supports np.ndarray)
         start = time.perf_counter()
-        transcription_window_id, segments = await STATE.whisper_client.transcribe_audio(window_samples)
-        logger.info(f"Transcription of window [{window_start_ts:.3f}s - {window_end_ts:.3f}s] took {time.perf_counter() - start:.2f}s, got {len(segments)} segments (transcription_window_id={transcription_window_id})")
+        transcription_window_id, segments, detected_language, language_confidence = await STATE.whisper_client.transcribe_audio(window_samples)
+        logger.info(
+            f"Transcription of window [{window_start_ts:.3f}s - {window_end_ts:.3f}s] took "
+            f"{time.perf_counter() - start:.2f}s, got {len(segments)} segments "
+            f"(transcription_window_id={transcription_window_id}, "
+            f"language={detected_language}, confidence={language_confidence:.3f})"
+        )
+
+        # Forward language change to summary client (only when language shifts)
+        if detected_language is not None and detected_language != STATE.last_detected_language:
+            STATE.last_detected_language = detected_language
+            logger.info(f"Detected language change: {detected_language} (confidence={language_confidence:.3f})")
+            if STATE.summary_client is not None:
+                STATE.summary_client.on_language_detected(detected_language, language_confidence)
         
         # Emit transcription_window_received monitoring event
         if PROCESSOR and hasattr(PROCESSOR, 'send_monitoring_event'):

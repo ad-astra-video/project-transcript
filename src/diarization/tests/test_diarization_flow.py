@@ -173,6 +173,7 @@ def test_pipeline_flow():
         _pull_diarization_samples, _process_diarization_async
     )
     import asyncio
+    from unittest.mock import patch
     
     # Create state
     state = TranscriberState()
@@ -188,7 +189,7 @@ def test_pipeline_flow():
     # Set global STATE
     original_state = pipeline.main.STATE
     pipeline.main.STATE = state
-    
+
     # Create audio frame with 6 seconds of audio using mock
     sample_rate = 16000
     duration = 6.0
@@ -203,16 +204,18 @@ def test_pipeline_flow():
     
     async def run_test():
         try:
-            # Append audio
-            _append_audio(frame)
-            
+            # Patch _resample_audio_frame so tests don't require a real av.AudioFrame.
+            # The test exercises buffering logic, not the resampler.
+            with patch("pipeline.main._resample_audio_frame", return_value=samples):
+                _append_audio(frame)
+
             # Check buffer duration
             dur = _diarization_buffer_duration_seconds()
             print(f"Diarization buffer duration: {dur:.2f}s")
-            
+
             if dur >= 6.0:
                 print("✓ Buffer has enough audio for diarization")
-                
+
                 # Pull samples
                 pulled = _pull_diarization_samples()
                 if pulled:

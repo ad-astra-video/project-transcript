@@ -28,7 +28,7 @@ def test_process_transcription_skips_low_audio_window():
     state.low_audio_filter_enabled = True
     state.low_audio_min_dbfs = -45.0
     state.whisper_client = Mock()
-    state.whisper_client.transcribe_audio = AsyncMock(return_value=(0, []))
+    state.whisper_client.transcribe_audio = AsyncMock(return_value=(0, [], None, 0.0))
     state.summary_client = None
 
     original_state = pipeline.main.STATE
