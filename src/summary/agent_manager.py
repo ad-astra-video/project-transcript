@@ -4,23 +4,47 @@ AgentManager - Provides autonomous PydanticAI agent with transcript knowledge st
 Components:
 - TranscriptKnowledgeStore: in-memory Faiss index backed by a local TEI
   embedding model (default port 6060, mirrors the vLLM container pattern).
-- PydanticAI agent with search_transcript and web_search tools.
+  Includes a separate fast-summary sub-index for LLM-distilled scribe notes.
+- PydanticAI agent with six tools: search_fast_summaries, search_transcript,
+  get_transcript_time_range, get_stream_info, get_context_availability, and web_search.
+- WindowManager integration for temporal-range transcript retrieval.
+- Web search relevance gate to filter queries unrelated to video content.
 
 Usage:
   agent = AgentManager()
+  agent.set_window_manager(window_manager)  # Enable time-range tools
   await agent.initialize(llm_manager)  # Inject LLMManager at initialize time
-  await agent.index_transcript_segment(text, timestamp, speaker)
+  await agent.index_transcript_segment(text, timestamp, speaker, window_id)
+  await agent.index_summary_segment(text, timestamp, duration, window_id)  # Fast summaries
   response = await agent.ask_agent(query)
+
+Tools (all use the reasoning LLM):
+  - search_fast_summaries: Search LLM-distilled fast summary notes (call first)
+  - search_transcript: Semantic search over indexed video transcript
+  - get_transcript_time_range: Retrieve verbatim transcript for a time window
+  - get_stream_info: Get current stream position and indexing statistics
+  - get_context_availability: Get available conversation history and time range
+  - web_search: Live web search (Tavily > Exa > DuckDuckGo)
 
 Web search tool priority (first key found wins):
   TAVILY_API_KEY  → Tavily Search API
   EXA_API_KEY     → Exa Search API
   (fallback)      → DuckDuckGo (no key required)
 
-Embedding client configuration:
-  LOCAL_EMBEDDING_BASE_URL   – defaults to http://byoc-transcription-tei-embeddings:6060/v1
-  LOCAL_EMBEDDING_API_KEY    – defaults to "dummy"
-  LOCAL_EMBEDDING_MODEL      – defaults to BAAI/bge-small-en-v1.5
+Web search relevance gate:
+  Minimum cosine similarity (0.0-1.0) between query and nearest fast-summary
+  vector required before web search is allowed. Set via web_search_relevance_threshold
+  (default: 0.35). Set to 0.0 to disable the gate entirely.
+
+Embedding client configuration (environment variables):
+  EMBEDDING_BASE_URL   – defaults to http://byoc-transcription-tei-embeddings:6060/v1
+  EMBEDDING_API_KEY    – defaults to "dummy"
+  EMBEDDING_MODEL      – defaults to BAAI/bge-small-en-v1.5
+
+Additional features:
+  - Speaker remapping for handling speaker merges
+  - Event handler for fast_summary_available events
+  - on_update_params handler for runtime parameter updates
 """
 
 import asyncio
@@ -374,19 +398,31 @@ class AgentManager:
     Provides autonomous PydanticAI agent with transcript knowledge store.
 
     Components:
-    - TranscriptKnowledgeStore: semantic search over indexed transcript chunks.
-    - PydanticAI agent with `search_transcript` and `web_search` tools.
+    - TranscriptKnowledgeStore: semantic search over indexed transcript chunks,
+      including a separate fast-summary sub-index for LLM-distilled scribe notes.
+    - PydanticAI agent with six tools: search_fast_summaries, search_transcript,
+      get_transcript_time_range, get_stream_info, get_context_availability, and web_search.
+    - WindowManager integration for temporal-range transcript retrieval.
+    - Web search relevance gate to filter queries unrelated to video content.
 
     Usage:
         agent = AgentManager()
+        agent.set_window_manager(window_manager)  # Enable time-range tools
         await agent.initialize(llm_manager)  # Inject LLMManager
-        await agent.index_transcript_segment(text, timestamp, speaker)
+        await agent.index_transcript_segment(text, timestamp, speaker, window_id)
+        await agent.index_summary_segment(text, timestamp, duration, window_id)  # Fast summaries
         response = await agent.ask_agent(query)
 
     Configuration (env vars):
         EMBEDDING_BASE_URL   Base URL for the TEI service  (default: http://byoc-transcription-tei-embeddings:6060/v1)
         EMBEDDING_API_KEY    API key for TEI               (default: "dummy")
         EMBEDDING_MODEL      Model name served by TEI      (default: BAAI/bge-small-en-v1.5)
+
+    Additional features:
+        - Speaker remapping for handling speaker merges
+        - Event handler for fast_summary_available events
+        - on_update_params handler for runtime parameter updates
+        - web_search_relevance_threshold (default: 0.35) to gate web searches
     """
 
     def __init__(
@@ -755,10 +791,14 @@ class AgentManager:
                 "   b) When transcript results are thin and the topic is directly related to\n"
                 "   content covered in the video — use web_search to supplement with background\n"
                 "   knowledge, definitions, or documentation related to what was discussed.\n"
-                "   If web_search returns a 'skipped' message, do NOT retry it — call\n"
-                "   search_transcript with the same query instead.\n"
+                "  If web_search returns a 'skipped' message, do NOT retry it — call\n"
+                "  search_transcript with the same query instead.\n"
                 "7. Never use web_search as a substitute for search_transcript — always search "
-                "the transcript first.\n\n"
+                "  the transcript first.\n"
+                "8. When users ask about what information or context is available, call\n"
+                "  get_context_availability to determine the time range of available\n"
+                "  summaries. Use this to provide accurate responses about what time period\n"
+                "  you can answer questions about.\n\n"
 
                 "RESPONSE RULES:\n"
                 "- Ground your answers primarily in transcript content from search_transcript.\n"
@@ -814,6 +854,54 @@ class AgentManager:
                 f"Fast summary chunks     : {summary_chunks}",
             ]
             return "\n".join(lines)
+
+        @agent.tool_plain
+        async def get_context_availability() -> str:  # type: ignore[misc]
+            """Return information about the available conversation history and summary content.
+
+            Use this tool when users ask questions about what information or past conversations
+            the agent has access to, such as:
+            - "What information do you have access to?"
+            - "How much context do you have?"
+            - "What time period can you answer questions about?"
+            - "What past conversations can you reference?"
+            """
+            if window_manager is None:
+                return "No summary content available yet."
+            
+            ctx = window_manager.get_context_availability()
+            
+            if ctx["is_empty"]:
+                return "No summary content available yet."
+            
+            first_ts = ctx["first_timestamp"]
+            last_ts = ctx["last_timestamp"]
+            total_duration = last_ts - first_ts
+            
+            # Format the duration with hours, minutes, and seconds
+            total_hours = int(total_duration // 3600)
+            remaining_after_hours = int(total_duration % 3600)
+            total_minutes = remaining_after_hours // 60
+            total_seconds = remaining_after_hours % 60
+            
+            parts = []
+            if total_hours > 0:
+                parts.append(f"{total_hours} hour{'s' if total_hours != 1 else ''}")
+            if total_minutes > 0:
+                parts.append(f"{total_minutes} minute{'s' if total_minutes != 1 else ''}")
+            if total_seconds > 0 or not parts:
+                parts.append(f"{total_seconds} second{'s' if total_seconds != 1 else ''}")
+            
+            duration_str = " ".join(parts)
+            
+            # Format timestamps
+            start_str = _format_hms(first_ts)
+            end_str = _format_hms(last_ts)
+            
+            if ctx["is_minimal"]:
+                return f"{duration_str} ({start_str} to {end_str}) - stream recently started"
+            
+            return f"{duration_str} ({start_str} to {end_str})"
 
         @agent.tool_plain
         async def get_transcript_time_range(start_time: float, end_time: float) -> str:  # type: ignore[misc]

@@ -754,3 +754,38 @@ class WindowManager:
                 if tw.new_text:
                     text_parts.append(tw.new_text)
         return " ".join(text_parts)
+    
+    def get_context_availability(self) -> dict:
+        """Get context availability information from summary windows.
+        
+        Returns:
+            Dict with:
+            - first_timestamp: float or None - start time of first summary window
+            - last_timestamp: float or None - end time of last summary window
+            - char_count: int - total character count of all summary windows
+            - window_count: int - number of summary windows
+            - is_empty: bool - True if no windows available
+            - is_minimal: bool - True if only one window (stream recently started)
+        """
+        with self._lock:
+            if not self._summary_windows:
+                return {
+                    "first_timestamp": None,
+                    "last_timestamp": None,
+                    "char_count": 0,
+                    "window_count": 0,
+                    "is_empty": True,
+                    "is_minimal": False,
+                }
+            
+            first_window = self._summary_windows[0]
+            last_window = self._summary_windows[-1]
+            
+            return {
+                "first_timestamp": first_window.timestamp_start,
+                "last_timestamp": last_window.timestamp_end,
+                "char_count": self._char_count,
+                "window_count": len(self._summary_windows),
+                "is_empty": False,
+                "is_minimal": len(self._summary_windows) == 1,
+            }
