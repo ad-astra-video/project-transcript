@@ -147,7 +147,7 @@ class InsightsDistillationTask:
         """Render a DistilledInsight as formatted markdown."""
         lines: List[str] = []
         lines.append(f"### {item.title}")
-        lines.append(f"**TL;DR:** {item.tldr}")
+        lines.append(f">**TL;DR:** {item.tldr}")
         lines.append("")
         lines.append(item.insight)
         if item.supporting_points:
