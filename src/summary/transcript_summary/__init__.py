@@ -69,6 +69,10 @@ class TranscriptSummaryPlugin:
         # Track latest insights_distillation completion window id
         self._latest_insights_window_id: Optional[int] = None
 
+        # Accumulated actions and follow-ups from actions_extraction plugin
+        self._accumulated_actions: List[str] = []
+        self._accumulated_follow_ups: List[str] = []
+
         # Track processing state for queue mechanism
         self._is_processing: bool = False
 
@@ -115,6 +119,20 @@ class TranscriptSummaryPlugin:
     async def handle_insights_distillation_complete(self, summary_window_id: int, **kwargs):
         """Track latest window id that produced insights_distillation output."""
         self._latest_insights_window_id = summary_window_id
+
+    async def handle_actions_extracted(
+        self,
+        actions: List[str],
+        follow_ups: List[str],
+        **kwargs,
+    ) -> None:
+        """Receive updated accumulated actions/follow-ups from actions_extraction plugin.
+
+        Subscribed to 'on_actions_extracted'.
+        The actions_extraction plugin owns deduplication; we simply replace our lists.
+        """
+        self._accumulated_actions = list(actions)
+        self._accumulated_follow_ups = list(follow_ups)
 
     async def process(
         self,
@@ -243,7 +261,11 @@ class TranscriptSummaryPlugin:
                 # Reset failure counter on success
                 self._consecutive_failures = 0
 
-                summary_markdown = self._render_summary_markdown(self._accumulated_sections)
+                summary_markdown = self._render_summary_markdown(
+                    self._accumulated_sections,
+                    actions=self._accumulated_actions,
+                    follow_ups=self._accumulated_follow_ups,
+                )
 
                 transcript_window_result = {
                     "sections": list(self._accumulated_sections),
@@ -428,26 +450,47 @@ class TranscriptSummaryPlugin:
         return f"{hours}:{minutes:02d}:{seconds:02d}"
 
     @classmethod
-    def _render_summary_markdown(cls, sections: List[Dict[str, Any]]) -> str:
-        """Render full accumulated sections as markdown for client payload."""
+    def _render_summary_markdown(
+        cls,
+        sections: List[Dict[str, Any]],
+        actions: Optional[List[str]] = None,
+        follow_ups: Optional[List[str]] = None,
+    ) -> str:
+        """Render full accumulated sections as markdown for client payload.
+
+        If *actions* or *follow_ups* are non-empty, a grouped checkbox block is
+        prepended before the timeline sections.
+        """
+        prefix_blocks: List[str] = []
+
+        if actions:
+            action_lines = "\n".join(f"- [ ] {item}" for item in actions)
+            prefix_blocks.append(f"## Actions\n\n{action_lines}")
+
+        if follow_ups:
+            follow_up_lines = "\n".join(f"- [ ] {item}" for item in follow_ups)
+            prefix_blocks.append(f"## Follow Ups\n\n{follow_up_lines}")
+
         if not sections:
-            return ""
+            return "\n\n".join(prefix_blocks).strip()
 
         ordered = sorted(
             sections,
             key=lambda sec: (int(sec.get("start_ms", 0)), int(sec.get("end_ms", 0))),
         )
-        blocks: List[str] = []
+        section_blocks: List[str] = []
         for section in ordered:
             heading = (section.get("heading") or "Untitled Topic").strip()
             heading = cls._TRAILING_TS_RE.sub("", heading).strip()
             start_ms = int(section.get("start_ms", 0))
             end_ms = int(section.get("end_ms", 0))
             content = (section.get("content") or "").strip()
-            blocks.append(
+            section_blocks.append(
                 f"## {heading} [{cls._format_timestamp(start_ms)} – {cls._format_timestamp(end_ms)}]\n\n{content}"
             )
-        return "\n\n".join(blocks).strip()
+
+        all_blocks = prefix_blocks + (["---"] if prefix_blocks else []) + section_blocks
+        return "\n\n".join(all_blocks).strip()
 
     @staticmethod
     def _ranges_overlap_ratio(a_start: int, a_end: int, b_start: int, b_end: int) -> float:
@@ -613,6 +656,8 @@ class TranscriptSummaryPlugin:
         self._is_processing = False
         self._current_summary = None
         self._accumulated_sections.clear()
+        self._accumulated_actions.clear()
+        self._accumulated_follow_ups.clear()
         self._consecutive_failures = 0
         logger.debug("TranscriptSummaryPlugin reset")
 
@@ -643,6 +688,7 @@ def init_plugin(
                 "transcription_window_available": plugin_instance.handle_transcription_window,
                 "fast_summary_available": plugin_instance.process,
                 "on_insights_distillation_complete": plugin_instance.handle_insights_distillation_complete,
+                "on_actions_extracted": plugin_instance.handle_actions_extracted,
                 "on_update_params": plugin_instance.on_update_params,
             },
         )
