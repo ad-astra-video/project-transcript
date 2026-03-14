@@ -4,7 +4,7 @@ Content type detection task module.
 
 import logging
 from datetime import datetime, timezone
-from typing import Dict, Any, Callable, Optional
+from typing import Dict, Any, Callable, Optional, Tuple
 
 from .task import ContentTypeDetectionTask
 from .prompts import CONTENT_TYPE_DETECTION_PROMPT
@@ -33,6 +33,7 @@ class ContentTypeDetectionPlugin:
         # Counter-based detection: run every N summary windows
         self._detection_counter = 0
         self._detection_interval = detection_interval  # Run detection every N windows
+        self._last_detected_summary_window_id: Optional[int] = None
         
         # Create task once at init and reuse for all processing
         self._task = ContentTypeDetectionTask(
@@ -86,6 +87,15 @@ class ContentTypeDetectionPlugin:
             return True
         
         return False
+
+    def _get_detection_window_range(self, summary_window_id: int) -> Tuple[int, int]:
+        """Get start/end summary window IDs covered by this detection pass."""
+        end_summary_window_id = summary_window_id
+        if self._last_detected_summary_window_id is not None:
+            start_summary_window_id = self._last_detected_summary_window_id + 1
+        else:
+            start_summary_window_id = max(0, summary_window_id - self._detection_interval + 1)
+        return start_summary_window_id, end_summary_window_id
     
     async def process(self, summary_window_id: int, **kwargs):
         """Process a summary window for content type detection.
@@ -100,6 +110,8 @@ class ContentTypeDetectionPlugin:
         
         self._in_progress = True
         try:
+            start_summary_window_id, end_summary_window_id = self._get_detection_window_range(summary_window_id)
+
             # Check for user override first
             if self._user_content_type_override:
                 previous_content_type = self._current_content_type
@@ -109,6 +121,8 @@ class ContentTypeDetectionPlugin:
                     "confidence": 1.0,
                     "source": "USER_OVERRIDE",
                     "previous_content_type": previous_content_type,
+                    "start_summary_window_id": start_summary_window_id,
+                    "end_summary_window_id": end_summary_window_id,
                     "timestamp_utc": datetime.now(timezone.utc).isoformat()
                 }
                 
@@ -122,7 +136,10 @@ class ContentTypeDetectionPlugin:
                         content_type=self._user_content_type_override,
                         confidence=1.0,
                         source="USER_OVERRIDE",
-                        reasoning="User override"
+                        reasoning="User override",
+                        summary_window_id=summary_window_id,
+                        start_summary_window_id=start_summary_window_id,
+                        end_summary_window_id=end_summary_window_id,
                     )
                 
                 # Emit monitoring event
@@ -132,8 +149,12 @@ class ContentTypeDetectionPlugin:
                     "source": "USER_OVERRIDE",
                     "previous_content_type": previous_content_type,
                     "summary_window_id": summary_window_id,
+                    "start_summary_window_id": start_summary_window_id,
+                    "end_summary_window_id": end_summary_window_id,
                     "timestamp_utc": datetime.now(timezone.utc).isoformat()
                 }, "content_type_detected")
+
+                self._last_detected_summary_window_id = summary_window_id
                 
                 return payload
             
@@ -152,6 +173,8 @@ class ContentTypeDetectionPlugin:
                 "confidence": result.confidence,
                 "source": "AUTO_DETECTED",
                 "previous_content_type": previous_content_type,
+                "start_summary_window_id": start_summary_window_id,
+                "end_summary_window_id": end_summary_window_id,
                 "timestamp_utc": datetime.now(timezone.utc).isoformat()
             }
             
@@ -166,7 +189,10 @@ class ContentTypeDetectionPlugin:
                     content_type=result.content_type,
                     confidence=result.confidence,
                     source="AUTO_DETECTED",
-                    reasoning=result.reasoning
+                    reasoning=result.reasoning,
+                    summary_window_id=summary_window_id,
+                    start_summary_window_id=start_summary_window_id,
+                    end_summary_window_id=end_summary_window_id,
                 )
             
             # Emit monitoring event
@@ -176,8 +202,12 @@ class ContentTypeDetectionPlugin:
                 "source": "AUTO_DETECTED",
                 "previous_content_type": previous_content_type,
                 "summary_window_id": summary_window_id,
+                "start_summary_window_id": start_summary_window_id,
+                "end_summary_window_id": end_summary_window_id,
                 "timestamp_utc": datetime.now(timezone.utc).isoformat()
             }, "content_type_detected")
+
+            self._last_detected_summary_window_id = summary_window_id
             
             return payload
         finally:
