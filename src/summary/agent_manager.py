@@ -5,8 +5,8 @@ Components:
 - TranscriptKnowledgeStore: in-memory Faiss index backed by a local TEI
   embedding model (default port 6060, mirrors the vLLM container pattern).
   Includes a separate fast-summary sub-index for LLM-distilled scribe notes.
-- PydanticAI agent with six tools: search_fast_summaries, search_transcript,
-  get_transcript_time_range, get_stream_info, get_context_availability, and web_search.
+- PydanticAI agent with six tools: search_notes, search_content,
+  get_segment, get_status, check_availability, and search_web.
 - WindowManager integration for temporal-range transcript retrieval.
 - Web search relevance gate to filter queries unrelated to video content.
 
@@ -19,12 +19,12 @@ Usage:
   response = await agent.ask_agent(query)
 
 Tools (all use the reasoning LLM):
-  - search_fast_summaries: Search LLM-distilled fast summary notes (call first)
-  - search_transcript: Semantic search over indexed video transcript
-  - get_transcript_time_range: Retrieve verbatim transcript for a time window
-  - get_stream_info: Get current stream position and indexing statistics
-  - get_context_availability: Get available conversation history and time range
-  - web_search: Live web search (Tavily > Exa > DuckDuckGo)
+  - search_notes: Search LLM-distilled fast summary notes (call first)
+  - search_content: Semantic search over indexed video transcript
+  - get_segment: Retrieve verbatim transcript for a time window
+  - get_status: Get current stream position and indexing statistics
+  - check_availability: Get available conversation history and time range
+  - search_web: Live web search (Tavily > Exa > DuckDuckGo)
 
 Web search tool priority (first key found wins):
   TAVILY_API_KEY  → Tavily Search API
@@ -400,8 +400,8 @@ class AgentManager:
     Components:
     - TranscriptKnowledgeStore: semantic search over indexed transcript chunks,
       including a separate fast-summary sub-index for LLM-distilled scribe notes.
-    - PydanticAI agent with six tools: search_fast_summaries, search_transcript,
-      get_transcript_time_range, get_stream_info, get_context_availability, and web_search.
+    - PydanticAI agent with six tools: search_notes, search_content,
+      get_segment, get_status, check_availability, and search_web.
     - WindowManager integration for temporal-range transcript retrieval.
     - Web search relevance gate to filter queries unrelated to video content.
 
@@ -593,7 +593,7 @@ class AgentManager:
 
         Joins the scribe-note bullets from RapidSummaryPlugin into a single
         text block and indexes it into the fast-summary sub-index so it can
-        be retrieved via the search_fast_summaries agent tool.
+        be retrieved via the search_notes agent tool.
         """
         if not fast_summary_items:
             return
@@ -679,11 +679,11 @@ class AgentManager:
         """
         Construct the PydanticAI Agent backed by the reasoning LLM.
 
-        The agent is given four tools:
-          - search_fast_summaries: semantic search over LLM-distilled fast summary notes (call first)
-          - search_transcript: semantic search over the indexed video transcript
-          - get_transcript_time_range: verbatim transcript retrieval for a time window
-          - web_search: live web search (Tavily > Exa > DuckDuckGo)
+        The agent is given six tools:
+          - search_notes: semantic search over LLM-distilled fast summary notes (call first)
+          - search_content: semantic search over the indexed video transcript
+          - get_segment: verbatim transcript retrieval for a time window
+          - search_web: live web search (Tavily > Exa > DuckDuckGo)
         """
         if not reasoning_model:
             logger.warning("AgentManager: reasoning model not set, skipping agent build")
@@ -700,29 +700,29 @@ class AgentManager:
                 "unless explicitly stated otherwise — never ask for clarification about this.\n\n"
 
                 "ORIENTATION STEP (do this first for every non-trivial question):\n"
-                "Call search_fast_summaries before any other transcript tool. Fast summaries "
+                "Call search_notes before any other transcript tool. Fast summaries "
                 "are LLM-distilled scribe notes produced every ~15 seconds — they capture "
                 "decisions, key facts, topics, and action items in compact form. Use the "
                 "returned notes to:\n"
                 "  a) identify which time windows are relevant to the question,\n"
-                "  b) extract topic labels and keywords to sharpen subsequent search_transcript queries,\n"
-                "  c) resolve whether get_transcript_time_range is needed and what bounds to use.\n"
-                "Only after reviewing the fast-summary results should you call search_transcript "
-                "or get_transcript_time_range. If search_fast_summaries returns no results, "
-                "proceed directly to search_transcript.\n\n"
+                "  b) extract topic labels and keywords to sharpen subsequent search_content queries,\n"
+                "  c) resolve whether get_segment is needed and what bounds to use.\n"
+                "Only after reviewing the fast-summary results should you call search_content "
+                "or get_segment. If search_notes returns no results, "
+                "proceed directly to search_content.\n\n"
 
                 "SEARCH STRATEGY — follow all four steps before answering:\n\n"
 
                 "1. HYDE (Hypothetical Document Embedding)\n"
-                "   Before calling search_transcript, mentally compose a short hypothetical "
+                "   Before calling search_content, mentally compose a short hypothetical "
                 "transcript passage (1-3 sentences of spoken, informal language) that would "
                 "directly answer the user's question. Use that hypothetical passage — not the "
-                "bare question — as your first search_transcript query. Spoken text retrieves "
+                "bare question — as your first search_content query. Spoken text retrieves "
                 "spoken text far more accurately than a formal question does.\n\n"
 
-                "2. QUERY DECOMPOSITION — call search_transcript incrementally\n"
+                "2. QUERY DECOMPOSITION — call search_content incrementally\n"
                 "   If the question has multiple parts or sub-topics, split it into separate "
-                "sub-queries and issue a distinct search_transcript call for each one. Do NOT "
+                "sub-queries and issue a distinct search_content call for each one. Do NOT "
                 "bundle everything into a single call. Synthesise the results afterwards.\n\n"
 
                 "3. KEYWORD EXPANSION\n"
@@ -732,19 +732,19 @@ class AgentManager:
                 "weak or no matches, retry with an expanded or reworded query.\n\n"
 
                 "4. TEMPORAL QUERIES\n"
-                "   When the user asks about a specific time period, use get_transcript_time_range\n"
+                "   When the user asks about a specific time period, use get_segment\n"
                 "   to retrieve the complete verbatim transcript for that range — do NOT use\n"
-                "   search_transcript for time-bounded questions.\n"
-                "   Before calling get_transcript_time_range, resolve the time reference:\n"
-                "   - Relative: 'last/past/previous X min' → call get_stream_info() to get\n"
+                "   search_content for time-bounded questions.\n"
+                "   Before calling get_segment, resolve the time reference:\n"
+                "   - Relative: 'last/past/previous X min' → call get_status() to get\n"
                 "     current position, then start = current - X*60, end = current.\n"
                 "     'first X minutes' → start = 0, end = X*60.\n"
                 "   - Absolute: 'at 2:30' → 150s; 'between 1:00 and 3:00' → 60–180s;\n"
                 "     'from 2:00 to 4:00' → 120–240s; 'after/before X' → boundary-based.\n"
                 "   - Context-based: 'beginning/start' → 0–10% of current position;\n"
                 "     'end/closing' → 90–100%; 'middle' → 40–60%.\n"
-                "   - Event-based: 'when X happened' → use search_transcript first to locate\n"
-                "     the timestamp, then optionally get_transcript_time_range for context.\n"
+                "   - Event-based: 'when X happened' → use search_content first to locate\n"
+                "     the timestamp, then optionally get_segment for context.\n"
                 "   Always state the time range you searched in your response\n"
                 "   (e.g. 'Searching from 05:00 to 10:00...').\n"
                 "   Edge cases:\n"
@@ -753,25 +753,25 @@ class AgentManager:
                 "   - If no content exists in range: report it clearly.\n\n"
 
                 "TOOL SELECTION GUIDE:\n"
-                "- search_fast_summaries: ALWAYS call first. Returns distilled scribe notes to orient\n"
+                "- search_notes: ALWAYS call first. Returns distilled scribe notes to orient\n"
                 "  your strategy. Use results to steer queries in the tools below.\n"
-                "- get_transcript_time_range: user asks about a time period → complete verbatim\n"
+                "- get_segment: user asks about a time period → complete verbatim\n"
                 "  text, ideal for summarisation. Use for 'what happened in the last 5 minutes',\n"
                 "  'summarise from 2:00 to 5:00', etc.\n"
-                "- search_transcript: user asks about a topic/event → semantic similarity\n"
+                "- search_content: user asks about a topic/event → semantic similarity\n"
                 "  search, ideal for finding relevant mentions regardless of time.\n"
-                "- get_stream_info: call when resolving relative time references ('last X\n"
+                "- get_status: call when resolving relative time references ('last X\n"
                 "  minutes') to obtain the current stream position and chunk duration metrics.\n"
-                "- web_search: supplement with external context only for topics covered in or\n"
+                "- search_web: supplement with external context only for topics covered in or\n"
                 "  adjacent to the video content. If the tool returns a 'skipped' message,\n"
-                "  pivot immediately to search_transcript with the same query.\n"
-                "- Tools can be combined: e.g. search_fast_summaries to find the relevant window,\n"
-                "  search_transcript to retrieve verbatim mentions, then get_transcript_time_range\n"
+                "  pivot immediately to search_content with the same query.\n"
+                "- Tools can be combined: e.g. search_notes to find the relevant window,\n"
+                "  search_content to retrieve verbatim mentions, then get_segment\n"
                 "  for surrounding context.\n\n"
 
                 "KNOWLEDGE BASE RULES — CRITICAL:\n"
-                "The search_transcript tool provides access to the COMPLETE transcript "
-                "knowledge base. The results it returns are not excerpts or previews — "
+                "The transcript search provides access to the COMPLETE transcript "
+                "knowledge base. The results returned are not excerpts or previews — "
                 "they ARE all the relevant content that exists in the transcript. The "
                 "transcript is the primary and authoritative source of truth for this "
                 "stream.\n"
@@ -783,38 +783,41 @@ class AgentManager:
                 "is indexed as the complete picture.\n\n"
 
                 "TOOL USAGE RULES:\n"
-                "5. For every non-trivial question, call search_fast_summaries first to orient "
-                "your strategy, then call search_transcript or get_transcript_time_range at least "
+                "5. For every non-trivial question, call search_notes first to orient "
+                "your strategy, then call search_content or get_segment at least "
                 "once before composing any answer.\n"
-                "6. Use web_search only for queries grounded in the video's content:\n"
+                "6. Use search_web only for queries grounded in the video's content:\n"
                 "   a) When the user explicitly asks to look something up online.\n"
                 "   b) When transcript results are thin and the topic is directly related to\n"
-                "   content covered in the video — use web_search to supplement with background\n"
+                "   content covered in the video — use search_web to supplement with background\n"
                 "   knowledge, definitions, or documentation related to what was discussed.\n"
-                "  If web_search returns a 'skipped' message, do NOT retry it — call\n"
-                "  search_transcript with the same query instead.\n"
-                "7. Never use web_search as a substitute for search_transcript — always search "
+                "  If search_web returns a 'skipped' message, do NOT retry it — call\n"
+                "  search_content with the same query instead.\n"
+                "7. Never use search_web as a substitute for search_content — always search "
                 "  the transcript first.\n"
                 "8. When users ask about what information or context is available, call\n"
-                "  get_context_availability to determine the time range of available\n"
+                "  check_availability to determine the time range of available\n"
                 "  summaries. Use this to provide accurate responses about what time period\n"
                 "  you can answer questions about.\n\n"
 
                 "RESPONSE RULES:\n"
-                "- Ground your answers primarily in transcript content from search_transcript.\n"
+                "- Ground your answers primarily in transcript content.\n"
                 "- Cite speaker names and timestamps (in hh:mm:ss) where available.\n"
-                "- If search_transcript returns no relevant results after retrying with expanded "
-                "queries, state that the topic was not discussed in the transcript — do NOT "
+                "- If no relevant results are found after retrying with expanded queries, "
+                "state that the topic was not discussed in the transcript — do NOT "
                 "suggest the answer might exist but was not retrieved.\n"
-                "- When web_search is used, clearly distinguish web-sourced information from "
+                "- When web information is included, clearly distinguish it from "
                 "transcript-sourced information.\n"
-                "- FURTHER READING SECTION: Whenever you call web_search and it returns actual "
-                "URLs in its results, end your response with a '## Further Reading' section "
-                "containing a markdown list of those URLs. Include the page title as the link "
-                "text and the URL as the href. Only include URLs that were explicitly returned "
-                "by the web_search tool — NEVER fabricate, guess, or generate URLs yourself. "
-                "If web_search returned an error, '[NO_RESULTS]', or no URLs, do NOT include a "
-                "Further Reading section at all."
+                "- FURTHER READING SECTION: Whenever web search returns actual URLs in its "
+                "results, end your response with a '## Further Reading' section containing a "
+                "markdown list of those URLs. Include the page title as the link text and the "
+                "URL as the href. Only include URLs that were explicitly returned — NEVER "
+                "fabricate, guess, or generate URLs yourself. If web search returned an error, "
+                "'[NO_RESULTS]', or no URLs, do NOT include a Further Reading section at all.\n"
+                "- INTERNAL TOOLS: Never mention tool names, internal function names, or the "
+                "fact that a tool was called in your response. Present answers as if you have "
+                "direct knowledge of the transcript — do not expose implementation details to "
+                "the user."
             ),
         )
 
@@ -832,7 +835,7 @@ class AgentManager:
             return "\nCURRENT STREAM POSITION: stream not yet started or no content indexed."
 
         @agent.tool_plain
-        async def get_stream_info() -> str:  # type: ignore[misc]
+        async def get_status() -> str:  # type: ignore[misc]
             """Return current stream position and indexing statistics.
 
             Call this before resolving relative time references such as
@@ -856,7 +859,7 @@ class AgentManager:
             return "\n".join(lines)
 
         @agent.tool_plain
-        async def get_context_availability() -> str:  # type: ignore[misc]
+        async def check_availability() -> str:  # type: ignore[misc]
             """Return information about the available conversation history and summary content.
 
             Use this tool when users ask questions about what information or past conversations
@@ -904,13 +907,13 @@ class AgentManager:
             return f"{duration_str} ({start_str} to {end_str})"
 
         @agent.tool_plain
-        async def get_transcript_time_range(start_time: float, end_time: float) -> str:  # type: ignore[misc]
+        async def get_segment(start_time: float, end_time: float) -> str:  # type: ignore[misc]
             """Retrieve the complete verbatim deduplicated transcript for a time range.
 
             Returns all transcription content between start_time and end_time
             (both in seconds from stream start). Use this when the user asks
             about a specific time period. For topical/semantic queries without
-            a specific time range, use search_transcript instead.
+            a specific time range, use search_content instead.
 
             Args:
                 start_time: Start of the range in seconds from stream start.
@@ -920,7 +923,7 @@ class AgentManager:
                 try:
                     await result_callback({
                         "type": "agent_status",
-                        "tool": "get_transcript_time_range",
+                        "tool": "get_segment",
                         "display_text": f"reading transcript {_format_hms(start_time)} to {_format_hms(end_time)}",
                         "timestamp_utc": datetime.now(timezone.utc).isoformat(),
                     })
@@ -975,18 +978,18 @@ class AgentManager:
             return "\n".join(lines)
 
         @agent.tool_plain
-        async def search_transcript(query: str) -> str:  # type: ignore[misc]
+        async def search_content(query: str) -> str:  # type: ignore[misc]
             """Search the video transcript for content relevant to *query*.
 
             Returns the most semantically similar transcript segments.
-            Call search_fast_summaries first to identify relevant time windows and
+            Call search_notes first to identify relevant time windows and
             topics, then use this tool with targeted queries derived from those results.
             """
             if result_callback is not None:
                 try:
                     await result_callback({
                         "type": "agent_status",
-                        "tool": "search_transcript",
+                        "tool": "search_content",
                         "display_text": "searching transcript",
                         "timestamp_utc": datetime.now(timezone.utc).isoformat(),
                     })
@@ -1004,19 +1007,19 @@ class AgentManager:
             return header + "\n---\n".join(lines)
 
         @agent.tool_plain
-        async def search_fast_summaries(query: str) -> str:  # type: ignore[misc]
+        async def search_notes(query: str) -> str:  # type: ignore[misc]
             """Search LLM-distilled fast summary notes for topics, decisions, and key facts.
 
-            Call this FIRST before search_transcript or get_transcript_time_range to
-            orient your search strategy. Results are compact scribe-note bullets produced
-            every ~15 seconds — NOT verbatim speech. Use the returned timestamps and topics
-            to steer targeted search_transcript queries or get_transcript_time_range bounds.
+            Call this FIRST before search_content or get_segment to orient your search
+            strategy. Results are compact scribe-note bullets produced every ~15 seconds —
+            NOT verbatim speech. Use the returned timestamps and topics to steer targeted
+            search_content queries or get_segment bounds.
             """
             if result_callback is not None:
                 try:
                     await result_callback({
                         "type": "agent_status",
-                        "tool": "search_fast_summaries",
+                        "tool": "search_notes",
                         "display_text": "searching fast summaries",
                         "timestamp_utc": datetime.now(timezone.utc).isoformat(),
                     })
@@ -1027,7 +1030,7 @@ class AgentManager:
                 return (
                     "No fast summary notes available yet. "
                     "The stream may have just started or no summaries have been produced. "
-                    "Proceed directly with search_transcript."
+                    "Proceed directly with search_content."
                 )
             lines = []
             for chunk in chunks:
@@ -1035,12 +1038,12 @@ class AgentManager:
                 lines.append(f"{ts}{chunk.text}")
             header = (
                 f"[{len(chunks)} fast summary window(s) — distilled scribe notes, not verbatim speech.\n"
-                "Use timestamps and topics below to guide search_transcript or get_transcript_time_range.]\n"
+                "Use timestamps and topics below to guide search_content or get_segment.]\n"
             )
             return header + "\n---\n".join(lines)
 
         @agent.tool_plain
-        async def web_search(query: str) -> str:  # type: ignore[misc]
+        async def search_web(query: str) -> str:  # type: ignore[misc]
             """Search the web for up-to-date information about *query*.
 
             Uses Tavily if TAVILY_API_KEY is set, Exa if EXA_API_KEY is set,
@@ -1050,14 +1053,14 @@ class AgentManager:
             if not await agent_self._is_grounded_in_summaries(query):
                 return (
                     "Web search skipped: the query does not appear to relate to topics "
-                    "covered in the video. Call search_transcript with the same query to "
+                    "covered in the video. Call search_content with the same query to "
                     "look for relevant information in the raw transcript instead."
                 )
             if result_callback is not None:
                 try:
                     await result_callback({
                         "type": "agent_status",
-                        "tool": "web_search",
+                        "tool": "search_web",
                         "display_text": "searching web",
                         "timestamp_utc": datetime.now(timezone.utc).isoformat(),
                     })
@@ -1120,7 +1123,7 @@ class AgentManager:
                     "intercepting it — retrying with tool-use hint."
                 )
                 result = await self._agent.run(
-                    query + "\n\n(Use the search_fast_summaries, search_transcript, and web_search tools available to you.)"
+                    query + "\n\n(You have access to search and retrieval tools — use them to find relevant content before answering.)"
                 )
                 output_data = getattr(result, 'data', None) or getattr(result, 'output', str(result))
 
@@ -1146,6 +1149,23 @@ class AgentManager:
         # Unwrap <answer>…</answer> tags, keeping the inner content in place
         if isinstance(output_data, str):
             output_data = re.sub(r'(?si)<answer>(.*?)</answer>', r'\1', output_data).strip()
+
+        # Strip natural language tool name leakage from the final response.
+        # Covers phrases like "I used search_content to find..." or "Using search_notes, ..."
+        if isinstance(output_data, str):
+            _tool_names = (
+                r'search_notes|search_content|get_segment|get_status|check_availability|search_web|'
+                r'search_fast_summaries|search_transcript|get_transcript_time_range|'
+                r'get_stream_info|get_context_availability|web_search'
+            )
+            output_data = re.sub(
+                r'(?i)(?:I\s+(?:used|called|invoked|ran)\s+(?:the\s+)?|'
+                r'(?:using|via|through)\s+(?:the\s+)?)'
+                r'(?:' + _tool_names + r')'
+                r'(?:\s+tool)?(?:\s+to\b|\s*,)?\s*',
+                '',
+                output_data,
+            ).strip()
 
         # Extract <error>…</error> tags emitted by the model
         error_value: Optional[str] = None
