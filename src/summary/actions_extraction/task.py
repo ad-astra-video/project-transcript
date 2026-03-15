@@ -103,6 +103,13 @@ class ActionsExtractionTask:
         )
 
         json_content = content.replace("```json", "").replace("```", "").strip()
+        if not json_content:
+            return {
+                "actions": [],
+                "follow_ups": [],
+                "input_tokens": input_tokens,
+                "output_tokens": output_tokens,
+            }
         try:
             parsed = ActionsExtractionSchema.model_validate_json(json_content)
         except Exception as exc:
