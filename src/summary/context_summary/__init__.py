@@ -99,7 +99,14 @@ class ContextSummaryPlugin:
         """Set the monitoring event callback after initialization."""
         self._send_monitoring_event_callback = callback
     
-    async def handle_content_type_detected(self, content_type: str, confidence: float, source: str, reasoning: str):
+    async def handle_content_type_detected(
+        self,
+        content_type: str,
+        confidence: float,
+        source: str,
+        reasoning: str,
+        **kwargs,
+    ):
         """Handle on_content_type_detected event from content_type_detection plugin.
         
         Updates the content type state so that subsequent
@@ -110,6 +117,7 @@ class ContextSummaryPlugin:
             confidence: Detection confidence score
             source: Source of detection (e.g., "AUTO_DETECTED")
             reasoning: LLM's reasoning for the detection
+            **kwargs: Forward-compatible event fields (e.g., summary_window_id)
         """
         self._content_type_state = ContentTypeStateHolder(
             content_type=content_type,
