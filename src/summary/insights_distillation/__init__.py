@@ -34,6 +34,8 @@ class InsightsDistillationPlugin:
 
         self._latest_insights: List[str] = []
         self._accumulated_detailed_insights: List[Dict[str, Any]] = []
+        self._last_context_summary_result: Optional[Dict[str, Any]] = None
+        self._last_transcript_summary_result: Optional[Dict[str, Any]] = None
         self._pending_by_window: Dict[int, Set[str]] = {}
         self._processing_windows: Set[int] = set()
         self._lock = asyncio.Lock()
@@ -100,6 +102,8 @@ class InsightsDistillationPlugin:
             result = await self._task.process(
                 context_summary_result=context_summary_result,
                 transcript_summary_result=transcript_summary_result,
+                previous_context_summary_result=self._last_context_summary_result,
+                previous_transcript_summary_result=self._last_transcript_summary_result,
                 prior_insights=list(self._accumulated_detailed_insights),
             )
         except Exception as e:
@@ -112,6 +116,8 @@ class InsightsDistillationPlugin:
 
         self._latest_insights = result.get("insights", [])
         self._accumulated_detailed_insights = result.get("detailed_insights", [])
+        self._last_context_summary_result = context_summary_result
+        self._last_transcript_summary_result = transcript_summary_result
 
         self._window_manager.store_plugin_result(
             window_id=summary_window_id,
@@ -160,6 +166,8 @@ class InsightsDistillationPlugin:
         """Reset tracked state for new stream."""
         self._latest_insights = []
         self._accumulated_detailed_insights = []
+        self._last_context_summary_result = None
+        self._last_transcript_summary_result = None
         self._pending_by_window.clear()
         self._processing_windows.clear()
 

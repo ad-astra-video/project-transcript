@@ -430,10 +430,24 @@ class ContextSummaryTask:
         window_count = len(self._window_manager._summary_windows) - 1 if self._window_manager._summary_windows else 1
         insights_per_window = len(prior_insights) / window_count if window_count > 0 else 0.0
         
-        # Get text to analyze based on whether this is the first summary
-        # (This logic should be coordinated with the plugin's _has_performed_summary state)
-        # For now, we'll get the text from the window manager
-        content_to_analyze = self._window_manager.get_window_text(summary_window_id)
+        # Analyze both the previous and current summary windows together so each
+        # reasoning call sees two-window context in the user prompt.
+        current_window_text = self._window_manager.get_window_text(summary_window_id)
+        previous_window_text = ""
+        if summary_window_id > 0:
+            previous_window = self._window_manager.get_window(summary_window_id - 1)
+            if previous_window is not None:
+                previous_window_text = previous_window.text or ""
+
+        if previous_window_text:
+            content_to_analyze = (
+                "## Previous Summary Window Transcript\n"
+                f"{previous_window_text}\n\n"
+                "## Current Summary Window Transcript\n"
+                f"{current_window_text or ''}"
+            )
+        else:
+            content_to_analyze = current_window_text
         
         if not content_to_analyze:
             logger.warning(f"No text found for summary_window_id={summary_window_id}")

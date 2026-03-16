@@ -76,20 +76,32 @@ class InsightsDistillationTask:
         self,
         context_summary_result: Dict[str, Any],
         transcript_summary_result: Dict[str, Any],
+        previous_context_summary_result: Optional[Dict[str, Any]] = None,
+        previous_transcript_summary_result: Optional[Dict[str, Any]] = None,
         prior_insights: Optional[List[Dict[str, Any]]] = None,
     ) -> Dict[str, Any]:
         context_insights = self._extract_context_insights(context_summary_result)
+        previous_context_insights = self._extract_context_insights(previous_context_summary_result or {})
 
         user_payload = {
             "prior_insights": prior_insights or [],
             "context_summary": {
                 "insights": context_insights,
             },
+            "previous_context_summary": {
+                "insights": previous_context_insights,
+            },
             "transcript_summary": {
                 "sections": transcript_summary_result.get("sections", []),
                 "key_points": transcript_summary_result.get("key_points", []),
                 "topics": transcript_summary_result.get("topics", []),
                 "summary": transcript_summary_result.get("summary", ""),
+            },
+            "previous_transcript_summary": {
+                "sections": (previous_transcript_summary_result or {}).get("sections", []),
+                "key_points": (previous_transcript_summary_result or {}).get("key_points", []),
+                "topics": (previous_transcript_summary_result or {}).get("topics", []),
+                "summary": (previous_transcript_summary_result or {}).get("summary", ""),
             },
         }
 

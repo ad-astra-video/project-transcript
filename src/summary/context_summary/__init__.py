@@ -72,6 +72,7 @@ class ContextSummaryPlugin:
         
         self._initial_summary_delay_seconds = initial_summary_delay_seconds
         self._has_performed_summary = False
+        self._summary_window_counter = 0
         
         # Content type state - managed by this plugin
         self._content_type_state = ContentTypeStateHolder()
@@ -136,6 +137,8 @@ class ContextSummaryPlugin:
         """Reset tracked state for new stream."""
         # Reset the task's insight ID counter
         self._task.reset()
+        self._summary_window_counter = 0
+        self._has_performed_summary = False
         logger.debug("ContextSummaryPlugin reset complete")
     
     def _should_process(self, summary_window_id: int) -> bool:
@@ -148,6 +151,14 @@ class ContextSummaryPlugin:
                 if elapsed < self._initial_summary_delay_seconds:
                     logger.info(f"Delaying first summary - only {elapsed:.1f}s elapsed")
                     return False
+
+        self._summary_window_counter += 1
+        if self._summary_window_counter % 2 != 0:
+            logger.debug(
+                "context_summary: skipping summary_window_id=%s to run every 2 windows",
+                summary_window_id,
+            )
+            return False
         return True
     
     async def process(self, summary_window_id: int, **kwargs):
