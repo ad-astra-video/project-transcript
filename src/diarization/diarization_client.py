@@ -1566,35 +1566,35 @@ def diarization_worker(hf_token: str, device: str, request_queue, result_queue):
     logger.info(f"Worker received device argument: '{device}'")
 
     # --- CUDA environment diagnostics ---
-    #import multiprocessing as _mp
-    #logger.info(f"torch version: {torch.__version__}")
-    #logger.info(f"Multiprocessing start method: {_mp.get_start_method(allow_none=True)}")
-    #logger.info(f"CUDA_VISIBLE_DEVICES env: {os.environ.get('CUDA_VISIBLE_DEVICES', '<not set>')}")
+    import multiprocessing as _mp
+    logger.info(f"torch version: {torch.__version__}")
+    logger.info(f"Multiprocessing start method: {_mp.get_start_method(allow_none=True)}")
+    logger.info(f"CUDA_VISIBLE_DEVICES env: {os.environ.get('CUDA_VISIBLE_DEVICES', '<not set>')}")
     # torch.cuda.is_available() only checks library presence; the real driver
     # init happens lazily and can still fail even when is_available() is True.
     # We probe get_device_properties() to force driver init and catch failures.
-    #cuda_available = torch.cuda.is_available()
-    #logger.info(f"torch.cuda.is_available(): {cuda_available}")
-    #if cuda_available:
-    #    try:
-    #        device_count = torch.cuda.device_count()
-    #        logger.info(f"torch.cuda.device_count(): {device_count}")
-    #        for i in range(device_count):
-    #            props = torch.cuda.get_device_properties(i)
-    #            logger.info(
-    #                f"  CUDA device {i}: {props.name}, "
-    #                f"total_memory={props.total_memory / 1024**3:.1f} GiB, "
-    #                f"compute_capability={props.major}.{props.minor}"
-    #            )
-    #    except RuntimeError:
-    #        logger.warning(
-    #            "CUDA driver initialisation failed despite is_available()=True "
-    #            "(driver/container issue). Marking CUDA unavailable.",
-    #            exc_info=True,
-    #        )
-    #        cuda_available = False
-    #if not cuda_available:
-    #    logger.warning("CUDA is NOT available to this worker process — will use CPU")
+    cuda_available = torch.cuda.is_available()
+    logger.info(f"torch.cuda.is_available(): {cuda_available}")
+    if cuda_available:
+        try:
+            device_count = torch.cuda.device_count()
+            logger.info(f"torch.cuda.device_count(): {device_count}")
+            for i in range(device_count):
+                props = torch.cuda.get_device_properties(i)
+                logger.info(
+                    f"  CUDA device {i}: {props.name}, "
+                    f"total_memory={props.total_memory / 1024**3:.1f} GiB, "
+                    f"compute_capability={props.major}.{props.minor}"
+                )
+        except RuntimeError:
+            logger.warning(
+                "CUDA driver initialisation failed despite is_available()=True "
+                "(driver/container issue). Marking CUDA unavailable.",
+                exc_info=True,
+            )
+            cuda_available = False
+    if not cuda_available:
+        logger.warning("CUDA is NOT available to this worker process — will use CPU")
     # --- end CUDA diagnostics ---
 
     if Pipeline is None:
