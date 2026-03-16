@@ -460,6 +460,8 @@ class AgentManager:
         # ---- PydanticAI agent (built lazily after initialize()) ----
         self._agent: Optional[Agent] = None
         self._agent_model_name: Optional[str] = None
+        self._fast_agent: Optional[Agent] = None
+        self._fast_agent_model_name: Optional[str] = None
         self._agent_chat_query: Optional[str] = None  # Custom system prompt for agent queries
 
         # ---- Stream position tracking (updated on each indexed segment) ----
@@ -484,11 +486,20 @@ class AgentManager:
     async def initialize(self, llm_manager: LLMManager) -> Optional[str]:
         """Initialize with LLM manager, auto-detect models, and build the PydanticAI agent."""
         self.llm = llm_manager
-        # Build the PydanticAI agent using the reasoning client
-        self._build_agent(
-            reasoning_client=self.llm.reasoning_client,
-            reasoning_model=self.llm.reasoning_model
+        # Build the PydanticAI agent using the reasoning (thinking) client
+        result = self._build_agent(
+            client=self.llm.reasoning_client,
+            model_name=self.llm.reasoning_model
         )
+        if result is not None:
+            self._agent, self._agent_model_name = result
+        # Build the fast agent using the rapid client
+        fast_result = self._build_agent(
+            client=self.llm.fast_client,
+            model_name=self.llm.rapid_model
+        )
+        if fast_result is not None:
+            self._fast_agent, self._fast_agent_model_name = fast_result
         return None
 
     # ------------------------------------------------------------------
@@ -673,24 +684,30 @@ class AgentManager:
 
     def _build_agent(
         self,
-        reasoning_client: AsyncOpenAI,
-        reasoning_model: str
-    ) -> None:
+        client: AsyncOpenAI,
+        model_name: str
+    ):
         """
-        Construct the PydanticAI Agent backed by the reasoning LLM.
+        Construct a PydanticAI Agent backed by the given LLM client.
+
+        Can be called twice — once for the reasoning (thinking) agent and once
+        for the fast agent — each receiving its own AsyncOpenAI client and model.
 
         The agent is given six tools:
           - search_notes: semantic search over LLM-distilled fast summary notes (call first)
           - search_content: semantic search over the indexed video transcript
           - get_segment: verbatim transcript retrieval for a time window
           - search_web: live web search (Tavily > Exa > DuckDuckGo)
-        """
-        if not reasoning_model:
-            logger.warning("AgentManager: reasoning model not set, skipping agent build")
-            return
 
-        # Use the reasoning client directly instead of creating a new provider
-        model = OpenAIModel(reasoning_model, provider=OpenAIProvider(openai_client=reasoning_client))
+        Returns:
+            Tuple of (Agent, model_name) on success, or None if model_name is empty.
+        """
+        if not model_name:
+            logger.warning("AgentManager: model name not set, skipping agent build")
+            return None
+
+        # Use the provided client directly instead of creating a new provider
+        model = OpenAIModel(model_name, provider=OpenAIProvider(openai_client=client))
 
         agent: Agent[None, str] = Agent(
             model,
@@ -1068,11 +1085,10 @@ class AgentManager:
                     pass
             return await _web_search(query)
 
-        self._agent = agent
-        self._agent_model_name = reasoning_model
-        logger.info(f"AgentManager: autonomous agent built on model '{reasoning_model}'")
+        logger.info(f"AgentManager: agent built on model '{model_name}'")
+        return agent, model_name
 
-    async def ask_agent(self, query: str) -> Dict[str, Any]:
+    async def ask_agent(self, query: str, model_type: str = "reasoning") -> Dict[str, Any]:
         """
         Run the autonomous agent loop for *query*.
 
@@ -1081,6 +1097,8 @@ class AgentManager:
 
         Args:
             query: Natural language question from the user / UI.
+            model_type: Which agent to use — ``"reasoning"`` (default, thinking/slow)
+                or ``"fast"`` (rapid/lightweight).
 
         Returns:
             Dict with keys:
@@ -1091,12 +1109,14 @@ class AgentManager:
         Raises:
             RuntimeError: If initialize() has not been called yet.
         """
-        if self._agent is None:
+        agent = self._fast_agent if model_type == "fast" else self._agent
+        if agent is None:
+            label = "fast" if model_type == "fast" else "reasoning"
             raise RuntimeError(
-                "AgentManager not initialised. Call initialize() before ask_agent()."
+                f"AgentManager {label} agent not initialised. Call initialize() before ask_agent()."
             )
 
-        result = await self._agent.run(query)
+        result = await agent.run(query)
         output_data = getattr(result, 'data', None) or getattr(result, 'output', str(result))
 
         # Detect whether PydanticAI actually executed any tool calls during the run.
@@ -1122,7 +1142,7 @@ class AgentManager:
                     "AgentManager: model leaked <tool_call> XML without PydanticAI "
                     "intercepting it — retrying with tool-use hint."
                 )
-                result = await self._agent.run(
+                result = await agent.run(
                     query + "\n\n(You have access to search and retrieval tools — use them to find relevant content before answering.)"
                 )
                 output_data = getattr(result, 'data', None) or getattr(result, 'output', str(result))
@@ -1138,7 +1158,7 @@ class AgentManager:
                     "AgentManager: response appears XML-wrapped "
                     "(first char='<', last char='>') — retrying query."
                 )
-                result = await self._agent.run(query)
+                result = await agent.run(query)
                 output_data = getattr(result, 'data', None) or getattr(result, 'output', str(result))
 
         # Clean up any raw tool_call XML blocks leaked by the model

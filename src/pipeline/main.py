@@ -897,9 +897,13 @@ async def update_params(params: dict):
     # Agent chat query parameter (custom system prompt for agent)
     if "agent_chat_query" in params:
         agent_query = params["agent_chat_query"]
+        agent_model_type = params.get("agent_model_type", "reasoning")
         if STATE.summary_client is not None:
-            STATE.summary_client.update_params(agent_chat_query=agent_query)
-            logger.info(f"Updated agent_chat_query")
+            STATE.summary_client.update_params(
+                agent_chat_query=agent_query,
+                agent_model_type=agent_model_type,
+            )
+            logger.info(f"Updated agent_chat_query (model_type={agent_model_type})")
     
     # Content type override parameter (user control)
     if "content_type_override" in params:

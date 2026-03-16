@@ -266,6 +266,7 @@ class SummaryClient:
         initial_summary_delay_seconds: Optional[float] = None,
         content_type_context_limit: Optional[int] = None,
         agent_chat_query: Optional[str] = None,
+        agent_model_type: Optional[str] = None,
     ):
         """
         Update client parameters dynamically.
@@ -288,6 +289,7 @@ class SummaryClient:
             initial_summary_delay_seconds: New delay before first summary (default: 10.0)
             content_type_context_limit: New character limit for content type detection
             agent_chat_query: Custom system prompt for the agent chat query
+            agent_model_type: Which agent LLM to use — ``"reasoning"`` (default) or ``"fast"``.
         
         Note:
             message_format_mode is managed by LLMManager and cannot be updated here.
@@ -334,7 +336,7 @@ class SummaryClient:
         # response over the data connection as an "agent_response" payload.
         if agent_chat_query is not None:
             try:
-                asyncio.create_task(self._run_ask_agent(agent_chat_query))
+                asyncio.create_task(self._run_ask_agent(agent_chat_query, model_type=agent_model_type or "reasoning"))
             except Exception as e:
                 logger.warning(f"Failed to schedule ask_agent task: {e}")
         
@@ -381,7 +383,7 @@ class SummaryClient:
         """Get count of pending summary requests."""
         return len(self.in_flight_windows)
 
-    async def ask_agent(self, query: str) -> Dict[str, Any]:
+    async def ask_agent(self, query: str, model_type: str = "reasoning") -> Dict[str, Any]:
         """
         Submit a natural-language query to the autonomous agent.
 
@@ -391,13 +393,15 @@ class SummaryClient:
 
         Args:
             query: The user's question.
+            model_type: Which agent LLM to use — ``"reasoning"`` (default, thinking/slow)
+                or ``"fast"`` (rapid/lightweight).
 
         Returns:
             Dict with ``response`` (str) and ``error`` (str | None) fields.
         """
-        return await self.agent.ask_agent(query)
+        return await self.agent.ask_agent(query, model_type=model_type)
 
-    async def _run_ask_agent(self, query: str) -> None:
+    async def _run_ask_agent(self, query: str, model_type: str = "reasoning") -> None:
         """Run ask_agent and push the response as an agent_response payload.
 
         Intended to be fired as a background task from update_params so the
@@ -405,9 +409,10 @@ class SummaryClient:
 
         Args:
             query: The user's question forwarded from update_params.
+            model_type: Which agent LLM to use — ``"reasoning"`` (default) or ``"fast"``.
         """
         try:
-            result = await self.ask_agent(query)
+            result = await self.ask_agent(query, model_type=model_type)
             await self._queue_payload({
                 "type": "agent_response",
                 "query": query,
