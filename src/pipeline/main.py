@@ -191,7 +191,8 @@ async def load_model(**kwargs):
 
     # Initialize diarization client
     STATE.diarization_client = DiarizationClient(
-        hf_token=os.getenv("HF_TOKEN")
+        hf_token=os.getenv("HF_TOKEN"),
+        device=os.getenv("DIARIZATION_DEVICE", "cuda")
     )
     await STATE.diarization_client.initialize()
     await STATE.diarization_client.start()

@@ -1552,12 +1552,13 @@ class SpeakerMemory:
         return results
 
 
-def diarization_worker(hf_token: str, request_queue, result_queue):
+def diarization_worker(hf_token: str, device: str, request_queue, result_queue):
     """
     Worker function for diarization process.
     
     Args:
         hf_token: HuggingFace token for accessing pyannote models
+        device: Device for pyannote pipeline ("cuda" or "cpu")
         request_queue: Multiprocessing queue for receiving requests
         result_queue: Multiprocessing queue for sending results
     """
@@ -1569,18 +1570,20 @@ def diarization_worker(hf_token: str, request_queue, result_queue):
     
     try:
         # Initialize pipeline
-        use_cuda = False #torch.cuda.is_available(), not working on cuda for some reason
-        if use_cuda:
-            pipeline = Pipeline.from_pretrained(
-                "pyannote/speaker-diarization-community-1",
-                token=hf_token
-            ).cuda()
+        pipeline = Pipeline.from_pretrained(
+            "pyannote/speaker-diarization-community-1",
+            token=hf_token
+        )
+        
+        # Move pipeline to specified device
+        if device == "cuda" and torch.cuda.is_available():
+            pipeline.to(torch.device("cuda"))
             logger.info("Diarization pipeline initialized on CUDA device")
+        elif device.startswith("cuda:") and torch.cuda.is_available():
+            pipeline.to(torch.device(device))
+            logger.info(f"Diarization pipeline initialized on {device}")
         else:
-            pipeline = Pipeline.from_pretrained(
-                "pyannote/speaker-diarization-community-1",
-                token=hf_token
-            )
+            pipeline.to(torch.device("cpu"))
             logger.info("Diarization pipeline initialized on CPU")
         
         # Note: The community pipeline version doesn't support parameter instantiation
@@ -1869,6 +1872,7 @@ class DiarizationClient:
     def __init__(
         self,
         hf_token: str = "",
+        device: str = "cuda",
         threshold: float = 0.71,
         recency_boost: float = 0.02,
         history_size: int = 20,
@@ -1885,6 +1889,7 @@ class DiarizationClient:
 
         Args:
             hf_token: HuggingFace token for accessing pyannote models
+            device: Device for pyannote pipeline ("cuda" or "cpu")
             threshold: Cosine similarity threshold for speaker match
             recency_boost: Bonus added to most recent speaker's similarity
             history_size: Number of recent speaker IDs to track
@@ -1900,6 +1905,7 @@ class DiarizationClient:
             on_low_confidence: Callback for low confidence matches
         """
         self.hf_token = hf_token
+        self.device = device
         self.threshold = threshold
         self.recency_boost = recency_boost
         self.history_size = history_size
@@ -1946,7 +1952,7 @@ class DiarizationClient:
             logger.info("Starting diarization worker process")
             self._process = multiprocessing.Process(
                 target=diarization_worker,
-                args=(self.hf_token, self._request_queue, self._result_queue),
+                args=(self.hf_token, self.device, self._request_queue, self._result_queue),
                 daemon=True
             )
             self._process.start()
