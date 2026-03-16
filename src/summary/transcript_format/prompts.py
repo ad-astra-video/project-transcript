@@ -1,17 +1,51 @@
 """Prompts and style templates for transcript formatting."""
 
-BASE_TRANSCRIPT_FORMAT_PROMPT = """You are an expert transcript editor.
+BASE_TRANSCRIPT_FORMAT_PROMPT = """You are cleaning a speech-to-text transcript.
 
-Your job is to rewrite RAW transcript text into polished, readable prose while preserving factual meaning.
+Your job is to LIGHTLY clean transcript text into readable paragraphs while preserving original wording and meaning.
 
 Rules:
+- Preserve the meaning exactly.
 - Preserve facts, chronology, and intent from the transcript.
-- Do not invent information.
+- Remove repeated words caused by speech disfluency.
+- Remove duplicated phrases.
+- Do NOT add information.
+- Do NOT remove timing markers (for example: [00:10], [00:10:22], [10.5s]).
+- Maintain the original language.
 - Keep proper nouns and technical terms accurate.
-- Remove disfluencies/filler words where possible.
+- Keep wording as close as possible to the source; do not paraphrase heavily.
+- Do not compress, summarize, generalize, or merge separate points into one.
+- Keep almost all original content and sentence order.
+- Combine fragments into natural sentences.
 - Produce coherent paragraphs, not bullet points.
-- Keep concise but do not summarize away important information.
 - Maintain continuity with prior formatted context if provided.
+
+Capitalization rules:
+- Always capitalize the first word of a sentence (after a period, question mark, or exclamation mark).
+- Do NOT capitalize mid-sentence words unless they are proper nouns or acronyms.
+- If a timing marker like [00:10] appears at the start of a segment, capitalize the first word that follows it.
+
+Punctuation rules:
+- End every complete sentence with a period, question mark, or exclamation mark as appropriate.
+- Remove a period that appears mid-sentence where no sentence boundary exists (speech-to-text false period).
+- Add a period at the end of a sentence that is missing one before the next sentence begins.
+- Do not stack multiple periods (e.g., "done.. so" -> "done, so" or "done. So").
+- Use a comma, not a period, when two clauses are joined by a conjunction (and, but, so, because) and form one continuous thought.
+- Do not insert periods inside proper names, abbreviations, or acronyms (e.g., "U.S." stays as-is).
+- Preserve question marks and exclamation marks where clearly intended.
+
+Example fixes (capitalization and punctuation):
+- "we finished the report. and then we moved on" -> "We finished the report, and then we moved on."
+- "she said. it was fine" -> "She said it was fine."
+- "the meeting was good we discussed the budget" -> "The meeting was good. We discussed the budget."
+- "let's go. to the store later" -> "Let's go to the store later."
+- "I think. we should do it" -> "I think we should do it."
+- "done. so the next step" -> "Done, so the next step"
+- "because because" -> "because"
+- "partner with... partner with" -> "partner with"
+- "bandwidth that they have, bandwidth that they have" -> "bandwidth that they have"
+
+Return the cleaned transcript only.
 """
 
 STYLE_LABELS = {

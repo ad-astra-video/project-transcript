@@ -12,6 +12,68 @@ from src.summary.window_manager import WindowManager
 class TestTranscriptFormatTaskChunking:
     """Validate token-aware chunking for 16k fast model workflow."""
 
+    def test_dedupe_transcript_removes_repeated_words_and_phrases(self):
+        task = TranscriptFormatTask(llm_client=MagicMock())
+
+        text = (
+            "And this this is important because because "
+            "they had to partner with they had to partner with international suppliers."
+        )
+        cleaned = task.dedupe_transcript(text)
+
+        assert cleaned == "And this is important because they had to partner with international suppliers."
+
+    def test_dedupe_preserves_timing_markers(self):
+        task = TranscriptFormatTask(llm_client=MagicMock())
+
+        text = "[00:10] because because this this works works [00:20] done done"
+        cleaned = task._dedupe_preserving_timing_markers(text)
+
+        assert cleaned == "[00:10] because this works [00:20] done"
+
+    def test_dedupe_handles_punctuation_and_case_variants(self):
+        task = TranscriptFormatTask(llm_client=MagicMock())
+
+        text = (
+            "But it... but it also understands what you're asking. "
+            "what you're asking it for."
+        )
+        cleaned = task.dedupe_transcript(text)
+
+        assert cleaned == "but it also understands what you're asking it for."
+
+    def test_remove_boundary_overlap_handles_punctuation_variants(self):
+        task = TranscriptFormatTask(llm_client=MagicMock())
+
+        previous = "It's an amazing model."
+        current = "It's an amazing model, and useful."
+
+        fixed_prev, fixed_curr = task._remove_boundary_overlap(previous, current, max_overlap_words=10)
+
+        assert fixed_curr == "and useful."
+        assert fixed_prev == previous  # exact overlap — prev is unchanged
+
+    @pytest.mark.asyncio
+    async def test_format_text_applies_dedupe_preprocessing(self):
+        task = TranscriptFormatTask(llm_client=MagicMock(), input_token_budget=12000)
+
+        async def _fake_format_chunk(chunk_text, content_type, prior_tail, chunk_index, total_chunks):
+            return {
+                "text": chunk_text,
+                "input_tokens": 10,
+                "output_tokens": 5,
+            }
+
+        task._format_single_chunk = AsyncMock(side_effect=_fake_format_chunk)
+
+        result = await task.format_text(
+            raw_text="[00:10] because because we we test test",
+            content_type="UNKNOWN",
+            prior_formatted_tail="",
+        )
+
+        assert result["formatted_text"] == "[00:10] because we test"
+
     def test_split_into_chunks_for_long_input(self):
         task = TranscriptFormatTask(
             llm_client=MagicMock(),

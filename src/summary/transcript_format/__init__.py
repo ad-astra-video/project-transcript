@@ -105,20 +105,28 @@ class TranscriptFormatPlugin:
 
     def _render_document(self) -> Dict[str, Any]:
         ordered = sorted(self._formatted_by_window.values(), key=lambda item: int(item.get("start_ms", 0)))
-        blocks: List[str] = []
+        blocks: List[str] = ["[0:00:00]"]
         styles_used: List[str] = []
-        previous_type = None
+        last_text_block: str = ""
 
-        for item in ordered:
+        for index, item in enumerate(ordered):
             current_type = str(item.get("content_type", "UNKNOWN"))
-            if previous_type is not None and current_type != previous_type:
-                blocks.append("---")
-            heading = str(item.get("heading") or "Formatted Transcript").strip()
-            start_ms = int(item.get("start_ms", 0))
-            end_ms = int(item.get("end_ms", 0))
             text = str(item.get("formatted_text") or "").strip()
-            blocks.append(f"## {heading} [{self._format_timestamp(start_ms)} – {self._format_timestamp(end_ms)}]\n\n{text}")
-            previous_type = current_type
+            if text:
+                if last_text_block:
+                    fixed_prev, text = self._task._remove_boundary_overlap(
+                        last_text_block, text, max_overlap_words=120
+                    )
+                    if fixed_prev != last_text_block and blocks:
+                        # Rebuild the previous block with the trimmed text and its timestamp.
+                        prev_end_ms = int(ordered[index - 1].get("end_ms", 0))
+                        blocks[-1] = f"{fixed_prev}\n\n[{self._format_timestamp(prev_end_ms)}]"
+                if text:
+                    last_text_block = text
+                    end_ms = int(item.get("end_ms", 0))
+                    text = f"{text}\n\n[{self._format_timestamp(end_ms)}]"
+                    blocks.append(text)
+
             if current_type not in styles_used:
                 styles_used.append(current_type)
 
@@ -186,7 +194,6 @@ class TranscriptFormatPlugin:
                         "start_ms": int(window.timestamp_start * 1000),
                         "end_ms": int(window.timestamp_end * 1000),
                         "content_type": content_type,
-                        "heading": result.get("heading", "Formatted Transcript"),
                         "formatted_text": result.get("formatted_text", ""),
                         "chunk_count": int(result.get("chunk_count", 0)),
                     }
