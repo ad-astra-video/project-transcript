@@ -764,7 +764,7 @@ class SpeakerMemory:
 
             # Periodic consolidation: every 3 identifications.
             if self._stats["identifications"] % 3 == 0:
-                merges = self.auto_merge_similar_speakers(similarity_threshold=0.615)
+                merges = self.auto_merge_similar_speakers(similarity_threshold=0.639)
                 if merges:
                     logger.info(f"Periodic consolidation: {merges} merges")
 
