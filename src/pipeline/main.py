@@ -943,6 +943,7 @@ async def on_stream_start(params: dict):
     global STATE
     try:
         logger.info(f"Stream start request received, resetting media time origin")
+        logger.info(params)
         # Reset stream state for new stream
         if STATE is not None:
             STATE.stream_start_media_ts = None  # Will be set on first audio frame
@@ -1083,7 +1084,7 @@ async def on_stream_stop():
 if __name__ == "__main__":
     logging.basicConfig(
         level=logging.INFO,
-        format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+        format='%(asctime)s - %(levelname)s - %(name)s - %(message)s'
     )
 
     # Set pytrickle log level from environment variable (default: WARNING)
