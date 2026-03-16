@@ -1563,38 +1563,90 @@ def diarization_worker(hf_token: str, device: str, request_queue, result_queue):
         result_queue: Multiprocessing queue for sending results
     """
     logger.info("Diarization worker starting")
-    
+    logger.info(f"Worker received device argument: '{device}'")
+
+    # --- CUDA environment diagnostics ---
+    #import multiprocessing as _mp
+    #logger.info(f"torch version: {torch.__version__}")
+    #logger.info(f"Multiprocessing start method: {_mp.get_start_method(allow_none=True)}")
+    #logger.info(f"CUDA_VISIBLE_DEVICES env: {os.environ.get('CUDA_VISIBLE_DEVICES', '<not set>')}")
+    # torch.cuda.is_available() only checks library presence; the real driver
+    # init happens lazily and can still fail even when is_available() is True.
+    # We probe get_device_properties() to force driver init and catch failures.
+    #cuda_available = torch.cuda.is_available()
+    #logger.info(f"torch.cuda.is_available(): {cuda_available}")
+    #if cuda_available:
+    #    try:
+    #        device_count = torch.cuda.device_count()
+    #        logger.info(f"torch.cuda.device_count(): {device_count}")
+    #        for i in range(device_count):
+    #            props = torch.cuda.get_device_properties(i)
+    #            logger.info(
+    #                f"  CUDA device {i}: {props.name}, "
+    #                f"total_memory={props.total_memory / 1024**3:.1f} GiB, "
+    #                f"compute_capability={props.major}.{props.minor}"
+    #            )
+    #    except RuntimeError:
+    #        logger.warning(
+    #            "CUDA driver initialisation failed despite is_available()=True "
+    #            "(driver/container issue). Marking CUDA unavailable.",
+    #            exc_info=True,
+    #        )
+    #        cuda_available = False
+    #if not cuda_available:
+    #    logger.warning("CUDA is NOT available to this worker process — will use CPU")
+    # --- end CUDA diagnostics ---
+
     if Pipeline is None:
         logger.error("pyannote.audio not installed")
         return
-    
+
+    # Stage 1: load model weights
     try:
-        # Initialize pipeline
+        logger.info("Loading pyannote pipeline from pretrained...")
         pipeline = Pipeline.from_pretrained(
             "pyannote/speaker-diarization-community-1",
             token=hf_token
         )
-        
-        # Move pipeline to specified device
-        if device == "cuda" and torch.cuda.is_available():
-            pipeline.to(torch.device("cuda"))
-            logger.info("Diarization pipeline initialized on CUDA device")
-        elif device.startswith("cuda:") and torch.cuda.is_available():
-            pipeline.to(torch.device(device))
-            logger.info(f"Diarization pipeline initialized on {device}")
-        else:
-            pipeline.to(torch.device("cpu"))
-            logger.info("Diarization pipeline initialized on CPU")
-        
-        # Note: The community pipeline version doesn't support parameter instantiation
-        # with custom clustering parameters. The default pyannote parameters are already
-        # optimized for most use cases. If you need custom clustering, consider using
-        # the full pyannote-audio library with a custom configuration.
-        logger.debug("Using default pyannote pipeline configuration")
-        
-    except Exception as e:
-        logger.error(f"Failed to initialize diarization pipeline: {e}")
+        logger.info("pyannote pipeline loaded successfully")
+    except Exception:
+        logger.error("Failed to load pyannote pipeline from pretrained", exc_info=True)
         return
+
+    # Stage 2: move pipeline to target device
+    try:
+        if device == "cuda" and cuda_available:
+            target_device = torch.device("cuda")
+        elif device.startswith("cuda:") and cuda_available:
+            target_device = torch.device(device)
+        else:
+            if device != "cpu":
+                logger.warning(
+                    f"Requested device '{device}' is unavailable "
+                    f"(cuda_available={cuda_available}); falling back to CPU"
+                )
+            target_device = torch.device("cpu")
+
+        logger.info(f"Moving pyannote pipeline to device: {target_device}")
+        pipeline.to(target_device)
+        logger.info(f"Diarization pipeline initialized on {target_device}")
+    except Exception:
+        logger.error(
+            f"Failed to move pyannote pipeline to device '{target_device}'; "
+            "falling back to CPU",
+            exc_info=True
+        )
+        try:
+            pipeline.to(torch.device("cpu"))
+            logger.warning("Diarization pipeline fell back to CPU after device placement error")
+        except Exception:
+            logger.error("CPU fallback also failed; worker cannot continue", exc_info=True)
+            return
+
+    # Note: The community pipeline version doesn't support parameter instantiation
+    # with custom clustering parameters. The default pyannote parameters are already
+    # optimized for most use cases.
+    logger.debug("Using default pyannote pipeline configuration")
     
     # Minimum segment duration to process (drop entirely — no identify() call)
     MIN_SEGMENT_DURATION = 0.15  # seconds
@@ -1700,6 +1752,11 @@ def diarization_worker(hf_token: str, device: str, request_queue, result_queue):
             try:
                 # Run diarization on numpy array via pyannote's waveform dict interface
                 waveform = torch.from_numpy(request.audio_data).unsqueeze(0)  # (1, samples)
+                logger.debug(
+                    f"Inference waveform — shape={tuple(waveform.shape)}, "
+                    f"dtype={waveform.dtype}, device={waveform.device}, "
+                    f"sample_rate={request.sample_rate}"
+                )
                 diarization_result = pipeline({"waveform": waveform, "sample_rate": request.sample_rate})
 
                 # --- Build overlap and onset-contamination maps for this chunk ---
@@ -1944,13 +2001,18 @@ class DiarizationClient:
                 logger.info("Diarization process already running")
                 return
             
+            # Use 'spawn' context so the worker starts a fresh Python interpreter.
+            # The default on Linux is 'fork', which cannot duplicate a CUDA context
+            # and causes "CUDA driver initialization failed" even when the GPU works.
+            _ctx = multiprocessing.get_context("spawn")
+
             # Create queues
-            self._request_queue = multiprocessing.Queue()
-            self._result_queue = multiprocessing.Queue()
-            
+            self._request_queue = _ctx.Queue()
+            self._result_queue = _ctx.Queue()
+
             # Start process
-            logger.info("Starting diarization worker process")
-            self._process = multiprocessing.Process(
+            logger.info("Starting diarization worker process (spawn context)")
+            self._process = _ctx.Process(
                 target=diarization_worker,
                 args=(self.hf_token, self.device, self._request_queue, self._result_queue),
                 daemon=True
