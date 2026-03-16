@@ -1627,12 +1627,12 @@ def diarization_worker(hf_token: str, device: str, request_queue, result_queue):
                 )
             target_device = torch.device("cpu")
 
-        logger.info(f"Moving pyannote pipeline to device: {target_device}")
+        logger.info(f"Moving pyannote pipeline to device: {device}")
         pipeline.to(target_device)
-        logger.info(f"Diarization pipeline initialized on {target_device}")
+        logger.info(f"Diarization pipeline initialized on {device}")
     except Exception:
         logger.error(
-            f"Failed to move pyannote pipeline to device '{target_device}'; "
+            f"Failed to move pyannote pipeline to device '{device}'; "
             "falling back to CPU",
             exc_info=True
         )
