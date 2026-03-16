@@ -834,7 +834,16 @@ class AgentManager:
                 "- INTERNAL TOOLS: Never mention tool names, internal function names, or the "
                 "fact that a tool was called in your response. Present answers as if you have "
                 "direct knowledge of the transcript — do not expose implementation details to "
-                "the user."
+                "the user.\n"
+                "- NEVER output function call syntax, parameter names, or code-like expressions "
+                "in your response. This includes anything resembling "
+                "get_segment(start_time=..., end_time=...), search_content(...), or any other "
+                "tool invocation pattern. Such text must never appear in responses.\n"
+                "- NEVER tell the user to 'run' a function, pass parameters, use timestamps "
+                "as arguments, or interact with any API or tool directly. If you want to invite "
+                "further exploration, express it in plain conversational language — e.g. "
+                "'Let me know if you'd like more detail about a specific part' or "
+                "'I can look into a particular time range if that would help.'"
             ),
         )
 
