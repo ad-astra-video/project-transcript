@@ -6,7 +6,7 @@ import logging
 from datetime import datetime, timezone
 from typing import Dict, Any, Callable, Optional, Tuple
 
-from .task import ContentTypeDetectionTask
+from .task import ContentTypeDetectionTask, ContentType
 from .prompts import CONTENT_TYPE_DETECTION_PROMPT
 
 logger = logging.getLogger(__name__)
@@ -164,6 +164,17 @@ class ContentTypeDetectionPlugin:
             # Use pre-created task instead of creating new one each time
             result = await self._task.detect_content_type(text, context_length=self._content_type_context_limit)
             
+            # Prevent regression: if detection returned UNKNOWN but we already have a
+            # known content type, suppress the result and keep the existing type.
+            if result.content_type == ContentType.UNKNOWN and self._current_content_type != ContentType.UNKNOWN.value:
+                logger.info(
+                    f"Suppressing UNKNOWN content type detection — preserving "
+                    f"'{self._current_content_type}' "
+                    f"(confidence: {result.confidence}, reasoning: {result.reasoning})"
+                )
+                self._last_detected_summary_window_id = summary_window_id
+                return {}
+
             # Track previous content type for change detection
             previous_content_type = self._current_content_type
             
