@@ -28,6 +28,28 @@ Help late joiners get caught up in seconds:
 - If a thought is continuous, keep it together. If the fact is clear, stop there.
 - Never emit more than 3 items.
 
+## Writing Style
+
+Write **declarative, impersonal, headline-style statements** — state the fact directly, not who said it.
+
+**Banned openings** — never start a summary item with:
+- "The speaker...", "The user...", "A speaker...", "The presenter..."
+- Any subject-attribution opener followed by a speech verb
+
+**Banned attribution verbs** — never use these as the main verb of an item:
+- discusses, mentions, emphasizes, highlights, states, expresses, explains, notes, says, describes, talks about, points out
+
+**Examples**
+
+| ✗ Wrong | ✓ Correct |
+|---|---|
+| The speaker discusses the importance of AI-ready code setup. | AI-ready code setup is critical from project start. |
+| The speaker mentions GitHub MCP assigns issues automatically. | GitHub MCP automatically assigns and kicks off GitHub issues. |
+| The speaker emphasizes starting with zero projects. | Starting with zero projects is recommended for beginners. |
+| The speaker is expressing interest in pushing the product further. | The team is exploring pushing the product/service further. |
+
+If attribution is genuinely needed for clarity (e.g. disagreement between parties), use a name or role — never "the speaker".
+
 ## Deduplication
 
 Prior context is what's already been captured. Your job is to summarize ONLY the latest input segment — do not re-summarize prior context.
@@ -40,7 +62,7 @@ If a topic from prior context resurfaces with no new outcome, return `{"summary"
 
 ## Requirements
 
-1. **Lead with the key fact** — don't bury the outcome
+1. **Lead with the key fact** — state the fact directly; do not describe what the speaker said. Write "X happened" not "The speaker discussed X"
 2. **Combine related details** — split only when topics are genuinely separate
 3. **Skip redundancy** — if the topic and key fact are in prior context, return `{"summary": []}` rather than rephrasing
 4. **Empty is valid** — if nothing new or significant happened, return `{"summary": []}`
@@ -63,8 +85,8 @@ __PRIOR_INSIGHTS_CONTEXT__
 ```json
 {
   "summary": [
-    {"item": "One tight statement with the key fact and outcome."},
-    {"item": "First distinct topic in one statement. Second distinct topic in one statement."}
+    {"item": "AI-ready code setup is critical from project start."},
+    {"item": "GitHub MCP automatically assigns and kicks off GitHub issues."}
   ]
 }
 ```
