@@ -43,7 +43,7 @@ services:
       retries: 5
       start_period: 30s
   vllm-insights:
-    image: vllm/vllm-openai:v0.15.1
+    image: vllm/vllm-openai:v0.17.1
     container_name: byoc-transcription-vllm-insights
     runtime: nvidia
     environment:
@@ -60,11 +60,11 @@ services:
     command: >
       --model ${LOCAL_REASONING_MODEL}
       --port ${LOCAL_REASONING_MODEL_PORT:-5000}
-      --gpu-memory-utilization 0.60
+      --gpu-memory-utilization 0.50
       --kv-cache-dtype fp8
-      --max-num-batched-tokens 512
+      --max-num-batched-tokens 2048
       --max-num-seqs 10
-      --max-model-len 131072
+      --max-model-len 115000
       --enable-auto-tool-choice
       --tool-call-parser hermes
       --trust-remote-code
@@ -76,7 +76,7 @@ services:
       retries: 5
       start_period: 60s
   vllm-fast-summary:
-    image: vllm/vllm-openai:v0.15.1
+    image: vllm/vllm-openai:v0.17.1
     container_name: byoc-transcription-vllm-fast-summary
     runtime: nvidia
     environment:
@@ -93,10 +93,10 @@ services:
     command: >
       --model ${LOCAL_FAST_MODEL}
       --port ${LOCAL_FAST_MODEL_PORT:-5050}
-      --gpu-memory-utilization 0.17
+      --gpu-memory-utilization 0.125
       --kv-cache-dtype fp8
       --max-num-batched-tokens 512
-      --max-num-seqs 2
+      --max-num-seqs 5
       --max-model-len 16384
       --enable-auto-tool-choice
       --tool-call-parser hermes
