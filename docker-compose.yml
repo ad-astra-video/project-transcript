@@ -93,9 +93,9 @@ services:
     command: >
       --model ${LOCAL_FAST_MODEL}
       --port ${LOCAL_FAST_MODEL_PORT:-5050}
-      --gpu-memory-utilization 0.125
+      --gpu-memory-utilization 0.27
       --kv-cache-dtype fp8
-      --max-num-batched-tokens 512
+      --max-num-batched-tokens 1200
       --max-num-seqs 5
       --max-model-len 16384
       --enable-auto-tool-choice
