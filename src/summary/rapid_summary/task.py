@@ -42,8 +42,8 @@ class RapidSummaryTask:
         self,
         llm_client: LLMClient,
         rapid_summary_response_json_schema: Dict[str, Any] = None,
-        max_tokens: int = 4096,
-        temperature: float = 0.7,
+        max_tokens: int = 1024,
+        temperature: float = 0.2,
         window_manager: Any = None,
     ):
         """Initialize the rapid summary task.
@@ -51,8 +51,8 @@ class RapidSummaryTask:
         Args:
             llm_client: LLMClient for rapid summary LLM calls (includes model and message building)
             rapid_summary_response_json_schema: JSON schema for response validation
-            max_tokens: Maximum tokens to generate (default: 4096)
-            temperature: Temperature for generation (default: 0.7)
+            max_tokens: Maximum tokens to generate (default: 1024)
+            temperature: Temperature for generation (default: 0.2)
             window_manager: Window manager for accessing prior plugin results
         """
         self._llm_client = llm_client
@@ -77,7 +77,7 @@ class RapidSummaryTask:
         accumulated_text, plugin_results, _, _ = self._window_manager.get_accumulated_text_and_results(
             text_token_limit=1000,  # Keep at 1000 (0 means unlimited)
             result_types=["rapid_summary"],
-            result_token_limit={"rapid_summary": 200},  # Reduced from 500
+            result_token_limit={"rapid_summary": 800},  # Enough to cover ~10-15 prior bullets for effective dedup
         )
         
         # Build context string - only include rapid_summary plugin results
@@ -126,7 +126,8 @@ class RapidSummaryTask:
             
             parsed = RapidSummaryResponseSchema.model_validate_json(json_content)
             if parsed.summary and len(parsed.summary) > 0:
-                return [item.item for item in parsed.summary]
+                # Cap at 3 items — a 15-second window should never need more
+                return [item.item for item in parsed.summary[:3]]
             return []
         except Exception as e:
             logger.warning(f"Failed to parse rapid summary response: {e}, content: {content[:200]}")
@@ -173,8 +174,9 @@ class RapidSummaryTask:
                 f"Rapid summary truncated (output_tokens={output_tokens} hit max_tokens={self.max_tokens}), "
                 f"retrying with reduced prior context"
             )
-            # Retry once with halved prior context
-            reduced_prior = prior_context[len(prior_context) // 2:] if prior_context else ""
+            # Retry once with halved prior context — keep the oldest half so dedup
+            # can still see the earliest history (newest half overlaps most with current input)
+            reduced_prior = prior_context[:len(prior_context) // 2] if prior_context else ""
             reduced_context_value = reduced_prior if reduced_prior else "(No prior context available)"
             retry_system_prompt = RAPID_SUMMARY_SYSTEM_PROMPT.replace(
                 "__PRIOR_INSIGHTS_CONTEXT__", reduced_context_value
@@ -233,8 +235,11 @@ class RapidSummaryTask:
             logger.debug("Rapid summary skipped — no speech content in window")
             scribe_notes_list = []
         else:
-            # Combine with context from previous windows
-            full_context = context_since_last_summary + "\n\n" + text if context_since_last_summary else text
+            # Summarize only the current window's text.
+            # context_since_last_summary is already reflected in prior rapid_summary notes
+            # fed through prior_context, so re-feeding raw history here causes the LLM
+            # to re-summarize the same content on every window.
+            full_context = text
             
             # Get prior insights context using the same pattern as context_summary
             prior_context = self._get_prior_insights_context()
