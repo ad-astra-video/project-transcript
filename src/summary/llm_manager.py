@@ -492,6 +492,10 @@ class LLMClient:
             if self._health_metrics:
                 if finish_reason == "length":
                     # Response was truncated due to max_tokens limit - record as failure
+                    logger.warning(
+                        f"LLM response truncated: finish_reason=length, "
+                        f"output_tokens={output_tokens}, plugin={self._plugin_name}"
+                    )
                     self._health_metrics.record(
                         plugin_name=self._plugin_name,
                         success=False,

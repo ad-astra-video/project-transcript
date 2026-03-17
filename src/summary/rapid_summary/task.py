@@ -42,8 +42,8 @@ class RapidSummaryTask:
         self,
         llm_client: LLMClient,
         rapid_summary_response_json_schema: Dict[str, Any] = None,
-        max_tokens: int = 4096,
-        temperature: float = 0.1,
+        max_tokens: int = 1024,
+        temperature: float = 0.7,
         window_manager: Any = None,
     ):
         """Initialize the rapid summary task.
@@ -51,8 +51,8 @@ class RapidSummaryTask:
         Args:
             llm_client: LLMClient for rapid summary LLM calls (includes model and message building)
             rapid_summary_response_json_schema: JSON schema for response validation
-            max_tokens: Maximum tokens to generate (default: 500)
-            temperature: Temperature for generation (default: 0.3)
+            max_tokens: Maximum tokens to generate (default: 1024)
+            temperature: Temperature for generation (default: 0.7)
             window_manager: Window manager for accessing prior plugin results
         """
         self._llm_client = llm_client
@@ -95,11 +95,14 @@ class RapidSummaryTask:
                 try:
                     data = json.loads(result_json) if isinstance(result_json, str) else result_json
                     scribe_notes = data.get("scribe_notes", [])
-                    if scribe_notes:
+                    if isinstance(scribe_notes, list) and scribe_notes:
                         formatted_notes.extend(scribe_notes)
+                    elif isinstance(scribe_notes, str) and len(scribe_notes) > 1:
+                        # Skip corrupted single-char or raw string entries from prior parse failures
+                        logger.debug("Skipping non-list scribe_notes in prior context")
                 except (json.JSONDecodeError, AttributeError):
-                    # Fallback: treat as string
-                    formatted_notes.append(str(result_json))
+                    # Fallback: skip corrupted entries rather than polluting context
+                    logger.debug(f"Skipping unparseable rapid_summary result in prior context")
             
             if formatted_notes:
                 # Format as bullet list for readability
@@ -108,8 +111,32 @@ class RapidSummaryTask:
         
         return "\n\n".join(parts) if parts else ""
     
+    def _parse_rapid_summary_content(self, content: str) -> List[str]:
+        """Parse rapid summary JSON content into a list of items.
+        
+        Args:
+            content: Raw LLM response content
+            
+        Returns:
+            List of summary item strings, or empty list on parse failure
+        """
+        try:
+            # Handle markdown code blocks (e.g., ```json ... ```) - same as context_summary
+            json_content = content.replace("```json", "").replace("```", "").strip()
+            
+            parsed = RapidSummaryResponseSchema.model_validate_json(json_content)
+            if parsed.summary and len(parsed.summary) > 0:
+                return [item.item for item in parsed.summary]
+            return []
+        except Exception as e:
+            logger.warning(f"Failed to parse rapid summary response: {e}, content: {content[:200]}")
+            return []
+
     async def process_rapid_summary(self, text: str, prior_context: str = "") -> List[str]:
         """Process text through rapid summary LLM.
+        
+        If the response is truncated (output_tokens >= max_tokens), retries once
+        with halved prior context. Returns [] on final failure.
         
         Args:
             text: Text to summarize
@@ -140,22 +167,35 @@ class RapidSummaryTask:
             response_format={"type": "json_schema", "json_schema": {"name": "rapid_summary", "schema": self.rapid_summary_response_json_schema}}
         )
         
-        # Log the raw response for debugging
-        #logger.info(f"Rapid summary raw response: {content}")
-        
-        # Parse JSON response using Pydantic
-        try:
-            # Handle markdown code blocks (e.g., ```json ... ```) - same as context_summary
-            json_content = content.replace("```json", "").replace("```", "").strip()
+        # Detect truncation: output_tokens hitting max_tokens means the response was cut off
+        if output_tokens >= self.max_tokens:
+            logger.warning(
+                f"Rapid summary truncated (output_tokens={output_tokens} hit max_tokens={self.max_tokens}), "
+                f"retrying with reduced prior context"
+            )
+            # Retry once with halved prior context
+            reduced_prior = prior_context[len(prior_context) // 2:] if prior_context else ""
+            reduced_context_value = reduced_prior if reduced_prior else "(No prior context available)"
+            retry_system_prompt = RAPID_SUMMARY_SYSTEM_PROMPT.replace(
+                "__PRIOR_INSIGHTS_CONTEXT__", reduced_context_value
+            )
             
-            parsed = RapidSummaryResponseSchema.model_validate_json(json_content)
-            if parsed.summary and len(parsed.summary) > 0:
-                # Return all items as a list for the frontend to process
-                return [item.item for item in parsed.summary]
-            return []
-        except Exception as e:
-            logger.warning(f"Failed to parse rapid summary response: {e}, content: {content[:200]}")
-            return content
+            try:
+                reasoning, content, input_tokens, output_tokens, reasoning_tokens = await self._llm_client.create_completion(
+                    system_prompt=retry_system_prompt,
+                    user_content=user_content,
+                    temperature=self.temperature,
+                    max_tokens=self.max_tokens,
+                    response_format={"type": "json_schema", "json_schema": {"name": "rapid_summary", "schema": self.rapid_summary_response_json_schema}}
+                )
+                if output_tokens >= self.max_tokens:
+                    logger.warning("Rapid summary retry also truncated, returning empty result")
+                    return []
+            except Exception as e:
+                logger.warning(f"Rapid summary retry failed: {e}")
+                return []
+        
+        return self._parse_rapid_summary_content(content)
     
     async def build_rapid_summary_payload(
         self,
@@ -202,8 +242,11 @@ class RapidSummaryTask:
             # Call rapid summary LLM with prior context - returns a list of items
             scribe_notes_list = await self.process_rapid_summary(full_context, prior_context)
         
-        # Ensure we have a list (handle empty case)
-        if not scribe_notes_list:
+        # Ensure we have a list of strings (defence against returning raw string on error)
+        if not isinstance(scribe_notes_list, list):
+            logger.warning(f"process_rapid_summary returned {type(scribe_notes_list).__name__} instead of list, coercing to empty")
+            scribe_notes_list = []
+        elif not scribe_notes_list:
             scribe_notes_list = []
         
         # Store result in plugin results if summary_window provided

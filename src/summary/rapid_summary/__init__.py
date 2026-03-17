@@ -148,7 +148,10 @@ class RapidSummaryPlugin:
 
             # Notify other plugins that a fast summary is available
             if self._summary_client:
-                summary_items = [item.get("item", "") for item in result.get("summary", []) if item.get("item")]
+                summary_items = [
+                    item.get("item", "") for item in result.get("summary", [])
+                    if item.get("item") and len(item.get("item", "")) > 1
+                ]
                 await self._summary_client._notify_plugins(
                     "fast_summary_available",
                     summary_window_id=summary_window_id,
