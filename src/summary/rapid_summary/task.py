@@ -42,7 +42,7 @@ class RapidSummaryTask:
         self,
         llm_client: LLMClient,
         rapid_summary_response_json_schema: Dict[str, Any] = None,
-        max_tokens: int = 1024,
+        max_tokens: int = 4096,
         temperature: float = 0.7,
         window_manager: Any = None,
     ):
@@ -51,7 +51,7 @@ class RapidSummaryTask:
         Args:
             llm_client: LLMClient for rapid summary LLM calls (includes model and message building)
             rapid_summary_response_json_schema: JSON schema for response validation
-            max_tokens: Maximum tokens to generate (default: 1024)
+            max_tokens: Maximum tokens to generate (default: 4096)
             temperature: Temperature for generation (default: 0.7)
             window_manager: Window manager for accessing prior plugin results
         """
