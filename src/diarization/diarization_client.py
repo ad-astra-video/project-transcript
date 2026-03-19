@@ -13,6 +13,7 @@ Features:
 
 import asyncio
 import logging
+import logging.handlers
 import multiprocessing
 import torch
 import threading
@@ -1552,7 +1553,7 @@ class SpeakerMemory:
         return results
 
 
-def diarization_worker(hf_token: str, device: str, request_queue, result_queue):
+def diarization_worker(hf_token: str, device: str, request_queue, result_queue, log_queue=None):
     """
     Worker function for diarization process.
     
@@ -1561,7 +1562,25 @@ def diarization_worker(hf_token: str, device: str, request_queue, result_queue):
         device: Device for pyannote pipeline ("cuda" or "cpu")
         request_queue: Multiprocessing queue for receiving requests
         result_queue: Multiprocessing queue for sending results
+        log_queue: Optional multiprocessing queue for routing log records back
+            to the main process via QueueListener. When provided all log records
+            are forwarded there instead of writing to the worker's own stderr.
+            Falls back to basicConfig (INFO→stderr) if None.
     """
+    # Re-configure logging in the spawned process.  Under 'spawn' the child
+    # starts a fresh interpreter and inherits no handlers from the parent.
+    root = logging.getLogger()
+    root.setLevel(logging.DEBUG)
+    if log_queue is not None:
+        # Route all records back to the main process via the shared queue.
+        queue_handler = logging.handlers.QueueHandler(log_queue)
+        root.addHandler(queue_handler)
+    else:
+        # Fallback: write directly to stderr so at least WARNING+ is visible.
+        logging.basicConfig(
+            level=logging.INFO,
+            format='%(asctime)s - %(levelname)s - %(name)s - %(message)s'
+        )
     logger.info("Diarization worker starting")
     logger.info(f"Worker received device argument: '{device}'")
 
@@ -1982,6 +2001,8 @@ class DiarizationClient:
         self._process: Optional[multiprocessing.Process] = None
         self._request_queue: Optional[multiprocessing.Queue] = None
         self._result_queue: Optional[multiprocessing.Queue] = None
+        self._log_queue: Optional[multiprocessing.Queue] = None
+        self._log_listener: Optional[logging.handlers.QueueListener] = None
         self._running = False
         
         # In-flight tracking for graceful shutdown
@@ -2009,12 +2030,23 @@ class DiarizationClient:
             # Create queues
             self._request_queue = _ctx.Queue()
             self._result_queue = _ctx.Queue()
+            self._log_queue = _ctx.Queue()
+
+            # Bridge worker logs back to the main process.
+            # Grab the handlers that are currently attached to the root logger
+            # (set up by main.py's basicConfig) and forward all records from
+            # the worker's log_queue through them.
+            root_handlers = logging.getLogger().handlers or [logging.StreamHandler()]
+            self._log_listener = logging.handlers.QueueListener(
+                self._log_queue, *root_handlers, respect_handler_level=True
+            )
+            self._log_listener.start()
 
             # Start process
             logger.info("Starting diarization worker process (spawn context)")
             self._process = _ctx.Process(
                 target=diarization_worker,
-                args=(self.hf_token, self.device, self._request_queue, self._result_queue),
+                args=(self.hf_token, self.device, self._request_queue, self._result_queue, self._log_queue),
                 daemon=True
             )
             self._process.start()
@@ -2181,6 +2213,13 @@ class DiarizationClient:
             self._process = None
             self._request_queue = None
             self._result_queue = None
+
+            # Stop the log listener after the worker has exited so all
+            # in-flight log records are flushed before we tear it down.
+            if self._log_listener is not None:
+                self._log_listener.stop()
+                self._log_listener = None
+            self._log_queue = None
             logger.info("Diarization process stopped")
     
     def reset_process(self):
