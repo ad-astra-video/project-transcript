@@ -688,6 +688,7 @@ class SummaryClient:
                     continue
                 
                 # Process through client - it handles all buffering, merging, and payload building
+                result_payload = None  # Initialize to handle timeout path
                 try:
                     # Add window to in-flight tracking
                     self.add_in_flight_window(transcription_window_id)
@@ -728,7 +729,7 @@ class SummaryClient:
                                 "window_end_ms": window_end_ts * 1000
                             },
                             "process_transcription_request_stats"
-                        )                       
+                        )
                 except asyncio.TimeoutError:
                     logger.warning(
                         f"Summarization timed out for window {transcription_window_id} "
@@ -737,8 +738,8 @@ class SummaryClient:
                     if self._send_monitoring_event_callback is not None:
                         await self._send_monitoring_event_callback(
                             {
-                                "transcription_window_id": result_payload.get("transcription_window_id", ""),
-                                "summary_window_id": result_payload.get("summary_window_id", ""),
+                                "transcription_window_id": result_payload.get("transcription_window_id", "") if result_payload else transcription_window_id,
+                                "summary_window_id": result_payload.get("summary_window_id", "") if result_payload else "",
                                 "window_start_ms": window_start_ts * 1000,
                                 "window_end_ms": window_end_ts * 1000
                             },
